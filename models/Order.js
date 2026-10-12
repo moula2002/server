@@ -181,6 +181,18 @@ const orderSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  route1: {
+    type: String,
+    default: null
+  },
+  route2: {
+    type: String,
+    default: null
+  },
+  route3: {
+    type: String,
+    default: null
+  },
   createdAt: {
     type: Date,
     default: Date.now

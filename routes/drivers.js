@@ -78,15 +78,10 @@ router.post('/location', protect, async (req, res) => {
     const DriverModel = getModelSafe('Driver', req, Driver);
     const OrderModel = getModelSafe('Order', req, Order);
     
-    // Both should be enabled only when an order is picked up / out for delivery
     const activeOrder = await OrderModel.findOne({
       driverId: req.user._id,
       orderStatus: { $in: ['Picked Up', 'Out for Delivery'] }
     });
-    
-    if (!activeOrder) {
-      return res.status(403).json({ message: 'Location sharing disabled: no active picked-up orders.' });
-    }
 
     const driver = await DriverModel.findByIdAndUpdate(
       req.user._id,
@@ -100,7 +95,12 @@ router.post('/location', protect, async (req, res) => {
       { returnDocument: 'after' }
     );
     
-    res.json({ message: 'Location updated successfully', currentLocation: driver.currentLocation });
+    res.json({ 
+      message: 'Location updated successfully', 
+      currentLocation: driver.currentLocation,
+      activeTrip: Boolean(activeOrder),
+      orderId: activeOrder?._id || null
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -198,15 +198,10 @@ router.get('/:id/location', protect, async (req, res) => {
     const DriverModel = getModelSafe('Driver', req, Driver);
     const OrderModel = getModelSafe('Order', req, Order);
 
-    // Both should be enabled only when an order is picked up / out for delivery
     const activeOrder = await OrderModel.findOne({
       driverId: req.params.id,
       orderStatus: { $in: ['Picked Up', 'Out for Delivery'] }
     });
-
-    if (!activeOrder) {
-      return res.json({ active: false, message: 'Location tracking disabled: driver has no active picked-up orders.' });
-    }
 
     const driver = await DriverModel.findById(req.params.id);
     if (!driver) return res.status(404).json({ message: 'Driver not found' });
@@ -215,7 +210,13 @@ router.get('/:id/location', protect, async (req, res) => {
       return res.status(404).json({ message: 'Driver location not available' });
     }
 
-    res.json(driver.currentLocation);
+    res.json({
+      lat: driver.currentLocation.lat,
+      lng: driver.currentLocation.lng,
+      updatedAt: driver.currentLocation.updatedAt,
+      activeTrip: Boolean(activeOrder),
+      orderId: activeOrder?._id || null
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

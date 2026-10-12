@@ -626,14 +626,14 @@ router.get('/admin/all', protect, async (req, res) => {
 
     if (!req.locationId) {
       const { aggregateGET } = require('../utils/aggregator');
-      const orders = await aggregateGET('Order', req, orderFilter, ['userId', 'driverId', 'cashPersonId', 'items.productId', 'items.seller.sellerId'], '', { createdAt: -1 });
+      const orders = await aggregateGET('Order', req, orderFilter, ['userId', 'driverId', 'returnDriverId', 'cashPersonId', 'items.productId', 'items.seller.sellerId'], '', { createdAt: -1 });
       res.json(orders);
     } else {
       const { Order: OrderModel } = getModels(req);
       const orders = await OrderModel.find(orderFilter)
         .populate('userId', 'name email role bankDetails phone')
-        .populate('driverId', 'name phone')
-        .populate('returnDriverId', 'name phone')
+        .populate('driverId', 'name phone vehicleNo vehicleDetails')
+        .populate('returnDriverId', 'name phone vehicleNo vehicleDetails')
         .populate('cashPersonId', 'name phone')
         .populate('items.productId').populate('items.seller.sellerId', 'name qrCodeDoc qrOption companyName')
         .sort({ createdAt: -1 });
@@ -671,7 +671,7 @@ router.get('/assigned-cash', protect, async (req, res) => {
     const { Order: OrderModel } = getModels(req);
     const orders = await OrderModel.find({ cashPersonId: req.user._id })
       .populate('userId', 'name email phone')
-      .populate('driverId', 'name phone')
+      .populate('driverId', 'name phone vehicleNo vehicleDetails')
       .sort({ createdAt: -1 });
     res.json(orders);
   } catch (error) {
@@ -696,8 +696,8 @@ router.get('/driver/assigned', protect, async (req, res) => {
         }
       ]
     })
-      .populate('driverId', 'name phone')
-      .populate('returnDriverId', 'name phone')
+      .populate('driverId', 'name phone vehicleNo vehicleDetails')
+      .populate('returnDriverId', 'name phone vehicleNo vehicleDetails')
       .populate('cashPersonId', 'name phone')
       .sort({ createdAt: -1 });
 
@@ -842,7 +842,7 @@ router.put('/:id/assign-cash', protect, async (req, res) => {
 
     const populatedOrder = await OrderModel.findById(order._id)
       .populate('userId', 'name email role')
-      .populate('driverId', 'name phone')
+      .populate('driverId', 'name phone vehicleNo vehicleDetails')
       .populate('cashPersonId', 'name phone');
 
     res.json(populatedOrder);
@@ -1357,7 +1357,7 @@ router.post('/admin/create', protect, async (req, res) => {
     // Populate populated order
     const populated = await OrderModel.findById(createdOrder._id)
       .populate('userId', 'name email role')
-      .populate('driverId', 'name phone')
+      .populate('driverId', 'name phone vehicleNo vehicleDetails')
       .populate('cashPersonId', 'name phone');
 
     res.status(201).json(populated);
@@ -1453,7 +1453,7 @@ router.put('/admin/:id/items', protect, async (req, res) => {
 
     const populated = await OrderModel.findById(order._id)
       .populate('userId', 'name email role')
-      .populate('driverId', 'name phone')
+      .populate('driverId', 'name phone vehicleNo vehicleDetails')
       .populate('cashPersonId', 'name phone');
 
     res.json(populated);
@@ -1621,7 +1621,7 @@ router.put('/:id/assign-return-driver', protect, async (req, res) => {
 
     const populated = await OrderModel.findById(order._id)
       .populate('userId', 'name email phone')
-      .populate('returnDriverId', 'name phone');
+      .populate('returnDriverId', 'name phone vehicleNo vehicleDetails');
 
     res.json(populated);
   } catch (error) {
@@ -1729,6 +1729,26 @@ router.put('/:id/qrcode', protect, async (req, res) => {
     
     const updatedOrder = await order.save();
     res.json(updatedOrder);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   PUT /api/orders/:id/routes
+// @desc    Update order route assignments (Route 1, Route 2, Route 3)
+router.put('/:id/routes', protect, async (req, res) => {
+  try {
+    const { route1, route2, route3 } = req.body;
+    const { Order: OrderModel } = getModels(req);
+    const order = await OrderModel.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    if (route1 !== undefined) order.route1 = route1;
+    if (route2 !== undefined) order.route2 = route2;
+    if (route3 !== undefined) order.route3 = route3;
+
+    await order.save();
+    res.json({ message: 'Order routes updated successfully', order });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

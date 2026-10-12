@@ -22,6 +22,9 @@ const driverSchema = new mongoose.Schema({
   tokenVersion: { type: Number, default: 0 },
   cashManagement: { type: Boolean, default: false },
   currentSessionToken: { type: String, default: null },
+  route1: { type: String, default: null },
+  route2: { type: String, default: null },
+  route3: { type: String, default: null },
   documents: [{
     name: { type: String, required: true },
     url: { type: String, required: true },
