@@ -631,11 +631,11 @@ router.get('/admin/all', protect, async (req, res) => {
     } else {
       const { Order: OrderModel } = getModels(req);
       const orders = await OrderModel.find(orderFilter)
-        .populate('userId', 'name email role bankDetails phone')
+        .populate('userId', 'name email role bankDetails phone businessName companyName')
         .populate('driverId', 'name phone vehicleNo vehicleDetails')
         .populate('returnDriverId', 'name phone vehicleNo vehicleDetails')
         .populate('cashPersonId', 'name phone')
-        .populate('items.productId').populate('items.seller.sellerId', 'name qrCodeDoc qrOption companyName')
+        .populate('items.productId').populate('items.seller.sellerId', 'name businessName storeName companyName qrCodeDoc qrOption')
         .sort({ createdAt: -1 });
       res.json(orders);
     }
@@ -670,7 +670,7 @@ router.get('/assigned-cash', protect, async (req, res) => {
   try {
     const { Order: OrderModel } = getModels(req);
     const orders = await OrderModel.find({ cashPersonId: req.user._id })
-      .populate('userId', 'name email phone')
+      .populate('userId', 'name email phone businessName companyName')
       .populate('driverId', 'name phone vehicleNo vehicleDetails')
       .sort({ createdAt: -1 });
     res.json(orders);
@@ -841,7 +841,7 @@ router.put('/:id/assign-cash', protect, async (req, res) => {
     await order.save();
 
     const populatedOrder = await OrderModel.findById(order._id)
-      .populate('userId', 'name email role')
+      .populate('userId', 'name email role businessName companyName')
       .populate('driverId', 'name phone vehicleNo vehicleDetails')
       .populate('cashPersonId', 'name phone');
 
@@ -895,7 +895,7 @@ router.all('/:id/status', protect, async (req, res) => {
       return res.status(400).json({ message: 'Status is required' });
     }
     console.log(`[PUT /:id/status] Processing update for ID: ${req.params.id}`);
-    const order = await OrderModel.findById(req.params.id).populate('userId', 'name email role');
+    const order = await OrderModel.findById(req.params.id).populate('userId', 'name email role businessName companyName');
     console.log(`[PUT /:id/status] Order found: ${!!order}`);
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
@@ -1356,7 +1356,7 @@ router.post('/admin/create', protect, async (req, res) => {
 
     // Populate populated order
     const populated = await OrderModel.findById(createdOrder._id)
-      .populate('userId', 'name email role')
+      .populate('userId', 'name email role businessName companyName')
       .populate('driverId', 'name phone vehicleNo vehicleDetails')
       .populate('cashPersonId', 'name phone');
 
@@ -1452,7 +1452,7 @@ router.put('/admin/:id/items', protect, async (req, res) => {
     await order.save();
 
     const populated = await OrderModel.findById(order._id)
-      .populate('userId', 'name email role')
+      .populate('userId', 'name email role businessName companyName')
       .populate('driverId', 'name phone vehicleNo vehicleDetails')
       .populate('cashPersonId', 'name phone');
 
@@ -1620,7 +1620,7 @@ router.put('/:id/assign-return-driver', protect, async (req, res) => {
     await order.save();
 
     const populated = await OrderModel.findById(order._id)
-      .populate('userId', 'name email phone')
+      .populate('userId', 'name email phone businessName companyName')
       .populate('returnDriverId', 'name phone vehicleNo vehicleDetails');
 
     res.json(populated);
