@@ -4,8 +4,13 @@ const productSchema = new mongoose.Schema({
   name: { type: String, required: true },
   categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true },
   subCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'SubCategory' }, // Optional as requested
-  price: { type: Number },
-  b2bPrice: { type: Number },
+  price: { type: Number }, // Final customer selling price (B2C)
+  b2bPrice: { type: Number }, // Final customer selling price (B2B)
+  sellerPrice: { type: Number }, // Base seller selling price (B2C)
+  sellerB2bPrice: { type: Number }, // Base seller selling price (B2B)
+  commissionType: { type: String, enum: ['percentage', 'flat'], default: 'flat' },
+  commissionValue: { type: Number, default: 0 },
+  commissionAmount: { type: Number, default: 0 }, // Evaluated commission per unit
   gstPercent: { type: Number, default: 0 },
   moq: { type: Number, default: 1 },
   unit: { type: String, required: true },
@@ -19,18 +24,21 @@ const productSchema = new mongoose.Schema({
   variants: [{
     sizeName: { type: String, required: true }, // e.g. "1kg", "500g"
     price: { type: Number, required: true },
+    sellerPrice: { type: Number },
     b2bPrice: { type: Number, required: true },
     stock: { type: Number, default: 0 },
     gstPercent: { type: Number, default: 0 },
     priceTiers: [{
       minQty: { type: Number, required: true },
-      price: { type: Number, required: true }
+      price: { type: Number, required: true },
+      sellerPrice: { type: Number }
     }]
   }],
   b2c: [{
     packetSize: { type: String },
     mrp: { type: Number },
     price: { type: Number },
+    sellerPrice: { type: Number },
     stock: { type: Number, default: 0 },
     gstPercent: { type: Number, default: 0 }
   }],
@@ -38,16 +46,19 @@ const productSchema = new mongoose.Schema({
     packetSize: { type: String },
     mrp: { type: Number },
     price: { type: Number },
+    sellerPrice: { type: Number },
     stock: { type: Number, default: 0 },
     gstPercent: { type: Number, default: 0 },
     priceTiers: [{
       minQty: { type: Number, required: true },
-      price: { type: Number, required: true }
+      price: { type: Number, required: true },
+      sellerPrice: { type: Number }
     }]
   }],
   priceTiers: [{
     minQty: { type: Number, required: true },
-    price: { type: Number, required: true }
+    price: { type: Number, required: true },
+    sellerPrice: { type: Number }
   }]
 }, { timestamps: true });
 

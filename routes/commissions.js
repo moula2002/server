@@ -25,6 +25,20 @@ router.get('/', protect, async (req, res) => {
   }
 });
 
+
+// @route   GET /api/commissions/category/:categoryId
+// @desc    Get commissions for a specific category
+router.get('/category/:categoryId', protect, async (req, res) => {
+  try {
+    const { categoryId } = req.params;
+    const { Commission } = getModels(req);
+    const comms = await Commission.find({ categoryId });
+    res.json(comms);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // @route   PUT /api/commissions/category/:categoryId
 // @desc    Bulk save commissions for a category
 router.put('/category/:categoryId', protect, async (req, res) => {

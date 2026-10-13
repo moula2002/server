@@ -9,7 +9,8 @@ const Product = require('../models/Product');
 const Seller = require('../models/Seller');
 const Driver = require('../models/Driver');
 const CashCollector = require('../models/CashCollector');
-const { loadCommissions, applyCommission } = require('./products');
+const { loadCommissions } = require('./products');
+const { applyCommission } = require('../utils/pricing');
 
 // Helper to get models from req with fallback to global imports
 const getModels = (req) => {
@@ -428,7 +429,9 @@ router.post('/', protect, async (req, res) => {
         }
 
         // Calculate price based on target user role and quantity tiers
-        rawPrice = targetUserRole === 'b2b' ? (rawBasePriceObj.b2bPrice || rawBasePriceObj.price) : rawBasePriceObj.price;
+        rawPrice = targetUserRole === 'b2b'
+          ? (rawBasePriceObj.sellerB2bPrice !== undefined && rawBasePriceObj.sellerB2bPrice !== null ? rawBasePriceObj.sellerB2bPrice : (rawBasePriceObj.b2bPrice || rawBasePriceObj.sellerPrice || rawBasePriceObj.price))
+          : (rawBasePriceObj.sellerPrice !== undefined && rawBasePriceObj.sellerPrice !== null ? rawBasePriceObj.sellerPrice : rawBasePriceObj.price);
 
         if (targetUserRole === 'b2b') {
           let price = basePriceObj.b2bPrice || basePriceObj.price;
@@ -441,7 +444,7 @@ router.post('/', protect, async (req, res) => {
               if (rawBasePriceObj.priceTiers && rawBasePriceObj.priceTiers.length > 0) {
                 const rawApplicableTier = rawBasePriceObj.priceTiers.find(t => t.minQty === applicableTier.minQty);
                 if (rawApplicableTier) {
-                  rawPrice = rawApplicableTier.price;
+                  rawPrice = rawApplicableTier.sellerPrice !== undefined ? rawApplicableTier.sellerPrice : rawApplicableTier.price;
                 }
               }
             }

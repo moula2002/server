@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const mongoose = require('mongoose');
 const { protect } = require('../middleware/auth');
+const { processProductPricing, applyCommission, calculateCustomerPrice, findCategoryCommission } = require('../utils/pricing');
 
 // Helper to get models from req
 const { getModel } = require('../utils/model_loader');
@@ -30,7 +31,7 @@ async function loadCommissions(req) {
   }
 }
 
-// Helper: Check commissions and generate logs (removed bulkWrite to avoid infinite inflation)
+// Helper: Re-calculate all products with current commission rules
 async function applyCommissionToAllProducts(req) {
   const commissions = await loadCommissions(req);
   if (!commissions || commissions.length === 0) return { updatedCount: 0, logs: [] };
@@ -39,76 +40,31 @@ async function applyCommissionToAllProducts(req) {
   const products = await Product.find().lean();
   let updatedCount = 0;
 
-  products.forEach(p => {
+  for (const p of products) {
     const updated = applyCommission(p, commissions);
-    if (updated.price !== p.price || updated.b2bPrice !== p.b2bPrice) {
+    if (updated.price !== p.price || updated.b2bPrice !== p.b2bPrice || updated.sellerPrice !== p.sellerPrice) {
+      await Product.findByIdAndUpdate(p._id, {
+        sellerPrice: updated.sellerPrice,
+        sellerB2bPrice: updated.sellerB2bPrice,
+        commissionType: updated.commissionType,
+        commissionValue: updated.commissionValue,
+        commissionAmount: updated.commissionAmount,
+        price: updated.price,
+        b2bPrice: updated.b2bPrice,
+        b2c: updated.b2c,
+        b2b: updated.b2b,
+        priceTiers: updated.priceTiers
+      });
       updatedCount++;
     }
-  });
-
-  return { updatedCount, logs: [`Checked ${products.length} products. Applied to ${updatedCount}.`] };
-}
-
-// Helper: Apply commission to a single product object (must be plain JS object)
-function applyCommission(product, commissions) {
-  if (!commissions || commissions.length === 0) return product;
-
-  const catId = product.categoryId?._id?.toString() || product.categoryId?.toString();
-
-  const match = commissions.find((c) => {
-    const cCatId = c.categoryId?.toString();
-    
-    // Match Category ID only (commission applies to all products in category, irrespective of unit string)
-    if (cCatId === catId) return true;
-    
-    return false;
-  });
-
-  if (!match) {
-    // console.log(`[Commission] No match for product ${product.name} (Cat: ${catId}, Unit: ${unit})`);
-    return product;
   }
 
-  const getNewPrice = (oldPrice) => {
-    if (typeof oldPrice !== 'number') oldPrice = parseFloat(oldPrice) || 0;
-    if (oldPrice === 0) return 0; // Don't add flat commission to exactly 0 price
-    const commission = match.commissionType === 'flat'
-      ? match.commissionValue
-      : (oldPrice * match.commissionValue) / 100;
-    return parseFloat((oldPrice + commission).toFixed(2));
-  };
-
-  let newB2c = product.b2c ? product.b2c.map(v => ({ ...v, price: getNewPrice(v.price) })) : [];
-  
-  let newB2b = product.b2b ? product.b2b.map(v => {
-    let nV = { ...v, price: getNewPrice(v.price) };
-    if (nV.priceTiers && Array.isArray(nV.priceTiers)) {
-      nV.priceTiers = nV.priceTiers.map(t => ({ ...t, price: getNewPrice(t.price) }));
-    }
-    return nV;
-  }) : [];
-
-  let newPriceTiers = product.priceTiers && Array.isArray(product.priceTiers) 
-    ? product.priceTiers.map(t => ({ ...t, price: getNewPrice(t.price) })) 
-    : [];
-
-  let newPrice = product.price === 0 && newB2c.length > 0 ? newB2c[0].price : getNewPrice(product.price);
-  let newB2bPrice = product.b2bPrice === 0 && newB2b.length > 0 ? newB2b[0].price : getNewPrice(product.b2bPrice);
-
-  return {
-    ...product,
-    price: newPrice,
-    b2bPrice: newB2bPrice,
-    b2c: newB2c,
-    b2b: newB2b,
-    priceTiers: newPriceTiers
-  };
+  return { updatedCount, logs: [`Checked ${products.length} products. Applied to ${updatedCount}.`] };
 }
 
 module.exports.loadCommissions = loadCommissions;
 module.exports.applyCommission = applyCommission;
 
-// Configure Multer for persistent storage
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, '../uploads');

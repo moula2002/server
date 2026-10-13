@@ -220,14 +220,21 @@ router.get('/products', protect, async (req, res) => {
     }).populate('categoryId subCategoryId').lean();
 
     const sellerName = req.user.businessName || req.user.storeName || req.user.name;
-    products = products.map(p => ({
-      ...p,
-      sellerName: p.sellerName && p.sellerName !== 'Zudo Official' ? p.sellerName : sellerName,
-      seller: {
-        _id: req.user._id,
-        name: sellerName
-      }
-    }));
+    const { loadCommissions } = require('./products');
+    const commissions = await loadCommissions(req);
+    const { applyCommission } = require('../utils/pricing');
+
+    products = products.map(p => {
+      const enriched = applyCommission(p, commissions);
+      return {
+        ...enriched,
+        sellerName: p.sellerName && p.sellerName !== 'Zudo Official' ? p.sellerName : sellerName,
+        seller: {
+          _id: req.user._id,
+          name: sellerName
+        }
+      };
+    });
 
     res.json(products);
   } catch (error) {
