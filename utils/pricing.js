@@ -87,13 +87,17 @@ function processProductPricing(payload, commissions = []) {
     commissionType = commissionType === 'percentage' ? 'percentage' : 'flat';
   }
 
-  const sellerPrice = payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null
-    ? parseFloat(payload.sellerPrice) || 0
-    : (parseFloat(payload.price) || 0);
-
   const sellerB2bPrice = payload.sellerB2bPrice !== undefined && payload.sellerB2bPrice !== '' && payload.sellerB2bPrice !== null
     ? parseFloat(payload.sellerB2bPrice) || 0
-    : (parseFloat(payload.b2bPrice) || 0);
+    : (payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null
+        ? parseFloat(payload.sellerPrice) || 0
+        : (parseFloat(payload.b2bPrice) || parseFloat(payload.price) || 0));
+
+  const sellerPrice = payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null
+    ? parseFloat(payload.sellerPrice) || 0
+    : (payload.sellerB2bPrice !== undefined && payload.sellerB2bPrice !== '' && payload.sellerB2bPrice !== null
+        ? parseFloat(payload.sellerB2bPrice) || 0
+        : (parseFloat(payload.price) || parseFloat(payload.b2bPrice) || 0));
 
   const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue);
   const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue);
@@ -157,8 +161,8 @@ function processProductPricing(payload, commissions = []) {
     });
   }
 
-  const finalPrice = (customerPrice === 0 && processedB2c.length > 0) ? processedB2c[0].price : customerPrice;
-  const finalB2bPrice = (customerB2bPrice === 0 && processedB2b.length > 0) ? processedB2b[0].price : customerB2bPrice;
+  const finalB2bPrice = (customerB2bPrice === 0 && processedB2b.length > 0) ? processedB2b[0].price : (customerB2bPrice || customerPrice);
+  const finalPrice = (customerPrice === 0 && processedB2c.length > 0) ? processedB2c[0].price : (customerPrice || customerB2bPrice || finalB2bPrice);
 
   return {
     ...payload,
@@ -189,13 +193,17 @@ function applyCommission(product, commissions = []) {
     ? product.commissionValue
     : (adminRule ? adminRule.commissionValue : 0);
 
-  const sellerPrice = product.sellerPrice !== undefined && product.sellerPrice !== null
-    ? product.sellerPrice
-    : (product.price || 0);
-
   const sellerB2bPrice = product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null
     ? product.sellerB2bPrice
-    : (product.b2bPrice || 0);
+    : (product.sellerPrice !== undefined && product.sellerPrice !== null
+        ? product.sellerPrice
+        : (product.b2bPrice || product.price || 0));
+
+  const sellerPrice = product.sellerPrice !== undefined && product.sellerPrice !== null
+    ? product.sellerPrice
+    : (product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null
+        ? product.sellerB2bPrice
+        : (product.price || product.b2bPrice || 0));
 
   const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue);
   const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue);
@@ -248,8 +256,8 @@ function applyCommission(product, commissions = []) {
     });
   }
 
-  const finalCustomerPrice = (customerPrice === 0 && newB2c.length > 0) ? newB2c[0].price : customerPrice;
-  const finalCustomerB2bPrice = (customerB2bPrice === 0 && newB2b.length > 0) ? newB2b[0].price : customerB2bPrice;
+  const finalCustomerB2bPrice = (customerB2bPrice === 0 && newB2b.length > 0) ? newB2b[0].price : (customerB2bPrice || customerPrice);
+  const finalCustomerPrice = (customerPrice === 0 && newB2c.length > 0) ? newB2c[0].price : (customerPrice || customerB2bPrice || finalCustomerB2bPrice);
 
   return {
     ...product,

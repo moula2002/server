@@ -232,26 +232,48 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       if (seller) finalSellerName = seller.businessName || seller.storeName || seller.name;
     }
 
+    const comms = await loadCommissions(req);
+    const pricingPayload = processProductPricing({
+      categoryId,
+      unit,
+      sellerPrice: req.body.sellerPrice || req.body.sellerB2bPrice || price,
+      sellerB2bPrice: req.body.sellerB2bPrice || req.body.sellerPrice || b2bPrice || price,
+      price,
+      b2bPrice,
+      commissionType: req.body.commissionType,
+      commissionValue: req.body.commissionValue,
+      commissionAmount: req.body.commissionAmount,
+      b2c: parsedB2c,
+      b2b: parsedB2b,
+      priceTiers: parsedPriceTiers
+    }, comms);
+
     const product = await Product.create({
       name,
       categoryId,
       subCategoryId: subCategoryId || null,
-      price,
-      b2bPrice,
+      price: pricingPayload.price,
+      b2bPrice: pricingPayload.b2bPrice,
+      sellerPrice: pricingPayload.sellerPrice,
+      sellerB2bPrice: pricingPayload.sellerB2bPrice,
+      commissionType: pricingPayload.commissionType,
+      commissionValue: pricingPayload.commissionValue,
+      commissionAmount: pricingPayload.commissionAmount,
       gstPercent: gstPercent || 0,
       moq,
       unit,
-      sellerId, // Save sellerId
-      sellerName: finalSellerName, // Save sellerName
-      stock: stock || 0, // Save stock
+      sellerId,
+      sellerName: finalSellerName,
+      stock: stock || 0,
+      sku: req.body.sku || '',
       description,
       imageUrl,
       pdfUrl,
       rating: 0,
       variants: [],
-      priceTiers: parsedPriceTiers,
-      b2b: parsedB2b,
-      b2c: parsedB2c
+      priceTiers: pricingPayload.priceTiers,
+      b2b: pricingPayload.b2b,
+      b2c: pricingPayload.b2c
     });
 
     res.status(201).json(product);
@@ -464,7 +486,9 @@ router.get('/:id', async (req, res) => {
 router.put('/:id', protect, async (req, res) => {
   try {
     const { Product } = getModels(req);
-    const product = await Product.findByIdAndUpdate(req.params.id, req.body, { returnDocument: 'after' });
+    const comms = await loadCommissions(req);
+    const updatedPayload = processProductPricing(req.body, comms);
+    const product = await Product.findByIdAndUpdate(req.params.id, updatedPayload, { returnDocument: 'after' });
     if (!product) return res.status(404).json({ message: 'Product not found' });
     res.json(product);
   } catch (error) {
