@@ -71,7 +71,14 @@ async function applyCommissionToAllProducts(req) {
 
   for (const p of products) {
     const updated = applyCommission(p, commissions);
-    if (updated.price !== p.price || updated.b2bPrice !== p.b2bPrice || updated.sellerPrice !== p.sellerPrice) {
+    if (
+      updated.price !== p.price ||
+      updated.b2bPrice !== p.b2bPrice ||
+      updated.sellerPrice !== p.sellerPrice ||
+      updated.commissionValue !== p.commissionValue ||
+      updated.commissionType !== p.commissionType ||
+      updated.commissionAmount !== p.commissionAmount
+    ) {
       await Product.findByIdAndUpdate(p._id, {
         sellerPrice: updated.sellerPrice,
         sellerB2bPrice: updated.sellerB2bPrice,
@@ -93,6 +100,7 @@ async function applyCommissionToAllProducts(req) {
 
 module.exports.loadCommissions = loadCommissions;
 module.exports.applyCommission = applyCommission;
+module.exports.applyCommissionToAllProducts = applyCommissionToAllProducts;
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -141,7 +149,7 @@ router.get('/', async (req, res) => {
       // Global Access - Aggregate from all active tenant databases!
       const { aggregateGET } = require('../utils/aggregator');
       const products = await aggregateGET('Product', req, filter, ['categoryId', 'subCategoryId']);
-      
+
       productsWithSeller = await Promise.all(products.map(async (p) => {
         let enriched = { ...p, sellerName: 'Zudo Official' };
         if (p.sellerId) {
@@ -437,7 +445,7 @@ router.post('/bulk-upload', protect, excelUpload.single('file'), async (req, res
             }
           });
         }
-        
+
         if (item.Description && !product.description) product.description = item.Description;
         if (item.PdfUrl && !product.pdfUrl) product.pdfUrl = item.PdfUrl;
         if (determinedSellerId && !product.sellerId) product.sellerId = determinedSellerId;
@@ -559,27 +567,28 @@ router.delete('/:id', protect, async (req, res) => {
   }
 });
 
-  // @route   POST /api/products/apply-commissions
-  // @desc    Re‑calculate product prices using current commission settings
-  router.post('/apply-commissions', protect, async (req, res) => {
-    try {
-      const result = await applyCommissionToAllProducts(req);
-      res.json({ message: 'Commission applied', ...result });
-    } catch (e) {
-      res.status(500).json({ message: e.message });
-    }
-  });
+// @route   POST /api/products/apply-commissions
+// @desc    Re‑calculate product prices using current commission settings
+router.post('/apply-commissions', protect, async (req, res) => {
+  try {
+    const result = await applyCommissionToAllProducts(req);
+    res.json({ message: 'Commission applied', ...result });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
 
-  // Optional initialization route that just triggers commission application
-  router.get('/initialize', protect, async (req, res) => {
-    try {
-      const result = await applyCommissionToAllProducts(req);
-      res.json({ message: 'Initialization complete', ...result });
-    } catch (e) {
-      res.status(500).json({ message: e.message });
-    }
-  });
+// Optional initialization route that just triggers commission application
+router.get('/initialize', protect, async (req, res) => {
+  try {
+    const result = await applyCommissionToAllProducts(req);
+    res.json({ message: 'Initialization complete', ...result });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
 
 router.loadCommissions = loadCommissions;
 router.applyCommission = applyCommission;
+router.applyCommissionToAllProducts = applyCommissionToAllProducts;
 module.exports = router;

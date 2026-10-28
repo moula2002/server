@@ -94,6 +94,10 @@ router.put('/category/:categoryId', protect, async (req, res) => {
           console.error(`Failed to update commissions for ${loc.city}:`, err.message);
         }
       }
+      try {
+        const { applyCommissionToAllProducts } = require('./products');
+        await applyCommissionToAllProducts(req);
+      } catch (err) {}
       return res.json({ message: 'Commissions updated successfully across all branches.' });
     } else {
       const { Commission } = getModels(req);
@@ -106,6 +110,10 @@ router.put('/category/:categoryId', protect, async (req, res) => {
         await Commission.insertMany(rulesToInsert);
       }
 
+      try {
+        const { applyCommissionToAllProducts } = require('./products');
+        await applyCommissionToAllProducts(req);
+      } catch (err) {}
       const updated = await Commission.find({ categoryId });
       res.json(updated);
     }

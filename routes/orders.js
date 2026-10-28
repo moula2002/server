@@ -10,7 +10,7 @@ const Seller = require('../models/Seller');
 const Driver = require('../models/Driver');
 const CashCollector = require('../models/CashCollector');
 const { loadCommissions } = require('./products');
-const { applyCommission, calculatePricingBreakdown } = require('../utils/pricing');
+const { applyCommission, calculatePricingBreakdown, findCategoryCommission, round2 } = require('../utils/pricing');
 
 // Helper to get models from req with fallback to global imports
 const getModels = (req) => {
@@ -338,6 +338,28 @@ router.post('/', protect, async (req, res) => {
       salesAssociateId = req.user._id;
     }
 
+    // Early deduplication check: prevent accidental double-submission within 5 seconds
+    const recentDuplicate = await OrderModel.findOne({
+      userId: targetUserId,
+      orderStatus: 'Pending',
+      createdAt: { $gte: new Date(Date.now() - 5000) }
+    }).sort({ createdAt: -1 });
+
+    if (recentDuplicate && recentDuplicate.items.length === items.length) {
+      const isExactMatch = items.every(it => {
+        const pId = (it.product || it.id || it._id)?.toString();
+        const vSize = it.variantSize || it.selectedPacketSize;
+        return recentDuplicate.items.some(di =>
+          di.productId?.toString() === pId &&
+          Number(di.quantity) === Number(it.quantity) &&
+          (!vSize || di.variantSize === vSize)
+        );
+      });
+      if (isExactMatch) {
+        return res.status(200).json(recentDuplicate);
+      }
+    }
+
     // Validate stock and quantity for all items first
     for (const item of items) {
       const pId = item.product || item.id || item._id;
@@ -385,25 +407,29 @@ router.post('/', protect, async (req, res) => {
       let gstAmount = 0;
       let sellerInfo = null;
 
+      let targetSize = item.variantSize || item.selectedPacketSize || null;
+      let basePriceObj = null;
+      let rawBasePriceObj = null;
+      let enrichedProduct = null;
+
       const productData = await ProductModel.findById(pId);
       if (productData) {
         gstPercent = productData.gstPercent || 0;
         // Apply commission price inflation dynamically
         const pDataObj = productData.toObject();
-        const enrichedProduct = applyCommission(pDataObj, commissions);
+        enrichedProduct = applyCommission(pDataObj, commissions, shippingAddress?.pincode);
 
         name = name || enrichedProduct.name;
         image = image || enrichedProduct.imageUrl || enrichedProduct.image;
 
-        let basePriceObj = enrichedProduct;
-        let rawBasePriceObj = pDataObj;
+        basePriceObj = enrichedProduct;
+        rawBasePriceObj = pDataObj;
         const variantArray = targetUserRole === 'b2b' ? (enrichedProduct.b2b || []) : (enrichedProduct.b2c || []);
         const rawVariantArray = targetUserRole === 'b2b' ? (pDataObj.b2b || []) : (pDataObj.b2c || []);
 
-        const targetSize = item.variantSize || item.selectedPacketSize;
         if (targetSize && variantArray.length > 0) {
           const variant = variantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
-          const rawVariant = rawVariantArray.find(v => (v.packetSize || v.sizeName) === item.variantSize);
+          const rawVariant = rawVariantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
           if (variant) {
             basePriceObj = variant;
             if (rawVariant) rawBasePriceObj = rawVariant;
@@ -415,7 +441,7 @@ router.post('/', protect, async (req, res) => {
         } else if (targetSize && enrichedProduct.variants && enrichedProduct.variants.length > 0) {
           // Fallback to old variants array just in case
           const variant = enrichedProduct.variants.find(v => v.sizeName === targetSize);
-          const rawVariant = (pDataObj.variants || []).find(v => v.sizeName === item.variantSize);
+          const rawVariant = (pDataObj.variants || []).find(v => v.sizeName === targetSize);
           if (variant) {
             basePriceObj = variant;
             if (rawVariant) rawBasePriceObj = rawVariant;
@@ -473,13 +499,14 @@ router.post('/', protect, async (req, res) => {
         }
       }
 
-      const commType = basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
-      const commVal = Number(basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
+      const commRule = productData ? findCategoryCommission(commissions, productData.categoryId, productData.unit, shippingAddress?.pincode) : null;
+      const commType = commRule?.commissionType || basePriceObj?.commissionType || enrichedProduct?.commissionType || 'flat';
+      const commVal = commRule ? commRule.commissionValue : (basePriceObj?.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
       const breakdown = calculatePricingBreakdown({
         sellerUnitPrice: Number(rawPrice) || 0,
         commissionType: commType,
-        commissionValue: commVal,
+        commissionValue: Number(commVal) || 0,
         gstPercent: gstPercent,
         quantity: item.quantity,
         isB2B: targetUserRole === 'b2b'
@@ -503,6 +530,7 @@ router.post('/', protect, async (req, res) => {
         totalCommission: breakdown.totalCommission,
         gstPercent: breakdown.gstPercent,
         gstAmount: breakdown.unitGst,
+        totalGst: breakdown.totalGst,
         image: image,
         seller: sellerInfo,
         product: {
@@ -574,14 +602,19 @@ router.post('/', protect, async (req, res) => {
       }
     }
 
+    const calculatedTotalRounded = round2(calculatedTotal);
+    const calculatedTotalWithoutCommissionsRounded = round2(calculatedTotalWithoutCommissions);
+    const totalCommissionCollectedRounded = round2(totalCommissionCollected);
+    const totalGstCollectedRounded = round2(totalGstCollected);
+
     const order = new OrderModel({
       userId: targetUserId,
       type: targetUserRole === 'b2b' ? 'b2b' : 'b2c',
       items: enrichedItems,
-      totalAmount: calculatedTotal, // Use server-calculated total for security
-      totalAmountWithoutCommissions: calculatedTotalWithoutCommissions,
-      totalCommissionAmount: totalCommissionCollected,
-      totalGstAmount: totalGstCollected,
+      totalAmount: calculatedTotalRounded, // Use server-calculated total for security
+      totalAmountWithoutCommissions: calculatedTotalWithoutCommissionsRounded,
+      totalCommissionAmount: totalCommissionCollectedRounded,
+      totalGstAmount: totalGstCollectedRounded,
       shippingAddress,
       paymentMethod,
       paymentStatus: (paymentMethod === 'COD' || paymentMethod === 'Cash at Delivery' || paymentMethod === 'UPI at Delivery') ? 'Pending' : 'Completed',
@@ -1206,15 +1239,26 @@ router.post('/admin/create', protect, async (req, res) => {
       return res.status(404).json({ message: 'Customer not found' });
     }
 
-    // Validate stock for all items first
+    // Validate stock and quantity for all items first
     for (const item of items) {
       const pId = item.productId || item.product || item.id || item._id;
       const productData = await ProductModel.findById(pId);
       if (!productData) {
         return res.status(404).json({ message: `Product not found: ${item.name || pId}` });
       }
-      const stockInfo = getProductStock(productData, item.variantSize, targetUser.role);
-      if (item.variantSize && !stockInfo.hasVariant) {
+
+      // Enforce positive integer quantity
+      const qty = parseInt(item.quantity, 10);
+      if (!qty || isNaN(qty) || qty <= 0 || Number(item.quantity) !== qty) {
+        return res.status(400).json({
+          message: `Invalid quantity for product "${productData.name}". Quantity must be a positive integer.`
+        });
+      }
+      item.quantity = qty;
+
+      const targetSize = item.variantSize || item.selectedPacketSize;
+      const stockInfo = getProductStock(productData, targetSize, targetUser.role);
+      if (targetSize && !stockInfo.hasVariant) {
         return res.status(400).json({
           message: `Variant "${item.variantSize}" not found for product "${productData.name}"`
         });
@@ -1227,7 +1271,11 @@ router.post('/admin/create', protect, async (req, res) => {
     }
 
     let calculatedTotal = 0;
+    let calculatedTotalWithoutCommissions = 0;
     let totalGstCollected = 0;
+    let totalCommissionCollected = 0;
+    const commissions = await loadCommissions(req);
+
     const enrichedItems = await Promise.all(items.map(async (item) => {
       const pId = item.productId || item.product;
       const productData = await ProductModel.findById(pId);
@@ -1235,27 +1283,35 @@ router.post('/admin/create', protect, async (req, res) => {
         throw new Error(`Product not found: ${pId}`);
       }
 
-      let basePriceObj = productData;
-      let name = item.name || productData.name;
+      const pDataObj = productData.toObject ? productData.toObject() : productData;
+      const enrichedProduct = applyCommission(pDataObj, commissions, shippingAddress?.pincode);
+
+      let basePriceObj = enrichedProduct;
+      let rawBasePriceObj = pDataObj;
+      let name = item.name || enrichedProduct.name || productData.name;
       let gstPercent = productData.gstPercent || 0;
 
-      const variantArray = targetUser.role === 'b2b' ? (productData.b2b || []) : (productData.b2c || []);
-      if (item.variantSize && variantArray.length > 0) {
-        const variant = variantArray.find(v => (v.packetSize || v.sizeName) === item.variantSize);
+      const variantArray = targetUser.role === 'b2b' ? (enrichedProduct.b2b || []) : (enrichedProduct.b2c || []);
+      const rawVariantArray = targetUser.role === 'b2b' ? (pDataObj.b2b || []) : (pDataObj.b2c || []);
+      const targetSize = item.variantSize || item.selectedPacketSize;
+
+      if (targetSize && variantArray.length > 0) {
+        const variant = variantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
+        const rawVariant = rawVariantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
         if (variant) {
           basePriceObj = variant;
-
+          if (rawVariant) rawBasePriceObj = rawVariant;
           const sizeStr = variant.packetSize || variant.sizeName;
           if (sizeStr && !name.includes(sizeStr)) {
             name = `${name} - ${sizeStr}`;
           }
         }
-      } else if (item.variantSize && productData.variants && productData.variants.length > 0) {
-        // Fallback to old variants array
-        const variant = productData.variants.find(v => v.sizeName === item.variantSize);
+      } else if (targetSize && enrichedProduct.variants && enrichedProduct.variants.length > 0) {
+        const variant = enrichedProduct.variants.find(v => v.sizeName === targetSize);
+        const rawVariant = (pDataObj.variants || []).find(v => v.sizeName === targetSize);
         if (variant) {
           basePriceObj = variant;
-
+          if (rawVariant) rawBasePriceObj = rawVariant;
           if (variant.sizeName && !name.includes(variant.sizeName)) {
             name = `${name} - ${variant.sizeName}`;
           }
@@ -1263,41 +1319,48 @@ router.post('/admin/create', protect, async (req, res) => {
       }
 
       // Fallback to first variant if root price is 0 and no variant was specified
-      if (!item.variantSize && (!basePriceObj.price || basePriceObj.price === 0)) {
+      if (!targetSize && (!basePriceObj.price || basePriceObj.price === 0)) {
         const fallbackArray = targetUser.role === 'b2b' ?
-          (productData.b2b?.length ? productData.b2b : productData.variants) :
-          (productData.b2c?.length ? productData.b2c : productData.variants);
+          (enrichedProduct.b2b?.length ? enrichedProduct.b2b : enrichedProduct.variants) :
+          (enrichedProduct.b2c?.length ? enrichedProduct.b2c : enrichedProduct.variants);
+        const rawFallbackArray = targetUser.role === 'b2b' ?
+          (pDataObj.b2b?.length ? pDataObj.b2b : pDataObj.variants) :
+          (pDataObj.b2c?.length ? pDataObj.b2c : pDataObj.variants);
         if (fallbackArray && fallbackArray.length > 0) {
           basePriceObj = fallbackArray[0];
-        }
-      }
-
-      let finalPrice = item.price;
-      let gstAmount = 0;
-
-      if (finalPrice == null) {
-        if (targetUser.role === 'b2b') {
-          let price = basePriceObj.b2bPrice || basePriceObj.price;
-          if (basePriceObj.priceTiers && basePriceObj.priceTiers.length > 0) {
-            const sortedTiers = [...basePriceObj.priceTiers].sort((a, b) => b.minQty - a.minQty);
-            const applicableTier = sortedTiers.find(t => item.quantity >= t.minQty);
-            if (applicableTier) {
-              price = applicableTier.price;
-            }
+          if (rawFallbackArray && rawFallbackArray.length > 0) {
+            rawBasePriceObj = rawFallbackArray[0];
           }
-          finalPrice = price;
-          gstAmount = finalPrice * (gstPercent / 100);
-          finalPrice = finalPrice + gstAmount;
-        } else {
-          finalPrice = basePriceObj.price;
-          let basePrice = finalPrice / (1 + (gstPercent / 100));
-          gstAmount = finalPrice - basePrice;
         }
-      } else {
-        // If frontend provided price manually (admin override), calculate gst backward from it
-        let basePrice = finalPrice / (1 + (gstPercent / 100));
-        gstAmount = finalPrice - basePrice;
       }
+
+      let rawPrice = targetUser.role === 'b2b'
+        ? (rawBasePriceObj.sellerB2bPrice !== undefined && rawBasePriceObj.sellerB2bPrice !== null ? rawBasePriceObj.sellerB2bPrice : (rawBasePriceObj.b2bPrice || rawBasePriceObj.sellerPrice || rawBasePriceObj.price))
+        : (rawBasePriceObj.sellerPrice !== undefined && rawBasePriceObj.sellerPrice !== null ? rawBasePriceObj.sellerPrice : rawBasePriceObj.price);
+
+      if (targetUser.role === 'b2b' && basePriceObj.priceTiers && basePriceObj.priceTiers.length > 0) {
+        const sortedTiers = [...basePriceObj.priceTiers].sort((a, b) => b.minQty - a.minQty);
+        const applicableTier = sortedTiers.find(t => item.quantity >= t.minQty);
+        if (applicableTier && rawBasePriceObj.priceTiers && rawBasePriceObj.priceTiers.length > 0) {
+          const rawApplicableTier = rawBasePriceObj.priceTiers.find(t => t.minQty === applicableTier.minQty);
+          if (rawApplicableTier) {
+            rawPrice = rawApplicableTier.sellerPrice !== undefined ? rawApplicableTier.sellerPrice : rawApplicableTier.price;
+          }
+        }
+      }
+
+      const commRule = findCategoryCommission(commissions, productData.categoryId, productData.unit, shippingAddress?.pincode);
+      const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
+      const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
+
+      const breakdown = calculatePricingBreakdown({
+        sellerUnitPrice: Number(rawPrice) || 0,
+        commissionType: commType,
+        commissionValue: Number(commVal) || 0,
+        gstPercent: gstPercent,
+        quantity: item.quantity,
+        isB2B: targetUser.role === 'b2b'
+      });
 
       let sellerInfo = null;
       if (productData.sellerId) {
@@ -1315,17 +1378,25 @@ router.post('/admin/create', protect, async (req, res) => {
         }
       }
 
-      calculatedTotal += finalPrice * item.quantity;
-      totalGstCollected += gstAmount * item.quantity;
+      calculatedTotal += breakdown.finalCustomerPrice;
+      calculatedTotalWithoutCommissions += (breakdown.totalSellerPrice + breakdown.totalGst);
+      totalGstCollected += breakdown.totalGst;
+      totalCommissionCollected += breakdown.totalCommission;
 
       return {
         productId: pId,
-        variantSize: item.variantSize,
+        variantSize: targetSize,
         name: name,
         quantity: item.quantity,
-        price: finalPrice,
-        gstPercent,
-        gstAmount,
+        price: breakdown.unitCustomerPrice,
+        normalPrice: breakdown.sellerUnitPrice,
+        commissionType: breakdown.commissionType,
+        commissionValue: breakdown.commissionRate,
+        commissionAmount: breakdown.unitCommission,
+        totalCommission: breakdown.totalCommission,
+        gstPercent: breakdown.gstPercent,
+        gstAmount: breakdown.unitGst,
+        totalGst: breakdown.totalGst,
         image: productData.imageUrl || productData.image,
         seller: sellerInfo,
         product: {
@@ -1347,11 +1418,19 @@ router.post('/admin/create', protect, async (req, res) => {
       pickupCode: isMultiSeller ? generateOTP(6) : globalPickupOtp
     }));
 
+    const calculatedTotalRounded = round2(calculatedTotal);
+    const calculatedTotalWithoutCommissionsRounded = round2(calculatedTotalWithoutCommissions);
+    const totalCommissionCollectedRounded = round2(totalCommissionCollected);
+    const totalGstCollectedRounded = round2(totalGstCollected);
+
     const order = new OrderModel({
       userId,
+      type: targetUser.role === 'b2b' ? 'b2b' : 'b2c',
       items: enrichedItems,
-      totalAmount: calculatedTotal,
-      totalGstAmount: totalGstCollected,
+      totalAmount: calculatedTotalRounded,
+      totalAmountWithoutCommissions: calculatedTotalWithoutCommissionsRounded,
+      totalCommissionAmount: totalCommissionCollectedRounded,
+      totalGstAmount: totalGstCollectedRounded,
       shippingAddress,
       paymentMethod,
       paymentStatus: paymentMethod === 'COD' ? 'Pending' : 'Completed',
@@ -1406,6 +1485,11 @@ router.put('/admin/:id/items', protect, async (req, res) => {
     const userRole = targetUser ? targetUser.role : 'b2c';
 
     let calculatedTotal = 0;
+    let calculatedTotalWithoutCommissions = 0;
+    let totalGstCollected = 0;
+    let totalCommissionCollected = 0;
+    const commissions = await loadCommissions(req);
+
     const enrichedItems = await Promise.all(items.map(async (item) => {
       const pId = item.productId || item.product;
       const productData = await ProductModel.findById(pId);
@@ -1413,22 +1497,90 @@ router.put('/admin/:id/items', protect, async (req, res) => {
         throw new Error(`Product not found: ${pId}`);
       }
 
-      let finalPrice = item.price;
-      if (finalPrice == null) {
-        if (userRole === 'b2b') {
-          let price = productData.b2bPrice || productData.price;
-          if (productData.priceTiers && productData.priceTiers.length > 0) {
-            const sortedTiers = [...productData.priceTiers].sort((a, b) => b.minQty - a.minQty);
-            const applicableTier = sortedTiers.find(t => item.quantity >= t.minQty);
-            if (applicableTier) {
-              price = applicableTier.price;
-            }
+      // Enforce positive integer quantity
+      const qty = parseInt(item.quantity, 10);
+      if (!qty || isNaN(qty) || qty <= 0 || Number(item.quantity) !== qty) {
+        throw new Error(`Invalid quantity for product "${productData.name}". Quantity must be a positive integer.`);
+      }
+      item.quantity = qty;
+
+      const pDataObj = productData.toObject ? productData.toObject() : productData;
+      const enrichedProduct = applyCommission(pDataObj, commissions, order.shippingAddress?.pincode);
+
+      let basePriceObj = enrichedProduct;
+      let rawBasePriceObj = pDataObj;
+      let name = item.name || enrichedProduct.name || productData.name;
+      let gstPercent = productData.gstPercent || 0;
+
+      const variantArray = userRole === 'b2b' ? (enrichedProduct.b2b || []) : (enrichedProduct.b2c || []);
+      const rawVariantArray = userRole === 'b2b' ? (pDataObj.b2b || []) : (pDataObj.b2c || []);
+      const targetSize = item.variantSize || item.selectedPacketSize;
+
+      if (targetSize && variantArray.length > 0) {
+        const variant = variantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
+        const rawVariant = rawVariantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
+        if (variant) {
+          basePriceObj = variant;
+          if (rawVariant) rawBasePriceObj = rawVariant;
+          const sizeStr = variant.packetSize || variant.sizeName;
+          if (sizeStr && !name.includes(sizeStr)) {
+            name = `${name} - ${sizeStr}`;
           }
-          finalPrice = price;
-        } else {
-          finalPrice = productData.price;
+        }
+      } else if (targetSize && enrichedProduct.variants && enrichedProduct.variants.length > 0) {
+        const variant = enrichedProduct.variants.find(v => v.sizeName === targetSize);
+        const rawVariant = (pDataObj.variants || []).find(v => v.sizeName === targetSize);
+        if (variant) {
+          basePriceObj = variant;
+          if (rawVariant) rawBasePriceObj = rawVariant;
+          if (variant.sizeName && !name.includes(variant.sizeName)) {
+            name = `${name} - ${variant.sizeName}`;
+          }
         }
       }
+
+      if (!targetSize && (!basePriceObj.price || basePriceObj.price === 0)) {
+        const fallbackArray = userRole === 'b2b' ?
+          (enrichedProduct.b2b?.length ? enrichedProduct.b2b : enrichedProduct.variants) :
+          (enrichedProduct.b2c?.length ? enrichedProduct.b2c : enrichedProduct.variants);
+        const rawFallbackArray = userRole === 'b2b' ?
+          (pDataObj.b2b?.length ? pDataObj.b2b : pDataObj.variants) :
+          (pDataObj.b2c?.length ? pDataObj.b2c : pDataObj.variants);
+        if (fallbackArray && fallbackArray.length > 0) {
+          basePriceObj = fallbackArray[0];
+          if (rawFallbackArray && rawFallbackArray.length > 0) {
+            rawBasePriceObj = rawFallbackArray[0];
+          }
+        }
+      }
+
+      let rawPrice = userRole === 'b2b'
+        ? (rawBasePriceObj.sellerB2bPrice !== undefined && rawBasePriceObj.sellerB2bPrice !== null ? rawBasePriceObj.sellerB2bPrice : (rawBasePriceObj.b2bPrice || rawBasePriceObj.sellerPrice || rawBasePriceObj.price))
+        : (rawBasePriceObj.sellerPrice !== undefined && rawBasePriceObj.sellerPrice !== null ? rawBasePriceObj.sellerPrice : rawBasePriceObj.price);
+
+      if (userRole === 'b2b' && basePriceObj.priceTiers && basePriceObj.priceTiers.length > 0) {
+        const sortedTiers = [...basePriceObj.priceTiers].sort((a, b) => b.minQty - a.minQty);
+        const applicableTier = sortedTiers.find(t => item.quantity >= t.minQty);
+        if (applicableTier && rawBasePriceObj.priceTiers && rawBasePriceObj.priceTiers.length > 0) {
+          const rawApplicableTier = rawBasePriceObj.priceTiers.find(t => t.minQty === applicableTier.minQty);
+          if (rawApplicableTier) {
+            rawPrice = rawApplicableTier.sellerPrice !== undefined ? rawApplicableTier.sellerPrice : rawApplicableTier.price;
+          }
+        }
+      }
+
+      const commRule = findCategoryCommission(commissions, productData.categoryId, productData.unit, order.shippingAddress?.pincode);
+      const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
+      const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
+
+      const breakdown = calculatePricingBreakdown({
+        sellerUnitPrice: Number(rawPrice) || 0,
+        commissionType: commType,
+        commissionValue: Number(commVal) || 0,
+        gstPercent: gstPercent,
+        quantity: item.quantity,
+        isB2B: userRole === 'b2b'
+      });
 
       let sellerInfo = null;
       if (productData.sellerId) {
@@ -1445,13 +1597,25 @@ router.put('/admin/:id/items', protect, async (req, res) => {
         }
       }
 
-      calculatedTotal += finalPrice * item.quantity;
+      calculatedTotal += breakdown.finalCustomerPrice;
+      calculatedTotalWithoutCommissions += (breakdown.totalSellerPrice + breakdown.totalGst);
+      totalGstCollected += breakdown.totalGst;
+      totalCommissionCollected += breakdown.totalCommission;
 
       return {
         productId: pId,
-        name: productData.name,
+        variantSize: targetSize,
+        name: name,
         quantity: item.quantity,
-        price: finalPrice,
+        price: breakdown.unitCustomerPrice,
+        normalPrice: breakdown.sellerUnitPrice,
+        commissionType: breakdown.commissionType,
+        commissionValue: breakdown.commissionRate,
+        commissionAmount: breakdown.unitCommission,
+        totalCommission: breakdown.totalCommission,
+        gstPercent: breakdown.gstPercent,
+        gstAmount: breakdown.unitGst,
+        totalGst: breakdown.totalGst,
         image: productData.imageUrl || productData.image,
         seller: sellerInfo,
         product: {
@@ -1463,7 +1627,10 @@ router.put('/admin/:id/items', protect, async (req, res) => {
     }));
 
     order.items = enrichedItems;
-    order.totalAmount = calculatedTotal;
+    order.totalAmount = round2(calculatedTotal);
+    order.totalAmountWithoutCommissions = round2(calculatedTotalWithoutCommissions);
+    order.totalCommissionAmount = round2(totalCommissionCollected);
+    order.totalGstAmount = round2(totalGstCollected);
     await order.save();
 
     const populated = await OrderModel.findById(order._id)

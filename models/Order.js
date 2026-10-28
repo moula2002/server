@@ -20,6 +20,10 @@ const orderSchema = new mongoose.Schema({
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Product'
     },
+    variantSize: {
+      type: String,
+      default: null
+    },
     name: String,
     quantity: {
       type: Number,
@@ -54,6 +58,7 @@ const orderSchema = new mongoose.Schema({
     },
     gstPercent: { type: Number, default: 0 },
     gstAmount: { type: Number, default: 0 },
+    totalGst: { type: Number, default: 0 },
     returnStatus: { 
       type: String, 
       enum: ['None', 'Return Requested', 'Return Approved', 'Return Rejected', 'Picked Up from Customer', 'Returned to Seller'], 
