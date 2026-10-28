@@ -17,7 +17,9 @@ const productSchema = new mongoose.Schema({
   imageUrl: { type: String },
   sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
   sellerName: { type: String, default: 'Zudo Official' },
-  stock: { type: Number, default: 0 }, // Added stock
+  stock: { type: Number, default: 0 },
+  hsn: { type: String, default: '' },
+  stockStatus: { type: String, enum: ['Available', 'Out of Stock'], default: 'Available' }, // Added stock
   description: { type: String },
   pdfUrl: { type: String },
   rating: { type: Number, default: 0 },

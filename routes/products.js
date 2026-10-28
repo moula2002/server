@@ -266,6 +266,8 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       sellerName: finalSellerName,
       stock: stock || 0,
       sku: req.body.sku || '',
+      hsn: req.body.hsn || '',
+      stockStatus: req.body.stockStatus || 'Available',
       description,
       imageUrl,
       pdfUrl,
