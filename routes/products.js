@@ -21,10 +21,39 @@ const getModels = (req) => ({
 // Helper: Load all commissions from DB (tenant-aware)
 async function loadCommissions(req) {
   try {
-    const { Product } = getModels(req);
-    const db = (Product && Product.db) ? Product.db.db : mongoose.connection.db;
-    if (!db) return [];
-    return await db.collection('commissions').find().toArray();
+    let comms = [];
+    if (!req.locationId) {
+      const { aggregateGET } = require('../utils/aggregator');
+      comms = await aggregateGET('Commission', req, {}, 'categoryId');
+      if (comms && comms.length > 0) return comms;
+    }
+
+    // Direct collection query from tenant DB or req.db
+    const activeDb = (req.db && req.db.db) ? req.db.db : (req.db && typeof req.db.collection === 'function' ? req.db : null);
+    if (activeDb) {
+      try {
+        const rawComms = await activeDb.collection('commissions').find().toArray();
+        if (rawComms && rawComms.length > 0) {
+          const categories = await activeDb.collection('categories').find().toArray();
+          const catMap = new Map(categories.map(c => [c._id.toString(), c]));
+          return rawComms.map(c => ({
+            ...c,
+            categoryId: c.categoryId ? (catMap.get(c.categoryId.toString()) || c.categoryId) : null
+          }));
+        }
+      } catch (err) {
+        console.error('[commissions] Direct db.collection failed:', err.message);
+      }
+    }
+
+    const { getModel } = require('../utils/model_loader');
+    const Commission = getModel('Commission', req);
+    if (Commission) {
+      comms = await Commission.find().populate('categoryId').lean();
+      if (comms && comms.length > 0) return comms;
+    }
+
+    return [];
   } catch (e) {
     console.error('[commissions] Failed to load:', e.message);
     return [];
@@ -124,19 +153,23 @@ router.get('/', async (req, res) => {
             const TenantSeller = tenantConn.models.Seller || tenantConn.model('Seller', require('../models/Seller').schema);
             const TenantUser = tenantConn.models.User || tenantConn.model('User', require('../models/User').schema);
 
-            let seller = await TenantSeller.findById(p.sellerId).select('businessName storeName name');
+            let seller = await TenantSeller.findById(p.sellerId).select('businessName storeName name gstNumber panNumber');
             if (!seller) {
-              seller = await TenantUser.findById(p.sellerId).select('businessName name');
+              seller = await TenantUser.findById(p.sellerId).select('businessName name gstNumber');
             }
 
             if (seller) {
+              const sName = seller.businessName || seller.storeName || seller.name || 'Zudo Official';
+              const sGst = seller.gstNumber || null;
               enriched = {
                 ...p,
-                sellerName: seller.businessName || seller.storeName || seller.name,
+                sellerName: sName,
+                sellerGstNumber: sGst,
                 sellerId: {
                   _id: p.sellerId,
-                  businessName: seller.businessName || seller.storeName || seller.name,
-                  name: seller.name
+                  businessName: sName,
+                  name: seller.name,
+                  gstNumber: sGst
                 }
               };
             }
@@ -160,7 +193,7 @@ router.get('/', async (req, res) => {
 
         if (p.sellerId) {
           try {
-            let seller = await Seller.findById(p.sellerId).select('businessName storeName name');
+            let seller = await Seller.findById(p.sellerId).select('businessName storeName name gstNumber panNumber');
             if (!seller) {
               const db = mongoose.connection.db;
               const sellerCollection = db.collection('sellers');
@@ -169,17 +202,21 @@ router.get('/', async (req, res) => {
               });
             }
             if (!seller) {
-              seller = await User.findById(p.sellerId).select('businessName name');
+              seller = await User.findById(p.sellerId).select('businessName name gstNumber');
             }
 
             if (seller) {
+              const sName = seller.businessName || seller.storeName || seller.name || 'Zudo Official';
+              const sGst = seller.gstNumber || null;
               enriched = {
                 ...p,
-                sellerName: seller.businessName || seller.storeName || seller.name,
+                sellerName: sName,
+                sellerGstNumber: sGst,
                 sellerId: {
                   _id: p.sellerId,
-                  businessName: seller.businessName || seller.storeName || seller.name,
-                  name: seller.name
+                  businessName: sName,
+                  name: seller.name,
+                  gstNumber: sGst
                 }
               };
             }
@@ -455,24 +492,33 @@ router.get('/:id', async (req, res) => {
 
     if (!product) return res.status(404).json({ message: 'Product not found' });
 
+    let sellerGstNumber = null;
+    let sellerName = 'Zudo Official';
+
     if (product.sellerId) {
       try {
         const { Seller, User } = getModels(req);
 
-        let seller = await Seller.findById(product.sellerId).select('businessName storeName name');
+        let seller = await Seller.findById(product.sellerId).select('businessName storeName name gstNumber panNumber');
         if (!seller) {
-          seller = await User.findById(product.sellerId).select('businessName name');
+          seller = await User.findById(product.sellerId).select('businessName name gstNumber');
         }
 
         if (seller) {
+          sellerName = seller.businessName || seller.storeName || seller.name || 'Zudo Official';
+          sellerGstNumber = seller.gstNumber || null;
           product.sellerId = {
             _id: product.sellerId,
-            businessName: seller.businessName || seller.storeName || seller.name,
-            name: seller.name
+            businessName: sellerName,
+            name: seller.name,
+            gstNumber: sellerGstNumber
           };
         }
       } catch (e) { }
     }
+
+    product.sellerName = sellerName;
+    product.sellerGstNumber = sellerGstNumber;
 
     // Apply commission price inflation
     const commissions = await loadCommissions(req);
@@ -490,6 +536,9 @@ router.put('/:id', protect, async (req, res) => {
     const { Product } = getModels(req);
     const comms = await loadCommissions(req);
     const updatedPayload = processProductPricing(req.body, comms);
+    if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
+      updatedPayload.subCategoryId = null;
+    }
     const product = await Product.findByIdAndUpdate(req.params.id, updatedPayload, { returnDocument: 'after' });
     if (!product) return res.status(404).json({ message: 'Product not found' });
     res.json(product);

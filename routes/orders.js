@@ -10,7 +10,7 @@ const Seller = require('../models/Seller');
 const Driver = require('../models/Driver');
 const CashCollector = require('../models/CashCollector');
 const { loadCommissions } = require('./products');
-const { applyCommission } = require('../utils/pricing');
+const { applyCommission, calculatePricingBreakdown } = require('../utils/pricing');
 
 // Helper to get models from req with fallback to global imports
 const getModels = (req) => {
@@ -338,15 +338,26 @@ router.post('/', protect, async (req, res) => {
       salesAssociateId = req.user._id;
     }
 
-    // Validate stock for all items first
+    // Validate stock and quantity for all items first
     for (const item of items) {
       const pId = item.product || item.id || item._id;
       const productData = await ProductModel.findById(pId);
       if (!productData) {
         return res.status(404).json({ message: `Product not found: ${item.name || pId}` });
       }
-      const stockInfo = getProductStock(productData, item.variantSize, targetUserRole);
-      if (item.variantSize && !stockInfo.hasVariant) {
+
+      // Enforce positive integer quantity
+      const qty = parseInt(item.quantity, 10);
+      if (!qty || isNaN(qty) || qty <= 0 || Number(item.quantity) !== qty) {
+        return res.status(400).json({
+          message: `Invalid quantity for product "${productData.name}". Quantity must be a positive integer.`
+        });
+      }
+      item.quantity = qty;
+
+      const targetSize = item.variantSize || item.selectedPacketSize;
+      const stockInfo = getProductStock(productData, targetSize, targetUserRole);
+      if (targetSize && !stockInfo.hasVariant) {
         return res.status(400).json({
           message: `Variant "${item.variantSize}" not found for product "${productData.name}"`
         });
@@ -361,6 +372,7 @@ router.post('/', protect, async (req, res) => {
     let calculatedTotal = 0;
     let calculatedTotalWithoutCommissions = 0;
     let totalGstCollected = 0;
+    let totalCommissionCollected = 0;
     const commissions = await loadCommissions(req);
 
     const enrichedItems = await Promise.all(items.map(async (item) => {
@@ -388,8 +400,9 @@ router.post('/', protect, async (req, res) => {
         const variantArray = targetUserRole === 'b2b' ? (enrichedProduct.b2b || []) : (enrichedProduct.b2c || []);
         const rawVariantArray = targetUserRole === 'b2b' ? (pDataObj.b2b || []) : (pDataObj.b2c || []);
 
-        if (item.variantSize && variantArray.length > 0) {
-          const variant = variantArray.find(v => (v.packetSize || v.sizeName) === item.variantSize);
+        const targetSize = item.variantSize || item.selectedPacketSize;
+        if (targetSize && variantArray.length > 0) {
+          const variant = variantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
           const rawVariant = rawVariantArray.find(v => (v.packetSize || v.sizeName) === item.variantSize);
           if (variant) {
             basePriceObj = variant;
@@ -399,9 +412,9 @@ router.post('/', protect, async (req, res) => {
               name = `${name} - ${sizeStr}`;
             }
           }
-        } else if (item.variantSize && enrichedProduct.variants && enrichedProduct.variants.length > 0) {
+        } else if (targetSize && enrichedProduct.variants && enrichedProduct.variants.length > 0) {
           // Fallback to old variants array just in case
-          const variant = enrichedProduct.variants.find(v => v.sizeName === item.variantSize);
+          const variant = enrichedProduct.variants.find(v => v.sizeName === targetSize);
           const rawVariant = (pDataObj.variants || []).find(v => v.sizeName === item.variantSize);
           if (variant) {
             basePriceObj = variant;
@@ -413,7 +426,7 @@ router.post('/', protect, async (req, res) => {
         }
 
         // Fallback to first variant if root price is 0 and no variant was specified
-        if (!item.variantSize && (!basePriceObj.price || basePriceObj.price === 0)) {
+        if (!targetSize && (!basePriceObj.price || basePriceObj.price === 0)) {
           const fallbackArray = targetUserRole === 'b2b' ?
             (enrichedProduct.b2b?.length ? enrichedProduct.b2b : enrichedProduct.variants) :
             (enrichedProduct.b2c?.length ? enrichedProduct.b2c : enrichedProduct.variants);
@@ -428,39 +441,20 @@ router.post('/', protect, async (req, res) => {
           }
         }
 
-        // Calculate price based on target user role and quantity tiers
+        // Calculate seller price based on target user role and quantity tiers
         rawPrice = targetUserRole === 'b2b'
           ? (rawBasePriceObj.sellerB2bPrice !== undefined && rawBasePriceObj.sellerB2bPrice !== null ? rawBasePriceObj.sellerB2bPrice : (rawBasePriceObj.b2bPrice || rawBasePriceObj.sellerPrice || rawBasePriceObj.price))
           : (rawBasePriceObj.sellerPrice !== undefined && rawBasePriceObj.sellerPrice !== null ? rawBasePriceObj.sellerPrice : rawBasePriceObj.price);
 
-        if (targetUserRole === 'b2b') {
-          let price = basePriceObj.b2bPrice || basePriceObj.price;
-          if (basePriceObj.priceTiers && basePriceObj.priceTiers.length > 0) {
-            // Sort tiers by minQty descending to find the highest applicable tier
-            const sortedTiers = [...basePriceObj.priceTiers].sort((a, b) => b.minQty - a.minQty);
-            const applicableTier = sortedTiers.find(t => item.quantity >= t.minQty);
-            if (applicableTier) {
-              price = applicableTier.price;
-              if (rawBasePriceObj.priceTiers && rawBasePriceObj.priceTiers.length > 0) {
-                const rawApplicableTier = rawBasePriceObj.priceTiers.find(t => t.minQty === applicableTier.minQty);
-                if (rawApplicableTier) {
-                  rawPrice = rawApplicableTier.sellerPrice !== undefined ? rawApplicableTier.sellerPrice : rawApplicableTier.price;
-                }
-              }
+        if (targetUserRole === 'b2b' && basePriceObj.priceTiers && basePriceObj.priceTiers.length > 0) {
+          const sortedTiers = [...basePriceObj.priceTiers].sort((a, b) => b.minQty - a.minQty);
+          const applicableTier = sortedTiers.find(t => item.quantity >= t.minQty);
+          if (applicableTier && rawBasePriceObj.priceTiers && rawBasePriceObj.priceTiers.length > 0) {
+            const rawApplicableTier = rawBasePriceObj.priceTiers.find(t => t.minQty === applicableTier.minQty);
+            if (rawApplicableTier) {
+              rawPrice = rawApplicableTier.sellerPrice !== undefined ? rawApplicableTier.sellerPrice : rawApplicableTier.price;
             }
           }
-          finalPrice = price;
-          // For B2B, GST is added on top
-          gstAmount = finalPrice * (gstPercent / 100);
-          finalPrice = finalPrice + gstAmount;
-
-          let rawGstAmount = rawPrice * (gstPercent / 100);
-          rawPrice = rawPrice + rawGstAmount;
-        } else {
-          finalPrice = basePriceObj.price;
-          // For B2C, price is inclusive of GST
-          let basePrice = finalPrice / (1 + (gstPercent / 100));
-          gstAmount = finalPrice - basePrice;
         }
 
         if (productData.sellerId) {
@@ -479,19 +473,36 @@ router.post('/', protect, async (req, res) => {
         }
       }
 
-      calculatedTotal += finalPrice * item.quantity;
-      calculatedTotalWithoutCommissions += (rawPrice || finalPrice) * item.quantity;
-      totalGstCollected += gstAmount * item.quantity;
+      const commType = basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
+      const commVal = Number(basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
+
+      const breakdown = calculatePricingBreakdown({
+        sellerUnitPrice: Number(rawPrice) || 0,
+        commissionType: commType,
+        commissionValue: commVal,
+        gstPercent: gstPercent,
+        quantity: item.quantity,
+        isB2B: targetUserRole === 'b2b'
+      });
+
+      calculatedTotal += breakdown.finalCustomerPrice;
+      calculatedTotalWithoutCommissions += (breakdown.totalSellerPrice + breakdown.totalGst);
+      totalGstCollected += breakdown.totalGst;
+      totalCommissionCollected += breakdown.totalCommission;
 
       return {
         productId: pId,
-        variantSize: item.variantSize,
+        variantSize: targetSize,
         name: name || 'Unknown Product',
         quantity: item.quantity,
-        price: finalPrice,
-        normalPrice: rawPrice || finalPrice,
-        gstPercent,
-        gstAmount,
+        price: breakdown.unitCustomerPrice,
+        normalPrice: breakdown.sellerUnitPrice,
+        commissionType: breakdown.commissionType,
+        commissionValue: breakdown.commissionRate,
+        commissionAmount: breakdown.unitCommission,
+        totalCommission: breakdown.totalCommission,
+        gstPercent: breakdown.gstPercent,
+        gstAmount: breakdown.unitGst,
         image: image,
         seller: sellerInfo,
         product: {
@@ -569,6 +580,7 @@ router.post('/', protect, async (req, res) => {
       items: enrichedItems,
       totalAmount: calculatedTotal, // Use server-calculated total for security
       totalAmountWithoutCommissions: calculatedTotalWithoutCommissions,
+      totalCommissionAmount: totalCommissionCollected,
       totalGstAmount: totalGstCollected,
       shippingAddress,
       paymentMethod,

@@ -274,7 +274,86 @@ function applyCommission(product, commissions = []) {
   };
 }
 
+
+/**
+ * Strict commercial rounding to 2 decimal places.
+ */
+function round2(val) {
+  return Math.round((Number(val) || 0) * 100) / 100;
+}
+
+/**
+ * Exact pricing breakdown calculation based on selected quantity and commission rules.
+ * Handles:
+ * - Flat commission: Flat Commission Per Unit * Selected Quantity
+ * - Percentage commission: (Seller Unit Price * (Commission Rate / 100)) * Selected Quantity
+ * - GST rules:
+ *     - B2B: GST added on top of totalCustomerBase (totalCustomerBase * (gstPercent / 100))
+ *     - B2C: GST is inclusive in totalCustomerBase (totalCustomerBase - (totalCustomerBase / (1 + gstPercent / 100)))
+ * - Stock limit enforcement & positive quantity validation
+ */
+function calculatePricingBreakdown({
+  sellerUnitPrice = 0,
+  commissionType = 'flat',
+  commissionValue = 0,
+  gstPercent = 0,
+  quantity = 1,
+  isB2B = false
+}) {
+  const qty = Number(quantity) > 0 ? Number(quantity) : 1;
+  const sUnitPrice = typeof sellerUnitPrice === 'number' ? sellerUnitPrice : (parseFloat(sellerUnitPrice) || 0);
+  const cVal = typeof commissionValue === 'number' ? commissionValue : (parseFloat(commissionValue) || 0);
+  const cType = commissionType === 'percentage' ? 'percentage' : 'flat';
+
+  let unitCommission = 0;
+  if (cType === 'flat') {
+    unitCommission = cVal;
+  } else {
+    unitCommission = (sUnitPrice * cVal) / 100;
+  }
+  unitCommission = round2(unitCommission);
+
+  const totalSellerPrice = round2(sUnitPrice * qty);
+  const totalCommission = round2(unitCommission * qty);
+  const totalCustomerBase = round2(totalSellerPrice + totalCommission);
+
+  let totalGst = 0;
+  let finalCustomerPrice = totalCustomerBase;
+
+  const gstRate = typeof gstPercent === 'number' ? gstPercent : (parseFloat(gstPercent) || 0);
+  if (isB2B) {
+    totalGst = round2(totalCustomerBase * (gstRate / 100));
+    finalCustomerPrice = round2(totalCustomerBase + totalGst);
+  } else {
+    if (gstRate > 0) {
+      const baseBeforeTax = totalCustomerBase / (1 + gstRate / 100);
+      totalGst = round2(totalCustomerBase - baseBeforeTax);
+    }
+    finalCustomerPrice = totalCustomerBase;
+  }
+
+  const unitCustomerPrice = round2(finalCustomerPrice / qty);
+  const unitGst = round2(totalGst / qty);
+
+  return {
+    quantity: qty,
+    sellerUnitPrice: sUnitPrice,
+    commissionType: cType,
+    commissionRate: cVal,
+    unitCommission,
+    totalSellerPrice,
+    totalCommission,
+    totalCustomerBase,
+    gstPercent: gstRate,
+    unitGst,
+    totalGst,
+    unitCustomerPrice,
+    finalCustomerPrice
+  };
+}
+
 module.exports = {
+  calculatePricingBreakdown,
   findCategoryCommission,
   calculateCustomerPrice,
   processProductPricing,

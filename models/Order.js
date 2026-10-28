@@ -33,6 +33,10 @@ const orderSchema = new mongoose.Schema({
       type: Number,
       default: 0
     },
+    commissionType: { type: String, default: 'flat' },
+    commissionValue: { type: Number, default: 0 },
+    commissionAmount: { type: Number, default: 0 },
+    totalCommission: { type: Number, default: 0 },
     image: String,
     seller: {
       sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
@@ -68,6 +72,10 @@ const orderSchema = new mongoose.Schema({
     required: true
   },
   totalAmountWithoutCommissions: {
+    type: Number,
+    default: 0
+  },
+  totalCommissionAmount: {
     type: Number,
     default: 0
   },

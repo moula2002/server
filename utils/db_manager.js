@@ -95,7 +95,7 @@ const connectDBByLocation = async (locationId, customName = null) => {
 
   console.log(`[Multi-Tenant] Provisioning/Connecting to database: ${dbName}`);
 
-  const connection = await mongoose.createConnection(finalUri);
+  const connection = await mongoose.createConnection(finalUri).asPromise();
 
   connections[dbName] = connection;
 

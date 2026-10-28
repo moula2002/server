@@ -220,14 +220,30 @@ router.get('/products', protect, async (req, res) => {
     }).populate('categoryId subCategoryId').lean();
 
     const sellerName = req.user.businessName || req.user.storeName || req.user.name;
-    const { loadCommissions } = require('./products');
-    const commissions = await loadCommissions(req);
-    const { applyCommission } = require('../utils/pricing');
 
     products = products.map(p => {
-      const enriched = applyCommission(p, commissions);
+      const sPrice = p.sellerB2bPrice !== undefined && p.sellerB2bPrice !== null
+        ? p.sellerB2bPrice
+        : (p.sellerPrice !== undefined && p.sellerPrice !== null ? p.sellerPrice : (p.b2bPrice || p.price || 0));
+
+      const cleanB2b = (p.b2b || []).map(v => {
+        const vSeller = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
+        return {
+          ...v,
+          sellerPrice: vSeller,
+          price: vSeller
+        };
+      });
+
       return {
-        ...enriched,
+        ...p,
+        sellerB2bPrice: sPrice,
+        sellerPrice: sPrice,
+        b2bPrice: sPrice,
+        price: sPrice,
+        commissionValue: 0,
+        commissionAmount: 0,
+        b2b: cleanB2b,
         sellerName: p.sellerName && p.sellerName !== 'Zudo Official' ? p.sellerName : sellerName,
         seller: {
           _id: req.user._id,
@@ -310,37 +326,59 @@ router.get('/stats', protect, async (req, res) => {
         ]
     });
 
-    // Seller Products IDs
+    // Seller Products
     const sellerProducts = await ProductModel.find({ 
         $or: [
             { sellerId: sellerId.toString() },
             { seller: sellerId }
         ]
-    }).select('_id');
+    }).select('_id name price imageUrl stock');
     const productIds = sellerProducts.map(p => p._id);
+
+    // Low stock products (stock <= 5)
+    const lowStockProducts = sellerProducts.filter(p => (p.stock || 0) <= 5);
 
     // Orders stats
     const orders = await OrderModel.find({
       'items.productId': { $in: productIds }
     });
 
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const todayOrders = orders.filter(o => o.createdAt && new Date(o.createdAt) >= today).length;
     const activeOrders = orders.filter(o => ['Pending', 'Processing', 'Shipped'].includes(o.orderStatus)).length;
-    const totalSales = orders
-        .filter(o => o.orderStatus !== 'Cancelled')
-        .reduce((acc, curr) => {
-            // Only sum items belonging to THIS seller
-            const sellerItems = curr.items.filter(item => 
-                item.productId && productIds.some(pid => pid.equals(item.productId))
-            );
-            const sellerTotal = sellerItems.reduce((s, i) => s + (i.price * i.quantity), 0);
-            return acc + sellerTotal;
-        }, 0);
+
+    let totalSales = 0;
+    let outstandingPayments = 0;
+
+    orders.forEach(curr => {
+      const isCancelled = curr.orderStatus === 'Cancelled';
+      const isPaid = curr.isSellerPaid || curr.paymentStatus === 'Paid';
+
+      const sellerItems = curr.items.filter(item => 
+        item.productId && productIds.some(pid => pid.equals(item.productId))
+      );
+
+      const sellerOrderTotal = sellerItems.reduce((s, i) => s + ((i.normalPrice || i.price || 0) * (i.quantity || 1)), 0);
+      
+      if (!isCancelled) {
+        totalSales += sellerOrderTotal;
+        if (!isPaid) {
+          outstandingPayments += sellerOrderTotal;
+        }
+      }
+    });
 
     res.json({
       totalProducts,
+      todayOrders,
+      totalOrders: orders.length,
       activeOrders,
       totalSales,
-      totalOrders: orders.length
+      outstandingPayments,
+      lowStockCount: lowStockProducts.length,
+      lowStockProducts
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
