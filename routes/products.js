@@ -65,37 +65,71 @@ async function applyCommissionToAllProducts(req) {
   const commissions = await loadCommissions(req);
   if (!commissions || commissions.length === 0) return { updatedCount: 0, logs: [] };
 
-  const { Product } = getModels(req);
-  const products = await Product.find().lean();
-  let updatedCount = 0;
+  let totalUpdated = 0;
 
-  for (const p of products) {
-    const updated = applyCommission(p, commissions);
-    if (
-      updated.price !== p.price ||
-      updated.b2bPrice !== p.b2bPrice ||
-      updated.sellerPrice !== p.sellerPrice ||
-      updated.commissionValue !== p.commissionValue ||
-      updated.commissionType !== p.commissionType ||
-      updated.commissionAmount !== p.commissionAmount
-    ) {
-      await Product.findByIdAndUpdate(p._id, {
-        sellerPrice: updated.sellerPrice,
-        sellerB2bPrice: updated.sellerB2bPrice,
-        commissionType: updated.commissionType,
-        commissionValue: updated.commissionValue,
-        commissionAmount: updated.commissionAmount,
-        price: updated.price,
-        b2bPrice: updated.b2bPrice,
-        b2c: updated.b2c,
-        b2b: updated.b2b,
-        priceTiers: updated.priceTiers
-      });
-      updatedCount++;
+  const updateProductList = async (ProductModel) => {
+    if (!ProductModel) return 0;
+    const products = await ProductModel.find().lean();
+    let count = 0;
+    for (const p of products) {
+      const updated = applyCommission(p, commissions);
+      if (
+        updated.price !== p.price ||
+        updated.b2bPrice !== p.b2bPrice ||
+        updated.sellerPrice !== p.sellerPrice ||
+        updated.commissionValue !== p.commissionValue ||
+        updated.commissionType !== p.commissionType ||
+        updated.commissionAmount !== p.commissionAmount
+      ) {
+        await ProductModel.findByIdAndUpdate(p._id, {
+          sellerPrice: updated.sellerPrice,
+          sellerUnitPrice: updated.sellerPrice,
+          sellerB2bPrice: updated.sellerB2bPrice,
+          commissionType: updated.commissionType,
+          commissionValue: updated.commissionValue,
+          commissionRate: updated.commissionValue,
+          commissionAmount: updated.commissionAmount,
+          unitCommission: updated.commissionAmount,
+          stockTotalCommission: updated.stockTotalCommission,
+          unitCustomerPrice: updated.price,
+          price: updated.price,
+          b2bPrice: updated.b2bPrice,
+          b2c: updated.b2c,
+          b2b: updated.b2b,
+          priceTiers: updated.priceTiers
+        });
+        count++;
+      }
     }
+    return count;
+  };
+
+  if (!req.locationId) {
+    try {
+      const centralConn = await mongoose.createConnection(process.env.MONGODB_URI).asPromise();
+      const CentralLocation = centralConn.models.Location || centralConn.model('Location', require('../models/Location').schema);
+      const locations = await CentralLocation.find({ isActive: true }).lean();
+      await centralConn.close();
+
+      for (const loc of locations) {
+        try {
+          const { connectDBByLocation } = require('../utils/db_manager');
+          const cityClean = loc.city.toLowerCase().replace(/\s+/g, '-');
+          const dbName = `zudo-${cityClean}`;
+          const connection = await connectDBByLocation(loc._id.toString(), dbName);
+          const TenantProduct = connection.models.Product || connection.model('Product', require('../models/Product').schema);
+          totalUpdated += await updateProductList(TenantProduct);
+        } catch (e) {
+          console.error(`Failed to update products for tenant ${loc.city}:`, e.message);
+        }
+      }
+    } catch (e) {}
   }
 
-  return { updatedCount, logs: [`Checked ${products.length} products. Applied to ${updatedCount}.`] };
+  const { Product } = getModels(req);
+  totalUpdated += await updateProductList(Product);
+
+  return { updatedCount: totalUpdated, logs: [`Applied commissions to ${totalUpdated} products.`] };
 }
 
 module.exports.loadCommissions = loadCommissions;
@@ -486,6 +520,162 @@ router.post('/bulk-upload', protect, excelUpload.single('file'), async (req, res
     res.status(201).json({ message: `Successfully uploaded ${results.length} products`, count: results.length });
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+});
+
+// Helper to extract stock for variant
+function getProductAvailableStock(product, variantSize, role = 'b2c') {
+  if (variantSize) {
+    const variantArray = role === 'b2b' ? (product.b2b || []) : (product.b2c || []);
+    let found = (variantArray || []).find(v => (v.packetSize || v.sizeName) === variantSize);
+    if (!found && product.variants) {
+      found = product.variants.find(v => (v.packetSize || v.sizeName) === variantSize);
+    }
+    if (found) return found.stock !== undefined ? found.stock : 0;
+  }
+  return product.stock !== undefined ? product.stock : 0;
+}
+
+// @route   POST /api/products/calculate-pricing (and /api/products/calculate-price)
+// @desc    Returns exact pricing response contract
+router.post(['/calculate-pricing', '/calculate-price'], async (req, res) => {
+  try {
+    const {
+      productId,
+      quantity,
+      orderedQuantity,
+      variantSize,
+      pincode,
+      isB2B,
+      sellerUnitPrice,
+      commissionType,
+      commissionRate,
+      commissionValue,
+      availableStock,
+      gstPercent
+    } = req.body;
+
+    const targetQty = parseInt(orderedQuantity !== undefined ? orderedQuantity : quantity, 10);
+    if (!targetQty || isNaN(targetQty) || targetQty <= 0) {
+      return res.status(400).json({ message: 'Quantity must be a positive integer.' });
+    }
+
+    if (productId) {
+      const { Product } = getModels(req);
+      const product = await Product.findById(productId).lean();
+      if (!product) return res.status(404).json({ message: 'Product not found' });
+
+      const stock = getProductAvailableStock(product, variantSize, isB2B ? 'b2b' : 'b2c');
+      if (stock < targetQty) {
+        return res.status(400).json({
+          message: `Insufficient stock for product "${product.name}". Available: ${stock}, Requested: ${targetQty}`
+        });
+      }
+
+      const commissions = await loadCommissions(req);
+      const rule = findCategoryCommission(commissions, product.categoryId, product.unit, pincode);
+
+      const commType = rule?.commissionType || commissionType || product.commissionType || 'flat';
+      const commVal = rule ? rule.commissionValue : (commissionRate ?? commissionValue ?? product.commissionValue ?? 0);
+
+      let unitPrice = 0;
+      if (isB2B) {
+        unitPrice = product.sellerB2bPrice !== undefined ? product.sellerB2bPrice : (product.sellerPrice || product.b2bPrice || product.price || 0);
+      } else {
+        unitPrice = product.sellerPrice !== undefined ? product.sellerPrice : (product.price || 0);
+      }
+
+      if (variantSize) {
+        const vArray = isB2B ? (product.b2b || []) : (product.b2c || []);
+        const vFound = vArray.find(v => (v.packetSize || v.sizeName) === variantSize);
+        if (vFound) {
+          unitPrice = vFound.sellerPrice !== undefined ? vFound.sellerPrice : (vFound.price || unitPrice);
+        }
+      }
+
+      const effectiveGst = gstPercent !== undefined ? gstPercent : (product.gstPercent || 0);
+
+      const breakdown = calculatePricingBreakdown({
+        sellerUnitPrice: unitPrice,
+        commissionType: commType,
+        commissionValue: commVal,
+        gstPercent: effectiveGst,
+        quantity: targetQty,
+        availableStock: stock,
+        isB2B: !!isB2B
+      });
+
+      return res.json(breakdown);
+    }
+
+    const breakdown = calculatePricingBreakdown({
+      sellerUnitPrice: sellerUnitPrice || 0,
+      commissionType: commissionType || 'flat',
+      commissionValue: commissionRate !== undefined ? commissionRate : (commissionValue || 0),
+      gstPercent: gstPercent || 0,
+      quantity: targetQty,
+      availableStock: availableStock || 0,
+      isB2B: !!isB2B
+    });
+
+    return res.json(breakdown);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// @route   GET /api/products/:id/pricing
+// @desc    Returns exact pricing response contract for a specific product
+router.get('/:id/pricing', async (req, res) => {
+  try {
+    const { Product } = getModels(req);
+    const product = await Product.findById(req.params.id).lean();
+    if (!product) return res.status(404).json({ message: 'Product not found' });
+
+    const quantityParam = req.query.orderedQuantity || req.query.quantity || 1;
+    const targetQty = parseInt(quantityParam, 10);
+    if (!targetQty || isNaN(targetQty) || targetQty <= 0) {
+      return res.status(400).json({ message: 'Quantity must be a positive integer.' });
+    }
+
+    const isB2B = req.query.isB2B === 'true' || req.query.role === 'b2b';
+    const variantSize = req.query.variantSize || null;
+    const stock = getProductAvailableStock(product, variantSize, isB2B ? 'b2b' : 'b2c');
+
+    const commissions = await loadCommissions(req);
+    const rule = findCategoryCommission(commissions, product.categoryId, product.unit, req.query.pincode);
+
+    const commType = rule?.commissionType || product.commissionType || 'flat';
+    const commVal = rule ? rule.commissionValue : (product.commissionValue || 0);
+
+    let unitPrice = 0;
+    if (isB2B) {
+      unitPrice = product.sellerB2bPrice !== undefined ? product.sellerB2bPrice : (product.sellerPrice || product.b2bPrice || product.price || 0);
+    } else {
+      unitPrice = product.sellerPrice !== undefined ? product.sellerPrice : (product.price || 0);
+    }
+
+    if (variantSize) {
+      const vArray = isB2B ? (product.b2b || []) : (product.b2c || []);
+      const vFound = vArray.find(v => (v.packetSize || v.sizeName) === variantSize);
+      if (vFound) {
+        unitPrice = vFound.sellerPrice !== undefined ? vFound.sellerPrice : (vFound.price || unitPrice);
+      }
+    }
+
+    const breakdown = calculatePricingBreakdown({
+      sellerUnitPrice: unitPrice,
+      commissionType: commType,
+      commissionValue: commVal,
+      gstPercent: product.gstPercent || 0,
+      quantity: targetQty,
+      availableStock: stock,
+      isB2B
+    });
+
+    return res.json(breakdown);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 });
 

@@ -230,13 +230,22 @@ function processProductPricing(payload, commissions = []) {
   const finalB2bPrice = (customerB2bPrice === 0 && processedB2b.length > 0) ? processedB2b[0].price : (customerB2bPrice || customerPrice);
   const finalPrice = (customerPrice === 0 && processedB2c.length > 0) ? processedB2c[0].price : (customerPrice || customerB2bPrice || finalB2bPrice);
 
+  const availableStock = typeof payload.stock === 'number' ? payload.stock : (parseInt(payload.stock, 10) || 0);
+  const stockTotalCommission = round2(commissionAmount * Math.max(0, availableStock));
+
   return {
     ...payload,
     sellerPrice,
+    sellerUnitPrice: sellerPrice,
     sellerB2bPrice,
     commissionType,
     commissionValue,
+    commissionRate: commissionValue,
     commissionAmount,
+    unitCommission: commissionAmount,
+    availableStock,
+    stockTotalCommission,
+    unitCustomerPrice: finalPrice,
     price: finalPrice,
     b2bPrice: finalB2bPrice,
     b2c: processedB2c,
@@ -339,13 +348,22 @@ function applyCommission(product, commissions = [], pincode = null) {
   const finalCustomerB2bPrice = (customerB2bPrice === 0 && newB2b.length > 0) ? newB2b[0].price : (customerB2bPrice || customerPrice);
   const finalCustomerPrice = (customerPrice === 0 && newB2c.length > 0) ? newB2c[0].price : (customerPrice || customerB2bPrice || finalCustomerB2bPrice);
 
+  const availableStock = typeof product.stock === 'number' ? product.stock : (parseInt(product.stock, 10) || 0);
+  const stockTotalCommission = round2(commissionAmount * Math.max(0, availableStock));
+
   return {
     ...product,
     sellerPrice,
+    sellerUnitPrice: sellerPrice,
     sellerB2bPrice,
     commissionType,
     commissionValue,
+    commissionRate: commissionValue,
     commissionAmount,
+    unitCommission: commissionAmount,
+    availableStock,
+    stockTotalCommission,
+    unitCustomerPrice: finalCustomerPrice,
     price: finalCustomerPrice,
     b2bPrice: finalCustomerB2bPrice,
     b2c: newB2c,
@@ -359,22 +377,30 @@ function applyCommission(product, commissions = [], pincode = null) {
  * Handles:
  * - Flat commission: Flat Commission Per Unit * Ordered Quantity
  * - Percentage commission: (Seller Unit Price * (Commission Rate / 100)) * Ordered Quantity
+ * - Stock-level commission: Unit Commission * Available Stock (for display only)
  * - GST rules:
  *     - B2B: GST added on top of totalCustomerBase (totalCustomerBase * (gstPercent / 100))
  *     - B2C: GST is inclusive in totalCustomerBase (totalCustomerBase - (totalCustomerBase / (1 + gstPercent / 100)))
+ *     - 0% GST: final price is seller price plus commission
  * - Stock limit enforcement & positive quantity validation
  */
 function calculatePricingBreakdown({
   sellerUnitPrice = 0,
   commissionType = 'flat',
   commissionValue = 0,
+  commissionRate = undefined,
   gstPercent = 0,
   quantity = 1,
+  orderedQuantity = undefined,
+  availableStock = 0,
   isB2B = false
 }) {
-  const qty = parseInt(quantity, 10) > 0 ? parseInt(quantity, 10) : 1;
+  const rawQty = orderedQuantity !== undefined ? orderedQuantity : quantity;
+  const qty = parseInt(rawQty, 10) > 0 ? parseInt(rawQty, 10) : 1;
   const sUnitPrice = typeof sellerUnitPrice === 'number' ? sellerUnitPrice : (parseFloat(sellerUnitPrice) || 0);
-  const cVal = typeof commissionValue === 'number' ? commissionValue : (parseFloat(commissionValue) || 0);
+
+  const rawCommVal = commissionRate !== undefined ? commissionRate : commissionValue;
+  const cVal = typeof rawCommVal === 'number' ? rawCommVal : (parseFloat(rawCommVal) || 0);
   const cType = commissionType === 'percentage' ? 'percentage' : 'flat';
 
   let unitCommission = 0;
@@ -384,6 +410,9 @@ function calculatePricingBreakdown({
     unitCommission = (sUnitPrice * cVal) / 100;
   }
   unitCommission = round2(unitCommission);
+
+  const stock = typeof availableStock === 'number' ? availableStock : (parseInt(availableStock, 10) || 0);
+  const stockTotalCommission = round2(unitCommission * Math.max(0, stock));
 
   const totalSellerPrice = round2(sUnitPrice * qty);
   const totalCommission = round2(unitCommission * qty);
@@ -408,19 +437,25 @@ function calculatePricingBreakdown({
   const unitGst = round2(totalGst / qty);
 
   return {
-    quantity: qty,
     sellerUnitPrice: sUnitPrice,
     commissionType: cType,
     commissionRate: cVal,
     unitCommission,
-    totalSellerPrice,
-    totalCommission,
-    totalCustomerBase,
-    gstPercent: gstRate,
-    unitGst,
-    totalGst,
+    availableStock: stock,
+    stockTotalCommission,
     unitCustomerPrice,
-    finalCustomerPrice
+    gstPercent: gstRate,
+    orderedQuantity: qty,
+    totalCommission,
+    totalSellerPrice,
+    totalGst,
+    finalCustomerPrice,
+    // backwards compatibility aliases
+    quantity: qty,
+    commissionValue: cVal,
+    commissionAmount: unitCommission,
+    totalCustomerBase,
+    unitGst
   };
 }
 

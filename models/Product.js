@@ -8,9 +8,14 @@ const productSchema = new mongoose.Schema({
   b2bPrice: { type: Number }, // Final customer selling price (B2B)
   sellerPrice: { type: Number }, // Base seller selling price (B2C)
   sellerB2bPrice: { type: Number }, // Base seller selling price (B2B)
+  sellerUnitPrice: { type: Number },
   commissionType: { type: String, enum: ['percentage', 'flat'], default: 'flat' },
   commissionValue: { type: Number, default: 0 },
+  commissionRate: { type: Number, default: 0 },
   commissionAmount: { type: Number, default: 0 }, // Evaluated commission per unit
+  unitCommission: { type: Number, default: 0 },
+  stockTotalCommission: { type: Number, default: 0 },
+  unitCustomerPrice: { type: Number },
   gstPercent: { type: Number, default: 0 },
   moq: { type: Number, default: 1 },
   unit: { type: String, required: true },

@@ -509,6 +509,7 @@ router.post('/', protect, async (req, res) => {
         commissionValue: Number(commVal) || 0,
         gstPercent: gstPercent,
         quantity: item.quantity,
+        availableStock: productData ? (productData.stock || 0) : 0,
         isB2B: targetUserRole === 'b2b'
       });
 
@@ -522,12 +523,21 @@ router.post('/', protect, async (req, res) => {
         variantSize: targetSize,
         name: name || 'Unknown Product',
         quantity: item.quantity,
+        orderedQuantity: item.quantity,
         price: breakdown.unitCustomerPrice,
+        unitCustomerPrice: breakdown.unitCustomerPrice,
         normalPrice: breakdown.sellerUnitPrice,
+        sellerUnitPrice: breakdown.sellerUnitPrice,
         commissionType: breakdown.commissionType,
         commissionValue: breakdown.commissionRate,
+        commissionRate: breakdown.commissionRate,
         commissionAmount: breakdown.unitCommission,
+        unitCommission: breakdown.unitCommission,
         totalCommission: breakdown.totalCommission,
+        totalSellerPrice: breakdown.totalSellerPrice,
+        finalCustomerPrice: breakdown.finalCustomerPrice,
+        availableStock: breakdown.availableStock,
+        stockTotalCommission: breakdown.stockTotalCommission,
         gstPercent: breakdown.gstPercent,
         gstAmount: breakdown.unitGst,
         totalGst: breakdown.totalGst,
@@ -1359,6 +1369,7 @@ router.post('/admin/create', protect, async (req, res) => {
         commissionValue: Number(commVal) || 0,
         gstPercent: gstPercent,
         quantity: item.quantity,
+        availableStock: productData ? (productData.stock || 0) : 0,
         isB2B: targetUser.role === 'b2b'
       });
 
@@ -1388,12 +1399,21 @@ router.post('/admin/create', protect, async (req, res) => {
         variantSize: targetSize,
         name: name,
         quantity: item.quantity,
+        orderedQuantity: item.quantity,
         price: breakdown.unitCustomerPrice,
+        unitCustomerPrice: breakdown.unitCustomerPrice,
         normalPrice: breakdown.sellerUnitPrice,
+        sellerUnitPrice: breakdown.sellerUnitPrice,
         commissionType: breakdown.commissionType,
         commissionValue: breakdown.commissionRate,
+        commissionRate: breakdown.commissionRate,
         commissionAmount: breakdown.unitCommission,
+        unitCommission: breakdown.unitCommission,
         totalCommission: breakdown.totalCommission,
+        totalSellerPrice: breakdown.totalSellerPrice,
+        finalCustomerPrice: breakdown.finalCustomerPrice,
+        availableStock: breakdown.availableStock,
+        stockTotalCommission: breakdown.stockTotalCommission,
         gstPercent: breakdown.gstPercent,
         gstAmount: breakdown.unitGst,
         totalGst: breakdown.totalGst,
@@ -1569,6 +1589,13 @@ router.put('/admin/:id/items', protect, async (req, res) => {
         }
       }
 
+      // Check stock limit
+      const targetSizeCheck = item.variantSize || item.selectedPacketSize;
+      const stockInfo = getProductStock(productData, targetSizeCheck, userRole);
+      if (stockInfo.stock < item.quantity) {
+        throw new Error(`Insufficient stock for product "${productData.name}"${targetSizeCheck ? ` (${targetSizeCheck})` : ''}. Available: ${stockInfo.stock}, Requested: ${item.quantity}`);
+      }
+
       const commRule = findCategoryCommission(commissions, productData.categoryId, productData.unit, order.shippingAddress?.pincode);
       const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
       const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
@@ -1579,6 +1606,7 @@ router.put('/admin/:id/items', protect, async (req, res) => {
         commissionValue: Number(commVal) || 0,
         gstPercent: gstPercent,
         quantity: item.quantity,
+        availableStock: productData ? (productData.stock || 0) : 0,
         isB2B: userRole === 'b2b'
       });
 
@@ -1607,12 +1635,21 @@ router.put('/admin/:id/items', protect, async (req, res) => {
         variantSize: targetSize,
         name: name,
         quantity: item.quantity,
+        orderedQuantity: item.quantity,
         price: breakdown.unitCustomerPrice,
+        unitCustomerPrice: breakdown.unitCustomerPrice,
         normalPrice: breakdown.sellerUnitPrice,
+        sellerUnitPrice: breakdown.sellerUnitPrice,
         commissionType: breakdown.commissionType,
         commissionValue: breakdown.commissionRate,
+        commissionRate: breakdown.commissionRate,
         commissionAmount: breakdown.unitCommission,
+        unitCommission: breakdown.unitCommission,
         totalCommission: breakdown.totalCommission,
+        totalSellerPrice: breakdown.totalSellerPrice,
+        finalCustomerPrice: breakdown.finalCustomerPrice,
+        availableStock: breakdown.availableStock,
+        stockTotalCommission: breakdown.stockTotalCommission,
         gstPercent: breakdown.gstPercent,
         gstAmount: breakdown.unitGst,
         totalGst: breakdown.totalGst,
