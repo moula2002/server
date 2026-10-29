@@ -132,10 +132,10 @@ async function applyCommissionToAllProducts(req) {
         }
       }
     } catch (e) {}
+  } else {
+    const { Product } = getModels(req);
+    totalUpdated += await updateProductList(Product);
   }
-
-  const { Product } = getModels(req);
-  totalUpdated += await updateProductList(Product);
 
   return { updatedCount: totalUpdated, logs: [`Applied commissions to ${totalUpdated} products.`] };
 }

@@ -26,11 +26,30 @@ router.get('/', protect, async (req, res) => {
 });
 
 
+// Helper to safely drop obsolete single-unit index if it exists
+const dropObsoleteCommissionIndex = async (CommissionModel) => {
+  try {
+    if (CommissionModel && CommissionModel.collection) {
+      const indexes = await CommissionModel.collection.indexes();
+      if (indexes.some(idx => idx.name === 'categoryId_1_unit_1')) {
+        await CommissionModel.collection.dropIndex('categoryId_1_unit_1');
+      }
+    }
+  } catch (e) {
+    // Ignore if index doesn't exist
+  }
+};
+
 // @route   GET /api/commissions/category/:categoryId
 // @desc    Get commissions for a specific category
 router.get('/category/:categoryId', protect, async (req, res) => {
   try {
     const { categoryId } = req.params;
+    if (!req.locationId) {
+      const { aggregateGET } = require('../utils/aggregator');
+      const comms = await aggregateGET('Commission', req, { categoryId });
+      return res.json(comms);
+    }
     const { Commission } = getModels(req);
     const comms = await Commission.find({ categoryId });
     res.json(comms);
@@ -43,23 +62,31 @@ router.get('/category/:categoryId', protect, async (req, res) => {
 // @desc    Bulk save commissions for a category
 router.put('/category/:categoryId', protect, async (req, res) => {
   const { categoryId } = req.params;
-  const { commissions } = req.body; // Array of { unit, commissionType, commissionValue }
-  
+  const { commissions } = req.body; // Array of { unit, commissionType, commissionValue, pincode }
+
+  if (!categoryId) {
+    return res.status(400).json({ message: 'Category ID is required' });
+  }
+
   // Filter unique rules to prevent unique index violation
   const rulesToInsert = [];
-  if (commissions && commissions.length > 0) {
+  if (Array.isArray(commissions) && commissions.length > 0) {
     const seen = new Set();
     for (const comm of commissions) {
-      const unit = comm.unit;
-      const pincode = comm.pincode || 'All';
-      const key = `${unit.toLowerCase()}-${pincode.toLowerCase()}`;
+      if (!comm || typeof comm !== 'object') continue;
+      const unit = String(comm.unit || '').trim();
+      if (!unit) continue;
+      const pincode = String(comm.pincode || 'All').trim() || 'All';
+      const key = `${unit.toLowerCase()}:::${pincode.toLowerCase()}`;
       if (!seen.has(key)) {
         seen.add(key);
+        const commissionType = comm.commissionType === 'flat' ? 'flat' : 'percentage';
+        const commissionValue = parseFloat(comm.commissionValue) || 0;
         rulesToInsert.push({
-          categoryId,
+          categoryId: mongoose.Types.ObjectId.isValid(categoryId) ? new mongoose.Types.ObjectId(categoryId) : categoryId,
           unit,
-          commissionType: comm.commissionType,
-          commissionValue: comm.commissionValue,
+          commissionType,
+          commissionValue,
           pincode
         });
       }
@@ -83,12 +110,15 @@ router.put('/category/:categoryId', protect, async (req, res) => {
           
           const Commission = connection.models.Commission || connection.model('Commission', require('../models/Commission').schema);
           
+          // Drop obsolete single-unit index if still present
+          await dropObsoleteCommissionIndex(Commission);
+
           // 1. Delete all existing rules for this category
           await Commission.deleteMany({ categoryId });
 
           // 2. Insert new ones
           if (rulesToInsert.length > 0) {
-            await Commission.insertMany(rulesToInsert);
+            await Commission.insertMany(rulesToInsert, { ordered: false });
           }
         } catch (err) {
           console.error(`Failed to update commissions for ${loc.city}:`, err.message);
@@ -97,28 +127,36 @@ router.put('/category/:categoryId', protect, async (req, res) => {
       try {
         const { applyCommissionToAllProducts } = require('./products');
         await applyCommissionToAllProducts(req);
-      } catch (err) {}
+      } catch (err) {
+        console.error('Failed to apply commissions to all products:', err.message);
+      }
       return res.json({ message: 'Commissions updated successfully across all branches.' });
     } else {
       const { Commission } = getModels(req);
       
+      // Drop obsolete single-unit index if still present
+      await dropObsoleteCommissionIndex(Commission);
+
       // 1. Delete all existing rules for this category to overwrite
       await Commission.deleteMany({ categoryId });
 
       // 2. Insert new ones
       if (rulesToInsert.length > 0) {
-        await Commission.insertMany(rulesToInsert);
+        await Commission.insertMany(rulesToInsert, { ordered: false });
       }
 
       try {
         const { applyCommissionToAllProducts } = require('./products');
         await applyCommissionToAllProducts(req);
-      } catch (err) {}
+      } catch (err) {
+        console.error('Failed to apply commissions to all products:', err.message);
+      }
       const updated = await Commission.find({ categoryId });
       res.json(updated);
     }
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('Error in PUT /api/commissions/category/:categoryId:', error);
+    res.status(500).json({ message: error.message || 'Failed to save commission rules' });
   }
 });
 
