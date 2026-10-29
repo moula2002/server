@@ -231,30 +231,28 @@ function processProductPricing(payload, commissions = []) {
   const finalPrice = (customerPrice === 0 && processedB2c.length > 0) ? processedB2c[0].price : (customerPrice || customerB2bPrice || finalB2bPrice);
 
   const availableStock = typeof payload.stock === 'number' ? payload.stock : (parseInt(payload.stock, 10) || 0);
-  const stockTotalCommission = round2(commissionAmount * Math.max(0, availableStock));
   const gstRate = typeof payload.gstPercent === 'number' ? payload.gstPercent : (parseFloat(payload.gstPercent) || 0);
   const isGstInclusive = Boolean(payload.isGstInclusive);
 
-  // Step 2: Calculate the Subtotal = Seller Unit Price + Total Stock Commission
-  const stockSubtotal = round2(sellerPrice + stockTotalCommission);
-
-  // Step 3 & 4: Calculate GST Amount and Total Amount
-  let stockGstAmount = 0;
-  let stockTotalAmount = stockSubtotal;
-
+  // Step 1: Seller GST Amount = Seller Unit Price * Seller GST Percentage / 100
+  let sellerGstAmount = 0;
   if (gstRate > 0) {
     if (isGstInclusive) {
-      const baseBeforeTax = stockSubtotal / (1 + gstRate / 100);
-      stockGstAmount = round2(stockSubtotal - baseBeforeTax);
-      stockTotalAmount = stockSubtotal;
+      const baseBeforeTax = sellerPrice / (1 + gstRate / 100);
+      sellerGstAmount = round2(sellerPrice - baseBeforeTax);
     } else {
-      stockGstAmount = round2(stockSubtotal * (gstRate / 100));
-      stockTotalAmount = round2(stockSubtotal + stockGstAmount);
+      sellerGstAmount = round2(sellerPrice * (gstRate / 100));
     }
-  } else {
-    stockGstAmount = 0;
-    stockTotalAmount = stockSubtotal;
   }
+
+  // Step 2: Total Stock Commission = Flat Commission per Unit * Available Stock
+  const stockTotalCommission = round2(commissionAmount * Math.max(0, availableStock));
+
+  // Step 3: Subtotal = Seller Unit Price + Total Stock Commission
+  const stockSubtotal = round2(sellerPrice + stockTotalCommission);
+
+  // Step 4: Total Amount = Subtotal + Seller GST Amount
+  const stockTotalAmount = isGstInclusive ? stockSubtotal : round2(stockSubtotal + sellerGstAmount);
 
   return {
     ...payload,
@@ -271,8 +269,10 @@ function processProductPricing(payload, commissions = []) {
     subtotal: stockSubtotal,
     stockSubtotal,
     gstPercent: gstRate,
-    gstAmount: stockGstAmount,
-    stockGstAmount,
+    sellerGstPercent: gstRate,
+    gstAmount: sellerGstAmount,
+    sellerGstAmount,
+    stockGstAmount: sellerGstAmount,
     totalAmount: stockTotalAmount,
     stockTotalAmount,
     isGstInclusive,
@@ -380,30 +380,28 @@ function applyCommission(product, commissions = [], pincode = null) {
   const finalCustomerPrice = (customerPrice === 0 && newB2c.length > 0) ? newB2c[0].price : (customerPrice || customerB2bPrice || finalCustomerB2bPrice);
 
   const availableStock = typeof product.stock === 'number' ? product.stock : (parseInt(product.stock, 10) || 0);
-  const stockTotalCommission = round2(commissionAmount * Math.max(0, availableStock));
   const gstRate = typeof product.gstPercent === 'number' ? product.gstPercent : (parseFloat(product.gstPercent) || 0);
   const isGstInclusive = Boolean(product.isGstInclusive);
 
-  // Step 2: Calculate the Subtotal = Seller Unit Price + Total Stock Commission
-  const stockSubtotal = round2(sellerPrice + stockTotalCommission);
-
-  // Step 3 & 4: Calculate GST Amount and Total Amount
-  let stockGstAmount = 0;
-  let stockTotalAmount = stockSubtotal;
-
+  // Step 1: Seller GST Amount = Seller Unit Price * Seller GST Percentage / 100
+  let sellerGstAmount = 0;
   if (gstRate > 0) {
     if (isGstInclusive) {
-      const baseBeforeTax = stockSubtotal / (1 + gstRate / 100);
-      stockGstAmount = round2(stockSubtotal - baseBeforeTax);
-      stockTotalAmount = stockSubtotal;
+      const baseBeforeTax = sellerPrice / (1 + gstRate / 100);
+      sellerGstAmount = round2(sellerPrice - baseBeforeTax);
     } else {
-      stockGstAmount = round2(stockSubtotal * (gstRate / 100));
-      stockTotalAmount = round2(stockSubtotal + stockGstAmount);
+      sellerGstAmount = round2(sellerPrice * (gstRate / 100));
     }
-  } else {
-    stockGstAmount = 0;
-    stockTotalAmount = stockSubtotal;
   }
+
+  // Step 2: Total Stock Commission = Flat Commission per Unit * Available Stock
+  const stockTotalCommission = round2(commissionAmount * Math.max(0, availableStock));
+
+  // Step 3: Subtotal = Seller Unit Price + Total Stock Commission
+  const stockSubtotal = round2(sellerPrice + stockTotalCommission);
+
+  // Step 4: Total Amount = Subtotal + Seller GST Amount
+  const stockTotalAmount = isGstInclusive ? stockSubtotal : round2(stockSubtotal + sellerGstAmount);
 
   return {
     ...product,
@@ -420,8 +418,10 @@ function applyCommission(product, commissions = [], pincode = null) {
     subtotal: stockSubtotal,
     stockSubtotal,
     gstPercent: gstRate,
-    gstAmount: stockGstAmount,
-    stockGstAmount,
+    sellerGstPercent: gstRate,
+    gstAmount: sellerGstAmount,
+    sellerGstAmount,
+    stockGstAmount: sellerGstAmount,
     totalAmount: stockTotalAmount,
     stockTotalAmount,
     isGstInclusive,
@@ -475,31 +475,29 @@ function calculatePricingBreakdown({
   unitCommission = round2(unitCommission);
 
   const stock = typeof availableStock === 'number' ? availableStock : (parseInt(availableStock, 10) || 0);
-  const stockTotalCommission = round2(unitCommission * Math.max(0, stock));
 
   const gstRate = typeof gstPercent === 'number' ? gstPercent : (parseFloat(gstPercent) || 0);
-
-  // Step 2: Calculate the Subtotal = Seller Unit Price + Total Stock Commission
-  const stockSubtotal = round2(sUnitPrice + stockTotalCommission);
-
-  // Step 3 & 4: Calculate GST Amount and Total Amount for Stock
   const stockIsInclusive = isGstInclusive !== undefined ? Boolean(isGstInclusive) : false;
-  let stockGstAmount = 0;
-  let stockTotalAmount = stockSubtotal;
 
+  // Step 1: Seller GST Amount = Seller Unit Price * Seller GST Percentage / 100
+  let sellerGstAmount = 0;
   if (gstRate > 0) {
     if (stockIsInclusive) {
-      const baseBeforeTax = stockSubtotal / (1 + gstRate / 100);
-      stockGstAmount = round2(stockSubtotal - baseBeforeTax);
-      stockTotalAmount = stockSubtotal;
+      const baseBeforeTax = sUnitPrice / (1 + gstRate / 100);
+      sellerGstAmount = round2(sUnitPrice - baseBeforeTax);
     } else {
-      stockGstAmount = round2(stockSubtotal * (gstRate / 100));
-      stockTotalAmount = round2(stockSubtotal + stockGstAmount);
+      sellerGstAmount = round2(sUnitPrice * (gstRate / 100));
     }
-  } else {
-    stockGstAmount = 0;
-    stockTotalAmount = stockSubtotal;
   }
+
+  // Step 2: Total Stock Commission = Flat Commission per Unit * Available Stock
+  const stockTotalCommission = round2(unitCommission * Math.max(0, stock));
+
+  // Step 3: Subtotal = Seller Unit Price + Total Stock Commission
+  const stockSubtotal = round2(sUnitPrice + stockTotalCommission);
+
+  // Step 4: Total Amount = Subtotal + Seller GST Amount
+  const stockTotalAmount = stockIsInclusive ? stockSubtotal : round2(stockSubtotal + sellerGstAmount);
 
   // Calculation for ordered quantity (orders / checkout)
   const totalSellerPrice = round2(sUnitPrice * qty);
@@ -533,8 +531,10 @@ function calculatePricingBreakdown({
     subtotal: stockSubtotal,
     stockSubtotal,
     gstPercent: gstRate,
-    gstAmount: stockGstAmount,
-    stockGstAmount,
+    sellerGstPercent: gstRate,
+    gstAmount: sellerGstAmount,
+    sellerGstAmount,
+    stockGstAmount: sellerGstAmount,
     totalAmount: stockTotalAmount,
     stockTotalAmount,
     isGstInclusive: stockIsInclusive,

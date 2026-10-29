@@ -18,6 +18,7 @@ const productSchema = new mongoose.Schema({
   subtotal: { type: Number, default: 0 },
   stockSubtotal: { type: Number, default: 0 },
   gstAmount: { type: Number, default: 0 },
+  sellerGstAmount: { type: Number, default: 0 },
   stockGstAmount: { type: Number, default: 0 },
   totalAmount: { type: Number, default: 0 },
   stockTotalAmount: { type: Number, default: 0 },
