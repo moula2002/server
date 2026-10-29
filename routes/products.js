@@ -91,6 +91,13 @@ async function applyCommissionToAllProducts(req) {
           commissionAmount: updated.commissionAmount,
           unitCommission: updated.commissionAmount,
           stockTotalCommission: updated.stockTotalCommission,
+          subtotal: updated.subtotal,
+          stockSubtotal: updated.stockSubtotal,
+          gstAmount: updated.gstAmount,
+          stockGstAmount: updated.stockGstAmount,
+          totalAmount: updated.totalAmount,
+          stockTotalAmount: updated.stockTotalAmount,
+          isGstInclusive: updated.isGstInclusive,
           unitCustomerPrice: updated.price,
           price: updated.price,
           b2bPrice: updated.b2bPrice,
@@ -322,6 +329,9 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       commissionType: req.body.commissionType,
       commissionValue: req.body.commissionValue,
       commissionAmount: req.body.commissionAmount,
+      stock: stock !== undefined ? stock : (req.body.stock || 0),
+      gstPercent: gstPercent || 0,
+      isGstInclusive: req.body.isGstInclusive !== undefined ? req.body.isGstInclusive : false,
       b2c: parsedB2c,
       b2b: parsedB2b,
       priceTiers: parsedPriceTiers
@@ -335,9 +345,21 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       b2bPrice: pricingPayload.b2bPrice,
       sellerPrice: pricingPayload.sellerPrice,
       sellerB2bPrice: pricingPayload.sellerB2bPrice,
+      sellerUnitPrice: pricingPayload.sellerUnitPrice,
       commissionType: pricingPayload.commissionType,
       commissionValue: pricingPayload.commissionValue,
+      commissionRate: pricingPayload.commissionRate,
       commissionAmount: pricingPayload.commissionAmount,
+      unitCommission: pricingPayload.unitCommission,
+      stockTotalCommission: pricingPayload.stockTotalCommission,
+      subtotal: pricingPayload.subtotal,
+      stockSubtotal: pricingPayload.stockSubtotal,
+      gstAmount: pricingPayload.gstAmount,
+      stockGstAmount: pricingPayload.stockGstAmount,
+      totalAmount: pricingPayload.totalAmount,
+      stockTotalAmount: pricingPayload.stockTotalAmount,
+      isGstInclusive: pricingPayload.isGstInclusive,
+      unitCustomerPrice: pricingPayload.unitCustomerPrice,
       gstPercent: gstPercent || 0,
       moq,
       unit,
@@ -602,7 +624,8 @@ router.post(['/calculate-pricing', '/calculate-price'], async (req, res) => {
         gstPercent: effectiveGst,
         quantity: targetQty,
         availableStock: stock,
-        isB2B: !!isB2B
+        isB2B: !!isB2B,
+        isGstInclusive: req.body.isGstInclusive !== undefined ? req.body.isGstInclusive : (product.isGstInclusive || false)
       });
 
       return res.json(breakdown);
@@ -615,7 +638,8 @@ router.post(['/calculate-pricing', '/calculate-price'], async (req, res) => {
       gstPercent: gstPercent || 0,
       quantity: targetQty,
       availableStock: availableStock || 0,
-      isB2B: !!isB2B
+      isB2B: !!isB2B,
+      isGstInclusive: req.body.isGstInclusive !== undefined ? req.body.isGstInclusive : false
     });
 
     return res.json(breakdown);
@@ -670,7 +694,8 @@ router.get('/:id/pricing', async (req, res) => {
       gstPercent: product.gstPercent || 0,
       quantity: targetQty,
       availableStock: stock,
-      isB2B
+      isB2B,
+      isGstInclusive: req.query.isGstInclusive !== undefined ? (req.query.isGstInclusive === 'true') : (product.isGstInclusive || false)
     });
 
     return res.json(breakdown);

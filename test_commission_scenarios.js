@@ -197,8 +197,96 @@ async function runTests() {
   assert(s8B2c.totalGst === 92.44, `B2C inclusive GST is ₹92.44 (got ${s8B2c.totalGst})`);
   console.log();
 
-  // --- SCENARIO 7: Actual MongoDB Data & Order Integration Test ---
-  console.log('Test Scenario 7: Actual MongoDB Data & Order Creation Verification');
+  // --- SCENARIO 8: Seller ₹200, Flat ₹2, Stock 50, GST 0% -> Total ₹300 ---
+  console.log('Test Scenario 8: Seller ₹200, Commission ₹2, Stock 50, GST 0%');
+  const s8 = calculatePricingBreakdown({
+    sellerUnitPrice: 200,
+    commissionType: 'flat',
+    commissionValue: 2,
+    availableStock: 50,
+    gstPercent: 0,
+    quantity: 1
+  });
+  assert(s8.unitCommission === 2, `Flat Commission per Unit is ₹2 (got ${s8.unitCommission})`);
+  assert(s8.availableStock === 50, `Available Stock is 50 (got ${s8.availableStock})`);
+  assert(s8.stockTotalCommission === 100, `Total Stock Commission is ₹100.00 (got ${s8.stockTotalCommission})`);
+  assert(s8.subtotal === 300, `Subtotal is ₹300.00 (got ${s8.subtotal})`);
+  assert(s8.gstAmount === 0, `GST Amount is ₹0.00 (got ${s8.gstAmount})`);
+  assert(s8.totalAmount === 300, `Total Amount is ₹300.00 (got ${s8.totalAmount})`);
+  console.log();
+
+  // --- SCENARIO 9: Seller ₹200, Flat ₹2, Stock 50, GST 5% on top -> Total ₹315 ---
+  console.log('Test Scenario 9: Seller ₹200, Commission ₹2, Stock 50, GST 5% added on top');
+  const s9 = calculatePricingBreakdown({
+    sellerUnitPrice: 200,
+    commissionType: 'flat',
+    commissionValue: 2,
+    availableStock: 50,
+    gstPercent: 5,
+    quantity: 1
+  });
+  assert(s9.unitCommission === 2, `Flat Commission per Unit is ₹2 (got ${s9.unitCommission})`);
+  assert(s9.availableStock === 50, `Available Stock is 50 (got ${s9.availableStock})`);
+  assert(s9.stockTotalCommission === 100, `Total Stock Commission is ₹100.00 (got ${s9.stockTotalCommission})`);
+  assert(s9.subtotal === 300, `Subtotal is ₹300.00 (got ${s9.subtotal})`);
+  assert(s9.gstAmount === 15, `GST Amount (5% of ₹300) is ₹15.00 (got ${s9.gstAmount})`);
+  assert(s9.totalAmount === 315, `Total Amount is ₹315.00 (got ${s9.totalAmount})`);
+  console.log();
+
+  // --- SCENARIO 10: Seller ₹200, Flat ₹2, Stock 50, GST 18% on top -> Total ₹354 ---
+  console.log('Test Scenario 10: Seller ₹200, Commission ₹2, Stock 50, GST 18% added on top');
+  const s10 = calculatePricingBreakdown({
+    sellerUnitPrice: 200,
+    commissionType: 'flat',
+    commissionValue: 2,
+    availableStock: 50,
+    gstPercent: 18,
+    quantity: 1
+  });
+  assert(s10.unitCommission === 2, `Flat Commission per Unit is ₹2 (got ${s10.unitCommission})`);
+  assert(s10.availableStock === 50, `Available Stock is 50 (got ${s10.availableStock})`);
+  assert(s10.stockTotalCommission === 100, `Total Stock Commission is ₹100.00 (got ${s10.stockTotalCommission})`);
+  assert(s10.subtotal === 300, `Subtotal is ₹300.00 (got ${s10.subtotal})`);
+  assert(s10.gstAmount === 54, `GST Amount (18% of ₹300) is ₹54.00 (got ${s10.gstAmount})`);
+  assert(s10.totalAmount === 354, `Total Amount is ₹354.00 (got ${s10.totalAmount})`);
+  console.log();
+
+  // --- SCENARIO 11: Products with different GST rates calculate independently ---
+  console.log('Test Scenario 11: Multiple products calculate independently with different GST rates');
+  const prodA = calculatePricingBreakdown({ sellerUnitPrice: 100, commissionValue: 5, availableStock: 20, gstPercent: 5 });
+  const prodB = calculatePricingBreakdown({ sellerUnitPrice: 100, commissionValue: 5, availableStock: 20, gstPercent: 12 });
+  const prodC = calculatePricingBreakdown({ sellerUnitPrice: 100, commissionValue: 5, availableStock: 20, gstPercent: 18 });
+  // ProdA: Subtotal = 100 + (5*20) = 200. GST 5% = 10. Total = 210.
+  assert(prodA.subtotal === 200 && prodA.gstAmount === 10 && prodA.totalAmount === 210,
+    `Prod A (5% GST): Subtotal ₹${prodA.subtotal}, GST ₹${prodA.gstAmount}, Total ₹${prodA.totalAmount}`);
+  // ProdB: Subtotal = 100 + (5*20) = 200. GST 12% = 24. Total = 224.
+  assert(prodB.subtotal === 200 && prodB.gstAmount === 24 && prodB.totalAmount === 224,
+    `Prod B (12% GST): Subtotal ₹${prodB.subtotal}, GST ₹${prodB.gstAmount}, Total ₹${prodB.totalAmount}`);
+  // ProdC: Subtotal = 100 + (5*20) = 200. GST 18% = 36. Total = 236.
+  assert(prodC.subtotal === 200 && prodC.gstAmount === 36 && prodC.totalAmount === 236,
+    `Prod C (18% GST): Subtotal ₹${prodC.subtotal}, GST ₹${prodC.gstAmount}, Total ₹${prodC.totalAmount}`);
+  console.log();
+
+  // --- SCENARIO 12: GST-inclusive products avoid double taxation ---
+  console.log('Test Scenario 12: GST-inclusive configuration follows existing rules without double taxation');
+  const s12Inclusive = calculatePricingBreakdown({
+    sellerUnitPrice: 200,
+    commissionType: 'flat',
+    commissionValue: 2,
+    availableStock: 50,
+    gstPercent: 18,
+    isGstInclusive: true
+  });
+  // Subtotal = 200 + (2*50) = 300.
+  // Base before tax = 300 / 1.18 = 254.24. GST = 300 - 254.24 = 45.76.
+  // Total Amount = 300.00 (tax is inclusive, NOT added twice).
+  assert(s12Inclusive.subtotal === 300, `Inclusive Subtotal is ₹300.00 (got ${s12Inclusive.subtotal})`);
+  assert(s12Inclusive.gstAmount === 45.76, `Inclusive GST is ₹45.76 (got ${s12Inclusive.gstAmount})`);
+  assert(s12Inclusive.totalAmount === 300, `Inclusive Total Amount is ₹300.00 without double taxation (got ${s12Inclusive.totalAmount})`);
+  console.log();
+
+  // --- SCENARIO 13: Actual MongoDB Data & Order Integration Test ---
+  console.log('Test Scenario 13: Actual MongoDB Data & Order Creation Verification');
   try {
     const conn = await mongoose.createConnection(process.env.MONGODB_URI).asPromise();
     console.log('  Connected to MongoDB successfully.');
@@ -225,6 +313,11 @@ async function runTests() {
       const enriched = applyCommission(sampleProduct, comms);
       assert(enriched.sellerUnitPrice !== undefined, 'Enriched product has sellerUnitPrice');
       assert(enriched.stockTotalCommission !== undefined, 'Enriched product has stockTotalCommission');
+      assert(enriched.subtotal !== undefined, `Enriched product has subtotal: ₹${enriched.subtotal}`);
+      assert(enriched.gstAmount !== undefined, `Enriched product has gstAmount: ₹${enriched.gstAmount}`);
+      assert(enriched.totalAmount !== undefined, `Enriched product has totalAmount: ₹${enriched.totalAmount}`);
+      assert(enriched.subtotal === round2(enriched.sellerUnitPrice + enriched.stockTotalCommission),
+        `Enriched product subtotal (₹${enriched.subtotal}) equals sellerUnitPrice (₹${enriched.sellerUnitPrice}) + stockTotalCommission (₹${enriched.stockTotalCommission})`);
       assert(enriched.unitCustomerPrice !== undefined, 'Enriched product has unitCustomerPrice');
 
       // 4. Test quantity validation logic

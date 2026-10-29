@@ -15,6 +15,13 @@ const productSchema = new mongoose.Schema({
   commissionAmount: { type: Number, default: 0 }, // Evaluated commission per unit
   unitCommission: { type: Number, default: 0 },
   stockTotalCommission: { type: Number, default: 0 },
+  subtotal: { type: Number, default: 0 },
+  stockSubtotal: { type: Number, default: 0 },
+  gstAmount: { type: Number, default: 0 },
+  stockGstAmount: { type: Number, default: 0 },
+  totalAmount: { type: Number, default: 0 },
+  stockTotalAmount: { type: Number, default: 0 },
+  isGstInclusive: { type: Boolean, default: false },
   unitCustomerPrice: { type: Number },
   gstPercent: { type: Number, default: 0 },
   moq: { type: Number, default: 1 },
