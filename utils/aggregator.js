@@ -146,4 +146,4 @@ const aggregateGET = async (modelName, req, query = {}, populate = [], select = 
   }
 };
 
-module.exports = { aggregateGET };
+module.exports = { aggregateGET, getCentralConn };

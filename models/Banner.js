@@ -1,13 +1,12 @@
 const mongoose = require('mongoose');
 
 const bannerSchema = new mongoose.Schema({
-  title: { type: String },
+  title: { type: String, default: '' },
   imageUrl: { type: String, required: true },
-  link: { type: String },
+  link: { type: String, default: '' },
   isActive: { type: Boolean, default: true },
   locationId: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'Location',
+    type: mongoose.Schema.Types.Mixed, 
     default: null 
   },
   type: {
