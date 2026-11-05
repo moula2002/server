@@ -52,7 +52,7 @@ router.post('/', protect, async (req, res) => {
       hashedPassword = await bcrypt.hash(password, salt);
     }
     
-    const driverData = { name, phone, password: hashedPassword, licenseNumber, vehicleDetails, cashManagement, vehicleNo, drivingLicense, aadharNumber };
+    const driverData = { name, phone, password: hashedPassword, licenseNumber: licenseNumber || '', vehicleDetails, cashManagement, vehicleNo, drivingLicense, aadharNumber };
     if (email && email.trim() !== '') driverData.email = email;
     if (type) driverData.type = type.toLowerCase();
     if (documents) {

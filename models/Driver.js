@@ -6,7 +6,7 @@ const driverSchema = new mongoose.Schema({
   phone: { type: String, required: true, unique: true },
   email: { type: String, unique: true },
   password: { type: String, required: true },
-  licenseNumber: { type: String, required: true },
+  licenseNumber: { type: String, default: '' },
   vehicleDetails: { type: String, required: true },
   vehicleNo: { type: String },
   drivingLicense: { type: String },
