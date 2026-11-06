@@ -186,6 +186,16 @@ router.get('/', async (req, res) => {
     const filter = {};
     if (req.portal === 'B2B') filter.b2b = { $exists: true, $not: { $size: 0 } };
     if (req.portal === 'B2C') filter.b2c = { $exists: true, $not: { $size: 0 } };
+    if (req.query.sellerId) {
+      const sId = req.query.sellerId;
+      const sObjId = mongoose.Types.ObjectId.isValid(sId) ? new mongoose.Types.ObjectId(sId) : null;
+      filter.$or = [
+        { sellerId: sId },
+        ...(sObjId ? [{ sellerId: sObjId }] : []),
+        { 'seller._id': sId },
+        ...(sObjId ? [{ 'seller._id': sObjId }] : [])
+      ];
+    }
 
     if (!req.locationId) {
       // Global Access - Aggregate from all active tenant databases!

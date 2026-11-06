@@ -258,6 +258,43 @@ router.get('/products', protect, async (req, res) => {
   }
 });
 
+// @route   GET /api/sellers/:id/products
+// @desc    Get products uploaded by a specific seller (Admin)
+router.get('/:id/products', protect, async (req, res) => {
+  try {
+    const sellerId = req.params.id;
+    const mongoose = require('mongoose');
+    const sellerObjId = mongoose.Types.ObjectId.isValid(sellerId) ? new mongoose.Types.ObjectId(sellerId) : null;
+
+    const query = {
+      $or: [
+        { sellerId: sellerId },
+        ...(sellerObjId ? [{ sellerId: sellerObjId }] : []),
+        { 'seller._id': sellerId },
+        ...(sellerObjId ? [{ 'seller._id': sellerObjId }] : [])
+      ]
+    };
+
+    let products = [];
+    if (!req.locationId) {
+      const { aggregateGET } = require('../utils/aggregator');
+      products = await aggregateGET('Product', req, query, ['categoryId', 'subCategoryId']);
+      if (!products || products.length === 0) {
+        const { Product: ProductModel } = getModels(req);
+        products = await ProductModel.find(query).populate('categoryId subCategoryId').lean();
+      }
+    } else {
+      const { Product: ProductModel } = getModels(req);
+      products = await ProductModel.find(query).populate('categoryId subCategoryId').lean();
+    }
+
+    res.json(products);
+  } catch (error) {
+    console.error('Error fetching seller products:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // @route   GET /api/sellers/orders
 // @desc    Get seller's orders
 router.get('/orders', protect, async (req, res) => {
