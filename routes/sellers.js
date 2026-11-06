@@ -523,6 +523,47 @@ router.put('/:id', protect, async (req, res) => {
     if (isVerified !== undefined) seller.isVerified = isVerified;
     if (b2b !== undefined) seller.b2b = b2b;
     if (b2c !== undefined) seller.b2c = b2c;
+    if (req.body.isProductVisible !== undefined) {
+      const isVis = Boolean(req.body.isProductVisible);
+      seller.isProductVisible = isVis;
+
+      const mongoose = require('mongoose');
+      const sellerObjId = mongoose.Types.ObjectId.isValid(seller._id) ? new mongoose.Types.ObjectId(seller._id) : null;
+      const prodQuery = {
+        $or: [
+          { sellerId: seller._id.toString() },
+          ...(sellerObjId ? [{ sellerId: sellerObjId }] : []),
+          { 'seller._id': seller._id.toString() },
+          ...(sellerObjId ? [{ 'seller._id': sellerObjId }] : [])
+        ]
+      };
+
+      const { Product: ProductModel } = getModels(req);
+      if (ProductModel) {
+        await ProductModel.updateMany(prodQuery, { $set: { isProductVisible: isVis } });
+      }
+
+      try {
+        const { connectDBByLocation } = require('../utils/db_manager');
+        const centralConn = await mongoose.createConnection(process.env.MONGODB_URI).asPromise();
+        const CentralLocation = centralConn.models.Location || centralConn.model('Location', require('../models/Location').schema);
+        const CentralProduct = centralConn.models.Product || centralConn.model('Product', require('../models/Product').schema);
+        await CentralProduct.updateMany(prodQuery, { $set: { isProductVisible: isVis } });
+
+        const locations = await CentralLocation.find({ isActive: true }).lean();
+        await centralConn.close();
+
+        for (const loc of locations) {
+          try {
+            const cityClean = loc.city.toLowerCase().replace(/\s+/g, '-');
+            const dbName = `zudo-${cityClean}`;
+            const conn = await connectDBByLocation(loc._id.toString(), dbName);
+            const TenantProduct = conn.models.Product || conn.model('Product', require('../models/Product').schema);
+            await TenantProduct.updateMany(prodQuery, { $set: { isProductVisible: isVis } });
+          } catch (tErr) {}
+        }
+      } catch (cErr) {}
+    }
 
     const updatedSeller = await seller.save();
     

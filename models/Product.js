@@ -33,6 +33,7 @@ const productSchema = new mongoose.Schema({
   stock: { type: Number, default: 0 },
   hsn: { type: String, default: '' },
   stockStatus: { type: String, enum: ['Available', 'Out of Stock'], default: 'Available' }, // Added stock
+  isProductVisible: { type: Boolean, default: true },
   description: { type: String },
   pdfUrl: { type: String },
   rating: { type: Number, default: 0 },

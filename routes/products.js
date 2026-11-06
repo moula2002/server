@@ -183,9 +183,27 @@ router.get('/', async (req, res) => {
     let productsWithSeller = [];
     const commissions = await loadCommissions(req);
 
+    // Check if request is from an authenticated admin
+    let isAdmin = false;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const token = req.headers.authorization.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded && decoded.id) {
+          const Admin = require('../models/Admin');
+          const adminAcc = await Admin.findById(decoded.id);
+          if (adminAcc) isAdmin = true;
+        }
+      } catch (e) {}
+    }
+
     const filter = {};
     if (req.portal === 'B2B') filter.b2b = { $exists: true, $not: { $size: 0 } };
     if (req.portal === 'B2C') filter.b2c = { $exists: true, $not: { $size: 0 } };
+    if (!isAdmin) {
+      filter.isProductVisible = { $ne: false };
+    }
     if (req.query.sellerId) {
       const sId = req.query.sellerId;
       const sObjId = mongoose.Types.ObjectId.isValid(sId) ? new mongoose.Types.ObjectId(sId) : null;
@@ -288,6 +306,9 @@ router.get('/', async (req, res) => {
       }));
     }
 
+    if (!isAdmin) {
+      productsWithSeller = productsWithSeller.filter(p => p.isProductVisible !== false && p.sellerId?.isProductVisible !== false);
+    }
     res.json(productsWithSeller);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -348,10 +369,21 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       priceTiers: parsedPriceTiers
     }, comms);
 
+    let isProductVisible = true;
+    if (sellerId) {
+      try {
+        let sel = await Seller.findById(sellerId).select('isProductVisible');
+        if (sel && sel.isProductVisible === false) {
+          isProductVisible = false;
+        }
+      } catch (e) {}
+    }
+
     const product = await Product.create({
       name,
       categoryId,
       subCategoryId: subCategoryId || null,
+      isProductVisible,
       price: pricingPayload.price,
       b2bPrice: pricingPayload.b2bPrice,
       sellerPrice: pricingPayload.sellerPrice,
@@ -598,6 +630,25 @@ router.post(['/calculate-pricing', '/calculate-price'], async (req, res) => {
       const { Product } = getModels(req);
       const product = await Product.findById(productId).lean();
       if (!product) return res.status(404).json({ message: 'Product not found' });
+
+    // Check if request is from an authenticated admin
+    let isAdminForId = false;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const token = req.headers.authorization.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded && decoded.id) {
+          const Admin = require('../models/Admin');
+          const adminAcc = await Admin.findById(decoded.id);
+          if (adminAcc) isAdminForId = true;
+        }
+      } catch (e) {}
+    }
+
+    if (!isAdminForId && product.isProductVisible === false) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
 
       const stock = getProductAvailableStock(product, variantSize, isB2B ? 'b2b' : 'b2c');
       if (stock < targetQty) {
