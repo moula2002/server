@@ -566,9 +566,15 @@ router.put('/:id', protect, async (req, res) => {
     }
 
     const updatedSeller = await seller.save();
+    if (req.body.isProductVisible !== undefined) {
+      await SellerModel.updateOne({ _id: seller._id }, { $set: { isProductVisible: Boolean(req.body.isProductVisible) } });
+    }
     
     // Select all fields except password
-    const returnedSeller = await SellerModel.findById(updatedSeller._id).select('-password');
+    const returnedSeller = await SellerModel.findById(updatedSeller._id).select('-password').lean();
+    if (returnedSeller && req.body.isProductVisible !== undefined) {
+      returnedSeller.isProductVisible = Boolean(req.body.isProductVisible);
+    }
     res.json(returnedSeller);
   } catch (error) {
     res.status(500).json({ message: error.message });

@@ -36,7 +36,8 @@ const sellerSchema = new mongoose.Schema({
   creditDays: { type: Number, default: 0 },
   currentSessionToken: { type: String, default: null },
   b2b: { type: Boolean, default: false },
-  b2c: { type: Boolean, default: false }
+  b2c: { type: Boolean, default: false },
+  isProductVisible: { type: Boolean, default: true }
 }, { timestamps: true });
 
 sellerSchema.pre('save', async function() {
