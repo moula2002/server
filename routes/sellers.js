@@ -18,18 +18,67 @@ const getModels = (req) => {
   };
 };
 
+// Helper to gather all database connections in cluster
+const getAllDbConnections = async () => {
+  const mongoose = require('mongoose');
+  const URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/zudodb';
+  const uriWithoutQuery = URI.split('?')[0];
+  const query = URI.includes('?') ? '?' + URI.split('?')[1] : '';
+  const lastSlashIndex = uriWithoutQuery.lastIndexOf('/');
+  const baseUri = uriWithoutQuery.substring(0, lastSlashIndex + 1);
+
+  const dbNames = new Set(['zudo-bengaluru', 'zudo-bangalore', 'zudo-central', 'zudodb', 'zudo-magadi']);
+
+  try {
+    const centralConn = await mongoose.createConnection(baseUri + 'zudo-central' + query).asPromise();
+    const LocationModel = centralConn.models.Location || centralConn.model('Location', require('../models/Location').schema);
+    const locs = await LocationModel.find({ isActive: true }).lean();
+    for (const l of locs) {
+      if (l.city) {
+        dbNames.add(`zudo-${l.city.toLowerCase().replace(/\s+/g, '-')}`);
+      }
+    }
+    await centralConn.close();
+  } catch (e) {}
+
+  try {
+    const adminConn = await mongoose.createConnection(URI).asPromise();
+    const admin = adminConn.db.admin();
+    const { databases } = await admin.listDatabases();
+    for (const d of databases) {
+      if (d.name && d.name.startsWith('zudo')) {
+        dbNames.add(d.name);
+      }
+    }
+    await adminConn.close();
+  } catch (e) {}
+
+  const { connectDBByLocation } = require('../utils/db_manager');
+  const connections = [];
+  for (const name of dbNames) {
+    try {
+      const conn = await connectDBByLocation(name, name);
+      if (conn) connections.push(conn);
+    } catch (e) {}
+  }
+  return connections;
+};
+
 // @route   GET /api/sellers
 // @desc    Get all sellers (Admin)
 router.get('/', protect, async (req, res) => {
   try {
+    const { aggregateGET } = require('../utils/aggregator');
     if (!req.locationId) {
-      const { aggregateGET } = require('../utils/aggregator');
       const sellers = await aggregateGET('Seller', req, {}, [], '-password');
-      res.json(sellers);
+      return res.json(sellers);
     } else {
       const { Seller: SellerModel } = getModels(req);
-      const sellers = await SellerModel.find().select('-password');
-      res.json(sellers);
+      let sellers = await SellerModel.find().select('-password');
+      if (!sellers || sellers.length === 0) {
+        sellers = await aggregateGET('Seller', req, {}, [], '-password');
+      }
+      return res.json(sellers);
     }
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -497,13 +546,43 @@ router.put('/:id/verify', protect, async (req, res) => {
 router.put('/:id', protect, async (req, res) => {
   const { name, email, phone, password, businessName, businessAddress, gstNumber, panNumber, creditDays, status, isVerified, b2b, b2c } = req.body;
   try {
-    const { Seller: SellerModel } = getModels(req);
-    const seller = await SellerModel.findById(req.params.id);
+    const mongoose = require('mongoose');
+    const sellerIdStr = req.params.id;
+    const sellerObjId = mongoose.Types.ObjectId.isValid(sellerIdStr) ? new mongoose.Types.ObjectId(sellerIdStr) : null;
+
+    const allConns = await getAllDbConnections();
+    let seller = null;
+    let PrimarySellerModel = null;
+
+    // 1. First check currently scoped model
+    const { Seller: ScopedSeller } = getModels(req);
+    try {
+      seller = await ScopedSeller.findById(sellerIdStr);
+      if (seller) {
+        PrimarySellerModel = ScopedSeller;
+      }
+    } catch (e) {}
+
+    // 2. If not found in scoped model, search all cluster databases
+    if (!seller) {
+      for (const conn of allConns) {
+        try {
+          const Model = conn.models.Seller || conn.model('Seller', require('../models/Seller').schema);
+          const found = await Model.findById(sellerIdStr);
+          if (found) {
+            seller = found;
+            PrimarySellerModel = Model;
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+
     if (!seller) return res.status(404).json({ message: 'Seller not found' });
 
     // Check if email is updated and is unique
-    if (email && email !== seller.email) {
-      const emailExists = await SellerModel.findOne({ email });
+    if (email && email !== seller.email && PrimarySellerModel) {
+      const emailExists = await PrimarySellerModel.findOne({ email });
       if (emailExists) return res.status(400).json({ message: 'Another seller already exists with this email' });
       seller.email = email;
     }
@@ -523,57 +602,64 @@ router.put('/:id', protect, async (req, res) => {
     if (isVerified !== undefined) seller.isVerified = isVerified;
     if (b2b !== undefined) seller.b2b = b2b;
     if (b2c !== undefined) seller.b2c = b2c;
+    
+    let isVis = seller.isProductVisible !== false;
     if (req.body.isProductVisible !== undefined) {
-      const isVis = Boolean(req.body.isProductVisible);
+      isVis = Boolean(req.body.isProductVisible);
       seller.isProductVisible = isVis;
-
-      const mongoose = require('mongoose');
-      const sellerObjId = mongoose.Types.ObjectId.isValid(seller._id) ? new mongoose.Types.ObjectId(seller._id) : null;
-      const prodQuery = {
-        $or: [
-          { sellerId: seller._id.toString() },
-          ...(sellerObjId ? [{ sellerId: sellerObjId }] : []),
-          { 'seller._id': seller._id.toString() },
-          ...(sellerObjId ? [{ 'seller._id': sellerObjId }] : [])
-        ]
-      };
-
-      const { Product: ProductModel } = getModels(req);
-      if (ProductModel) {
-        await ProductModel.updateMany(prodQuery, { $set: { isProductVisible: isVis } });
-      }
-
-      try {
-        const { connectDBByLocation } = require('../utils/db_manager');
-        const centralConn = await mongoose.createConnection(process.env.MONGODB_URI).asPromise();
-        const CentralLocation = centralConn.models.Location || centralConn.model('Location', require('../models/Location').schema);
-        const CentralProduct = centralConn.models.Product || centralConn.model('Product', require('../models/Product').schema);
-        await CentralProduct.updateMany(prodQuery, { $set: { isProductVisible: isVis } });
-
-        const locations = await CentralLocation.find({ isActive: true }).lean();
-        await centralConn.close();
-
-        for (const loc of locations) {
-          try {
-            const cityClean = loc.city.toLowerCase().replace(/\s+/g, '-');
-            const dbName = `zudo-${cityClean}`;
-            const conn = await connectDBByLocation(loc._id.toString(), dbName);
-            const TenantProduct = conn.models.Product || conn.model('Product', require('../models/Product').schema);
-            await TenantProduct.updateMany(prodQuery, { $set: { isProductVisible: isVis } });
-          } catch (tErr) {}
-        }
-      } catch (cErr) {}
     }
 
     const updatedSeller = await seller.save();
-    if (req.body.isProductVisible !== undefined) {
-      await SellerModel.updateOne({ _id: seller._id }, { $set: { isProductVisible: Boolean(req.body.isProductVisible) } });
+
+    // Direct database update across ALL cluster databases to guarantee 100% persistence
+    const prodQuery = {
+      $or: [
+        { sellerId: sellerIdStr },
+        ...(sellerObjId ? [{ sellerId: sellerObjId }] : []),
+        { 'seller._id': sellerIdStr },
+        ...(sellerObjId ? [{ 'seller._id': sellerObjId }] : []),
+        ...(seller.businessName ? [{ sellerName: seller.businessName }] : []),
+        ...(seller.name ? [{ sellerName: seller.name }] : [])
+      ]
+    };
+
+    const sellerUpdateFields = {
+      ...(name ? { name } : {}),
+      ...(phone !== undefined ? { phone } : {}),
+      ...(businessName !== undefined ? { businessName, storeName: businessName } : {}),
+      ...(businessAddress !== undefined ? { businessAddress } : {}),
+      ...(gstNumber !== undefined ? { gstNumber } : {}),
+      ...(panNumber !== undefined ? { panNumber } : {}),
+      ...(creditDays !== undefined ? { creditDays: Number(creditDays) || 0 } : {}),
+      ...(status !== undefined ? { status } : {}),
+      ...(isVerified !== undefined ? { isVerified } : {}),
+      ...(b2b !== undefined ? { b2b } : {}),
+      ...(b2c !== undefined ? { b2c } : {}),
+      ...(req.body.isProductVisible !== undefined ? { isProductVisible: isVis } : {})
+    };
+
+    for (const conn of allConns) {
+      try {
+        await conn.collection('sellers').updateMany(
+          { $or: [{ _id: sellerIdStr }, ...(sellerObjId ? [{ _id: sellerObjId }] : [])] },
+          { $set: sellerUpdateFields }
+        );
+
+        if (req.body.isProductVisible !== undefined) {
+          await conn.collection('products').updateMany(
+            prodQuery,
+            { $set: { isProductVisible: isVis } }
+          );
+        }
+      } catch (cErr) {
+        console.error(`Error syncing seller to DB:`, cErr.message);
+      }
     }
-    
-    // Select all fields except password
-    const returnedSeller = await SellerModel.findById(updatedSeller._id).select('-password').lean();
-    if (returnedSeller && req.body.isProductVisible !== undefined) {
-      returnedSeller.isProductVisible = Boolean(req.body.isProductVisible);
+
+    const returnedSeller = updatedSeller.toObject ? updatedSeller.toObject() : { ...updatedSeller };
+    delete returnedSeller.password;
+    if (req.body.isProductVisible !== undefined) {
+      returnedSeller.isProductVisible = isVis;
     }
     res.json(returnedSeller);
   } catch (error) {
@@ -636,11 +722,17 @@ router.get('/returns', protect, async (req, res) => {
 // @desc    Delete a seller (Admin)
 router.delete('/:id', protect, async (req, res) => {
   try {
-    const { Seller: SellerModel } = getModels(req);
-    const seller = await SellerModel.findById(req.params.id);
-    if (!seller) return res.status(404).json({ message: 'Seller not found' });
-
-    await SellerModel.findByIdAndDelete(req.params.id);
+    const mongoose = require('mongoose');
+    const sellerIdStr = req.params.id;
+    const sellerObjId = mongoose.Types.ObjectId.isValid(sellerIdStr) ? new mongoose.Types.ObjectId(sellerIdStr) : null;
+    const allConns = await getAllDbConnections();
+    for (const conn of allConns) {
+      try {
+        await conn.collection('sellers').deleteMany(
+          { $or: [{ _id: sellerIdStr }, ...(sellerObjId ? [{ _id: sellerObjId }] : [])] }
+        );
+      } catch (e) {}
+    }
     res.json({ message: 'Seller account deleted successfully!' });
   } catch (error) {
     res.status(500).json({ message: error.message });

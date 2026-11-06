@@ -719,6 +719,24 @@ router.get('/:id/pricing', async (req, res) => {
     const product = await Product.findById(req.params.id).lean();
     if (!product) return res.status(404).json({ message: 'Product not found' });
 
+    let isAdmin = false;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const token = req.headers.authorization.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded && decoded.id) {
+          const Admin = require('../models/Admin');
+          const adminAcc = await Admin.findById(decoded.id);
+          if (adminAcc) isAdmin = true;
+        }
+      } catch (e) {}
+    }
+
+    if (!isAdmin && product.isProductVisible === false) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+
     const quantityParam = req.query.orderedQuantity || req.query.quantity || 1;
     const targetQty = parseInt(quantityParam, 10);
     if (!targetQty || isNaN(targetQty) || targetQty <= 0) {
@@ -777,6 +795,24 @@ router.get('/:id', async (req, res) => {
       .lean();
 
     if (!product) return res.status(404).json({ message: 'Product not found' });
+
+    let isAdmin = false;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const token = req.headers.authorization.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded && decoded.id) {
+          const Admin = require('../models/Admin');
+          const adminAcc = await Admin.findById(decoded.id);
+          if (adminAcc) isAdmin = true;
+        }
+      } catch (e) {}
+    }
+
+    if (!isAdmin && product.isProductVisible === false) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
 
     let sellerGstNumber = null;
     let sellerName = 'Zudo Official';
