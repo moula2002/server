@@ -363,13 +363,96 @@ router.get('/users', protect, async (req, res) => {
   }
 });
 
+// Helper to resolve phone number for B2B users with fallback lookups
+const resolveUserPhone = async (user, req) => {
+  if (user.phone && String(user.phone).trim() !== '') return String(user.phone).trim();
+
+  // 1. Check saved addresses
+  if (user.savedAddresses && user.savedAddresses.length > 0) {
+    const addr = user.savedAddresses.find(a => a && a.phone && String(a.phone).trim() !== '');
+    if (addr) return String(addr.phone).trim();
+  }
+
+  const UserModel = getModel('User', req);
+
+  // 2. Check other user accounts with same email
+  if (user.email && UserModel) {
+    try {
+      const sameEmailUser = await UserModel.findOne({
+        email: user.email,
+        phone: { $exists: true, $nin: [null, ''] }
+      });
+      if (sameEmailUser?.phone) return String(sameEmailUser.phone).trim();
+    } catch (e) {}
+  }
+
+  // 3. Check seller profiles
+  try {
+    const SellerModel = getModel('Seller', req);
+    if (SellerModel) {
+      const seller = await SellerModel.findOne({
+        $or: [
+          ...(user.email ? [{ email: user.email }] : []),
+          ...(user.name ? [{ name: user.name }] : [])
+        ],
+        phone: { $exists: true, $nin: [null, ''] }
+      });
+      if (seller?.phone) return String(seller.phone).trim();
+    }
+  } catch (e) {}
+
+  // 4. Check sales profiles
+  try {
+    const activeDb = req.db || mongoose.connection;
+    const SalesModel = activeDb.models?.Sales || activeDb.model('Sales', Admin.schema, 'sales');
+    if (SalesModel) {
+      const sales = await SalesModel.findOne({
+        $or: [
+          ...(user.email ? [{ email: user.email }] : []),
+          ...(user.name ? [{ name: user.name }] : [])
+        ],
+        phone: { $exists: true, $nin: [null, ''] }
+      });
+      if (sales?.phone) return String(sales.phone).trim();
+    }
+  } catch (e) {}
+
+  // 5. Check order history
+  try {
+    const OrderModel = getModel('Order', req);
+    if (OrderModel) {
+      const order = await OrderModel.findOne({
+        $or: [
+          ...(user.email ? [{ 'customerDetails.email': user.email }, { 'customer.email': user.email }] : []),
+          { user: user._id }
+        ]
+      }).sort('-createdAt');
+      const orderPhone = order?.customerDetails?.phone || order?.shippingAddress?.phone || order?.customer?.phone;
+      if (orderPhone) return String(orderPhone).trim();
+    }
+  } catch (e) {}
+
+  return null;
+};
+
 // @route   GET /api/auth/b2b-pending
 // @desc    Get pending B2B users
 router.get('/b2b-pending', protect, async (req, res) => {
   try {
     const UserModel = getModel('User', req);
     const users = await UserModel.find({ role: 'b2b', isVerified: false }).sort('-createdAt');
-    res.json(users);
+    const enrichedUsers = await Promise.all(users.map(async (u) => {
+      const uObj = u.toObject ? u.toObject() : { ...u };
+      if (!uObj.phone || String(uObj.phone).trim() === '') {
+        const foundPhone = await resolveUserPhone(uObj, req);
+        if (foundPhone) {
+          uObj.phone = foundPhone;
+          UserModel.updateOne({ _id: u._id }, { $set: { phone: foundPhone } }).catch(() => {});
+        }
+      }
+      return uObj;
+    }));
+    res.json(enrichedUsers);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -381,7 +464,47 @@ router.get('/b2b-verified', protect, async (req, res) => {
   try {
     const UserModel = getModel('User', req);
     const users = await UserModel.find({ role: 'b2b', isVerified: true }).sort('-createdAt');
-    res.json(users);
+    const enrichedUsers = await Promise.all(users.map(async (u) => {
+      const uObj = u.toObject ? u.toObject() : { ...u };
+      if (!uObj.phone || String(uObj.phone).trim() === '') {
+        const foundPhone = await resolveUserPhone(uObj, req);
+        if (foundPhone) {
+          uObj.phone = foundPhone;
+          UserModel.updateOne({ _id: u._id }, { $set: { phone: foundPhone } }).catch(() => {});
+        }
+      }
+      return uObj;
+    }));
+    res.json(enrichedUsers);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   POST /api/auth/b2b-verify-submit
+// @desc    Submit B2B verification documents and details
+router.post('/b2b-verify-submit', protect, async (req, res) => {
+  try {
+    const UserModel = getModel('User', req);
+    const userId = req.user._id;
+    const { gstPdf, storePic, gstNumber, panNumber, aadhaarNumber, pincode, businessName, phone } = req.body;
+    
+    const updateFields = {
+      isWaitingApproval: true
+    };
+    if (gstPdf) updateFields.gstPdf = gstPdf;
+    if (storePic) updateFields.storePic = storePic;
+    if (gstNumber) updateFields.gstNumber = gstNumber;
+    if (panNumber) updateFields.panNumber = panNumber;
+    if (aadhaarNumber) updateFields.aadhaarNumber = aadhaarNumber;
+    if (pincode) updateFields.pincode = pincode;
+    if (businessName) updateFields.businessName = businessName;
+    if (phone) updateFields.phone = phone;
+
+    const user = await UserModel.findByIdAndUpdate(userId, updateFields, { new: true });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    
+    res.json(formatUser(user));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

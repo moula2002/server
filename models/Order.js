@@ -215,6 +215,18 @@ const orderSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  orderRef: {
+    type: String,
+    default: null
+  },
+  invoiceNumber: {
+    type: String,
+    default: null
+  },
+  invoiceSequence: {
+    type: Number,
+    default: null
+  },
   createdAt: {
     type: Date,
     default: Date.now

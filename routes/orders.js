@@ -13,6 +13,25 @@ const { loadCommissions } = require('./products');
 const { applyCommission, calculatePricingBreakdown, findCategoryCommission, round2 } = require('../utils/pricing');
 
 // Helper to get models from req with fallback to global imports
+
+// Helper to automatically assign sequential invoice and order reference numbers
+const assignInvoiceDetails = async (OrderModel) => {
+  try {
+    const lastSeqOrder = await OrderModel.findOne({ invoiceSequence: { $exists: true, $ne: null } })
+      .sort({ invoiceSequence: -1 })
+      .select('invoiceSequence');
+    const nextSeq = (lastSeqOrder && typeof lastSeqOrder.invoiceSequence === 'number') 
+      ? lastSeqOrder.invoiceSequence + 1 
+      : (await OrderModel.countDocuments() + 1);
+    const orderRef = `SNB-${700 + nextSeq}`;
+    const invoiceNumber = `${orderRef}/${nextSeq}`;
+    return { invoiceSequence: nextSeq, orderRef, invoiceNumber };
+  } catch (err) {
+    const fallbackSeq = 1;
+    return { invoiceSequence: fallbackSeq, orderRef: `SNB-${700 + fallbackSeq}`, invoiceNumber: `SNB-${700 + fallbackSeq}/${fallbackSeq}` };
+  }
+};
+
 const getModels = (req) => {
   return {
     Order: req.models?.Order || Order,
@@ -617,6 +636,8 @@ router.post('/', protect, async (req, res) => {
     const totalCommissionCollectedRounded = round2(totalCommissionCollected);
     const totalGstCollectedRounded = round2(totalGstCollected);
 
+    const { invoiceSequence, orderRef, invoiceNumber } = await assignInvoiceDetails(OrderModel);
+
     const order = new OrderModel({
       userId: targetUserId,
       type: targetUserRole === 'b2b' ? 'b2b' : 'b2c',
@@ -634,7 +655,10 @@ router.post('/', protect, async (req, res) => {
       deliveryOtp: generateOTP(4),
       deliverySlot: finalDeliverySlot,
       placedBySalesAssociate: isSalesOrder,
-      salesAssociateId: salesAssociateId
+      salesAssociateId: salesAssociateId,
+      invoiceSequence,
+      orderRef,
+      invoiceNumber
     });
 
     const createdOrder = await order.save();
@@ -1443,6 +1467,8 @@ router.post('/admin/create', protect, async (req, res) => {
     const totalCommissionCollectedRounded = round2(totalCommissionCollected);
     const totalGstCollectedRounded = round2(totalGstCollected);
 
+    const { invoiceSequence: adminInvSeq, orderRef: adminOrdRef, invoiceNumber: adminInvNum } = await assignInvoiceDetails(OrderModel);
+
     const order = new OrderModel({
       userId,
       type: targetUser.role === 'b2b' ? 'b2b' : 'b2c',
@@ -1457,7 +1483,10 @@ router.post('/admin/create', protect, async (req, res) => {
       orderStatus: 'Pending',
       pickupCode: globalPickupOtp,
       sellerPickups: sellerPickups,
-      deliveryOtp: generateOTP(4)
+      deliveryOtp: generateOTP(4),
+      invoiceSequence: adminInvSeq,
+      orderRef: adminOrdRef,
+      invoiceNumber: adminInvNum
     });
 
     const createdOrder = await order.save();
@@ -1968,6 +1997,25 @@ router.put('/:id/routes', protect, async (req, res) => {
 
     await order.save();
     res.json({ message: 'Order routes updated successfully', order });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+
+// @route   PUT /api/orders/:id/invoice-number
+// @desc    Update custom invoice number and order ref for an order
+// @access  Private
+router.put('/:id/invoice-number', protect, async (req, res) => {
+  try {
+    const { Order: OrderModel } = getModels(req);
+    const { invoiceNumber, orderRef } = req.body;
+    const order = await OrderModel.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+    if (invoiceNumber) order.invoiceNumber = invoiceNumber;
+    if (orderRef) order.orderRef = orderRef;
+    await order.save();
+    res.json(order);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
