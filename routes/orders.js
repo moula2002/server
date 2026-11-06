@@ -24,11 +24,11 @@ const assignInvoiceDetails = async (OrderModel) => {
       ? lastSeqOrder.invoiceSequence + 1 
       : (await OrderModel.countDocuments() + 1);
     const orderRef = `SNB-${700 + nextSeq}`;
-    const invoiceNumber = `${orderRef}/${nextSeq}`;
+    const invoiceNumber = orderRef;
     return { invoiceSequence: nextSeq, orderRef, invoiceNumber };
   } catch (err) {
     const fallbackSeq = 1;
-    return { invoiceSequence: fallbackSeq, orderRef: `SNB-${700 + fallbackSeq}`, invoiceNumber: `SNB-${700 + fallbackSeq}/${fallbackSeq}` };
+    return { invoiceSequence: fallbackSeq, orderRef: `SNB-${700 + fallbackSeq}`, invoiceNumber: `SNB-${700 + fallbackSeq}` };
   }
 };
 
