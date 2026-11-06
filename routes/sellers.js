@@ -19,49 +19,64 @@ const getModels = (req) => {
 };
 
 // Helper to gather all database connections in cluster
-const getAllDbConnections = async () => {
+const getAllDbConnections = async (req = null) => {
   const mongoose = require('mongoose');
-  const URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/zudodb';
-  const uriWithoutQuery = URI.split('?')[0];
-  const query = URI.includes('?') ? '?' + URI.split('?')[1] : '';
-  const lastSlashIndex = uriWithoutQuery.lastIndexOf('/');
-  const baseUri = uriWithoutQuery.substring(0, lastSlashIndex + 1);
+  const { connectDBByLocation, getTenantConnections } = require('../utils/db_manager');
+  
+  const connectionsMap = new Map();
 
-  const dbNames = new Set(['zudo-bengaluru', 'zudo-bangalore', 'zudo-central', 'zudodb', 'zudo-magadi']);
+  // 1. Add current default mongoose connection
+  if (mongoose.connection && mongoose.connection.readyState === 1) {
+    connectionsMap.set(mongoose.connection.name || 'default', mongoose.connection);
+  }
 
-  try {
-    const centralConn = await mongoose.createConnection(baseUri + 'zudo-central' + query).asPromise();
-    const LocationModel = centralConn.models.Location || centralConn.model('Location', require('../models/Location').schema);
-    const locs = await LocationModel.find({ isActive: true }).lean();
-    for (const l of locs) {
-      if (l.city) {
-        dbNames.add(`zudo-${l.city.toLowerCase().replace(/\s+/g, '-')}`);
-      }
+  // 2. Add currently scoped connection from req if available
+  if (req?.db && req.db.readyState === 1) {
+    connectionsMap.set(req.db.name || 'scoped', req.db);
+  }
+
+  // 3. Add all cached tenant connections from db_manager
+  const cachedConns = getTenantConnections();
+  for (const [key, conn] of Object.entries(cachedConns)) {
+    if (conn && conn.readyState === 1) {
+      connectionsMap.set(conn.name || key, conn);
     }
-    await centralConn.close();
-  } catch (e) {}
+  }
 
-  try {
-    const adminConn = await mongoose.createConnection(URI).asPromise();
-    const admin = adminConn.db.admin();
-    const { databases } = await admin.listDatabases();
-    for (const d of databases) {
-      if (d.name && d.name.startsWith('zudo')) {
-        dbNames.add(d.name);
-      }
-    }
-    await adminConn.close();
-  } catch (e) {}
-
-  const { connectDBByLocation } = require('../utils/db_manager');
-  const connections = [];
-  for (const name of dbNames) {
+  // 4. Ensure known tenant databases are connected
+  const baseTenants = ['zudo-bengaluru', 'zudo-bangalore', 'zudo-central', 'zudodb'];
+  for (const name of baseTenants) {
     try {
       const conn = await connectDBByLocation(name, name);
-      if (conn) connections.push(conn);
+      if (conn && conn.readyState === 1) {
+        connectionsMap.set(conn.name || name, conn);
+      }
     } catch (e) {}
   }
-  return connections;
+
+  // 5. Discover additional tenant databases from central location documents if any
+  try {
+    const centralConn = connectionsMap.get('zudo-central') || connectionsMap.get('zudo-bengaluru');
+    if (centralConn) {
+      const LocationModel = centralConn.models.Location || centralConn.model('Location', require('../models/Location').schema);
+      const locs = await LocationModel.find({ isActive: true }).lean();
+      for (const l of locs) {
+        if (l.city) {
+          const dbName = `zudo-${l.city.toLowerCase().replace(/\s+/g, '-')}`;
+          if (!connectionsMap.has(dbName)) {
+            try {
+              const conn = await connectDBByLocation(l._id ? l._id.toString() : dbName, dbName);
+              if (conn && conn.readyState === 1) {
+                connectionsMap.set(conn.name || dbName, conn);
+              }
+            } catch (ce) {}
+          }
+        }
+      }
+    }
+  } catch (e) {}
+
+  return Array.from(connectionsMap.values());
 };
 
 // @route   GET /api/sellers
@@ -88,7 +103,7 @@ router.get('/', protect, async (req, res) => {
 // @route   POST /api/sellers
 // @desc    Create a new seller (Admin)
 router.post('/', protect, async (req, res) => {
-  const { name, email, password, b2b, b2c, creditDays, businessName, status, isVerified, locationId } = req.body;
+  const { name, email, password, b2b, b2c, creditDays, businessName, status, isVerified, locationId, isProductVisible } = req.body;
   try {
     const { Seller: SellerModel } = getModels(req);
     const sellerExists = await SellerModel.findOne({ email });
@@ -104,7 +119,8 @@ router.post('/', protect, async (req, res) => {
       businessName,
       storeName: businessName,
       status,
-      isVerified
+      isVerified,
+      isProductVisible: isProductVisible !== undefined ? Boolean(isProductVisible) : true
     });
 
     res.status(201).json(seller);
@@ -544,26 +560,32 @@ router.put('/:id/verify', protect, async (req, res) => {
 // @route   PUT /api/sellers/:id
 // @desc    Update a seller's details (Admin)
 router.put('/:id', protect, async (req, res) => {
-  const { name, email, phone, password, businessName, businessAddress, gstNumber, panNumber, creditDays, status, isVerified, b2b, b2c } = req.body;
+  const { 
+    name, email, phone, password, businessName, businessAddress, 
+    gstNumber, panNumber, creditDays, status, isVerified, b2b, b2c,
+    isProductVisible 
+  } = req.body;
   try {
     const mongoose = require('mongoose');
     const sellerIdStr = req.params.id;
     const sellerObjId = mongoose.Types.ObjectId.isValid(sellerIdStr) ? new mongoose.Types.ObjectId(sellerIdStr) : null;
 
-    const allConns = await getAllDbConnections();
+    const allConns = await getAllDbConnections(req);
     let seller = null;
     let PrimarySellerModel = null;
+    let targetConn = null;
 
-    // 1. First check currently scoped model
+    // 1. First check currently scoped model from req
     const { Seller: ScopedSeller } = getModels(req);
     try {
       seller = await ScopedSeller.findById(sellerIdStr);
       if (seller) {
         PrimarySellerModel = ScopedSeller;
+        targetConn = req.db || mongoose.connection;
       }
     } catch (e) {}
 
-    // 2. If not found in scoped model, search all cluster databases
+    // 2. If not found in scoped model, search across all cluster databases
     if (!seller) {
       for (const conn of allConns) {
         try {
@@ -572,6 +594,7 @@ router.put('/:id', protect, async (req, res) => {
           if (found) {
             seller = found;
             PrimarySellerModel = Model;
+            targetConn = conn;
             break;
           }
         } catch (e) {}
@@ -580,14 +603,14 @@ router.put('/:id', protect, async (req, res) => {
 
     if (!seller) return res.status(404).json({ message: 'Seller not found' });
 
-    // Check if email is updated and is unique
+    // Check if email is updated and is unique in primary database
     if (email && email !== seller.email && PrimarySellerModel) {
       const emailExists = await PrimarySellerModel.findOne({ email });
       if (emailExists) return res.status(400).json({ message: 'Another seller already exists with this email' });
       seller.email = email;
     }
 
-    if (name) seller.name = name;
+    if (name !== undefined) seller.name = name;
     if (phone !== undefined) seller.phone = phone;
     if (password) seller.password = password; // pre-save hook handles hashing
     if (businessName !== undefined) {
@@ -603,66 +626,116 @@ router.put('/:id', protect, async (req, res) => {
     if (b2b !== undefined) seller.b2b = b2b;
     if (b2c !== undefined) seller.b2c = b2c;
     
-    let isVis = seller.isProductVisible !== false;
-    if (req.body.isProductVisible !== undefined) {
-      isVis = Boolean(req.body.isProductVisible);
+    let isVis = undefined;
+    if (isProductVisible !== undefined) {
+      isVis = Boolean(isProductVisible);
       seller.isProductVisible = isVis;
     }
 
-    const updatedSeller = await seller.save();
+    // Save seller model
+    await seller.save();
 
-    // Direct database update across ALL cluster databases to guarantee 100% persistence
+    // Define product matching criteria precisely:
+    // 1. By sellerId (ObjectId and String)
+    // 2. By nested seller._id (ObjectId and String)
+    // 3. By seller (ObjectId and String)
+    // 4. By sellerName matching businessName, storeName, or name (excluding generic fallback 'Zudo Official')
     const prodQuery = {
       $or: [
         { sellerId: sellerIdStr },
         ...(sellerObjId ? [{ sellerId: sellerObjId }] : []),
         { 'seller._id': sellerIdStr },
         ...(sellerObjId ? [{ 'seller._id': sellerObjId }] : []),
-        ...(seller.businessName ? [{ sellerName: seller.businessName }] : []),
-        ...(seller.name ? [{ sellerName: seller.name }] : [])
+        { seller: sellerIdStr },
+        ...(sellerObjId ? [{ seller: sellerObjId }] : [])
       ]
     };
 
-    const sellerUpdateFields = {
-      ...(name ? { name } : {}),
-      ...(phone !== undefined ? { phone } : {}),
-      ...(businessName !== undefined ? { businessName, storeName: businessName } : {}),
-      ...(businessAddress !== undefined ? { businessAddress } : {}),
-      ...(gstNumber !== undefined ? { gstNumber } : {}),
-      ...(panNumber !== undefined ? { panNumber } : {}),
-      ...(creditDays !== undefined ? { creditDays: Number(creditDays) || 0 } : {}),
-      ...(status !== undefined ? { status } : {}),
-      ...(isVerified !== undefined ? { isVerified } : {}),
-      ...(b2b !== undefined ? { b2b } : {}),
-      ...(b2c !== undefined ? { b2c } : {}),
-      ...(req.body.isProductVisible !== undefined ? { isProductVisible: isVis } : {})
-    };
+    const businessNameToMatch = (seller.businessName || seller.storeName || '').trim();
+    if (businessNameToMatch && businessNameToMatch !== 'Zudo Official' && businessNameToMatch.length > 1) {
+      prodQuery.$or.push({ sellerName: businessNameToMatch });
+    }
+    const sellerNameToMatch = (seller.name || '').trim();
+    if (sellerNameToMatch && sellerNameToMatch !== 'Zudo Official' && sellerNameToMatch !== businessNameToMatch && sellerNameToMatch.length > 1) {
+      prodQuery.$or.push({ sellerName: sellerNameToMatch });
+    }
 
+    const sellerUpdateFields = {};
+    if (name !== undefined) sellerUpdateFields.name = name;
+    if (phone !== undefined) sellerUpdateFields.phone = phone;
+    if (businessName !== undefined) {
+      sellerUpdateFields.businessName = businessName;
+      sellerUpdateFields.storeName = businessName;
+    }
+    if (businessAddress !== undefined) sellerUpdateFields.businessAddress = businessAddress;
+    if (gstNumber !== undefined) sellerUpdateFields.gstNumber = gstNumber;
+    if (panNumber !== undefined) sellerUpdateFields.panNumber = panNumber;
+    if (creditDays !== undefined) sellerUpdateFields.creditDays = Number(creditDays) || 0;
+    if (status !== undefined) sellerUpdateFields.status = status;
+    if (isVerified !== undefined) sellerUpdateFields.isVerified = isVerified;
+    if (b2b !== undefined) sellerUpdateFields.b2b = b2b;
+    if (b2c !== undefined) sellerUpdateFields.b2c = b2c;
+    if (isVis !== undefined) sellerUpdateFields.isProductVisible = isVis;
+
+    // Direct atomic updates across ALL cluster databases to guarantee 100% persistence
     for (const conn of allConns) {
       try {
-        await conn.collection('sellers').updateMany(
-          { $or: [{ _id: sellerIdStr }, ...(sellerObjId ? [{ _id: sellerObjId }] : [])] },
-          { $set: sellerUpdateFields }
-        );
+        if (Object.keys(sellerUpdateFields).length > 0) {
+          await conn.collection('sellers').updateMany(
+            { $or: [{ _id: sellerIdStr }, ...(sellerObjId ? [{ _id: sellerObjId }] : [])] },
+            { $set: sellerUpdateFields }
+          );
+        }
 
-        if (req.body.isProductVisible !== undefined) {
-          await conn.collection('products').updateMany(
+        if (isVis !== undefined) {
+          const pRes = await conn.collection('products').updateMany(
             prodQuery,
             { $set: { isProductVisible: isVis } }
           );
+          if (pRes.modifiedCount > 0) {
+            console.log(`[Product Visibility Sync] Updated ${pRes.modifiedCount} products in ${conn.name} to isProductVisible: ${isVis}`);
+          }
         }
       } catch (cErr) {
-        console.error(`Error syncing seller to DB:`, cErr.message);
+        console.error(`Error syncing seller to DB (${conn.name}):`, cErr.message);
       }
     }
 
-    const returnedSeller = updatedSeller.toObject ? updatedSeller.toObject() : { ...updatedSeller };
-    delete returnedSeller.password;
-    if (req.body.isProductVisible !== undefined) {
-      returnedSeller.isProductVisible = isVis;
+    // Explicitly verify the saved database record directly from MongoDB Atlas
+    const verifyDb = targetConn || mongoose.connection;
+    const verifiedSeller = await verifyDb.collection('sellers').findOne({
+      $or: [{ _id: sellerIdStr }, ...(sellerObjId ? [{ _id: sellerObjId }] : [])]
+    });
+
+    if (!verifiedSeller) {
+      return res.status(500).json({ message: 'Verification error: Updated seller not found in database.' });
     }
+
+    if (isVis !== undefined && verifiedSeller.isProductVisible !== isVis) {
+      return res.status(500).json({ 
+        message: `Database synchronization error: Seller isProductVisible failed to update in database. Expected ${isVis}, found ${verifiedSeller.isProductVisible}.`,
+        expected: isVis,
+        actual: verifiedSeller.isProductVisible
+      });
+    }
+
+    // Broadcast real-time change via Socket.io
+    try {
+      const { getIO } = require('../utils/socket');
+      const io = getIO();
+      if (io) {
+        io.emit('data_updated', { model: 'Seller', operation: 'update', timestamp: new Date() });
+        if (isVis !== undefined) {
+          io.emit('data_updated', { model: 'Product', operation: 'update', timestamp: new Date() });
+        }
+      }
+    } catch (sErr) {}
+
+    const returnedSeller = { ...verifiedSeller };
+    delete returnedSeller.password;
     res.json(returnedSeller);
   } catch (error) {
+    console.error('Error updating seller:', error);
     res.status(500).json({ message: error.message });
   }
 });
