@@ -37,6 +37,7 @@ const productSchema = new mongoose.Schema({
   description: { type: String },
   pdfUrl: { type: String },
   rating: { type: Number, default: 0 },
+  numReviews: { type: Number, default: 0 },
   variants: [{
     sizeName: { type: String, required: true }, // e.g. "1kg", "500g"
     price: { type: Number, required: true },
