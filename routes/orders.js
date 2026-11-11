@@ -2023,6 +2023,14 @@ router.put('/admin/:id/items', protect, async (req, res) => {
       const targetUser = await UserModel.findById(order.userId);
       const userRole = targetUser ? targetUser.role : 'b2c';
 
+
+      let calculatedTotal = 0;
+      let calculatedTotalWithoutCommissions = 0;
+      let totalGstCollected = 0;
+      let totalCommissionCollected = 0;
+      const commissions = await loadCommissions(req);
+
+
       let calculatedTotal = 0;
       let calculatedTotalWithoutCommissions = 0;
       let totalGstCollected = 0;
@@ -2198,16 +2206,33 @@ router.put('/admin/:id/items', protect, async (req, res) => {
       order.totalGstAmount = round2(totalGstCollected);
     }
 
+
     await order.save();
 
-    const populated = await OrderModel.findById(order._id)
-      .populate('userId', 'name email role businessName companyName')
-      .populate('driverId', 'name phone vehicleNo vehicleDetails')
-      .populate('cashPersonId', 'name phone');
+    order.items = enrichedItems;
+    order.totalAmount = round2(calculatedTotal);
+    order.totalAmountWithoutCommissions = round2(calculatedTotalWithoutCommissions);
+    order.totalCommissionAmount = round2(totalCommissionCollected);
+    order.totalGstAmount = round2(totalGstCollected);
+  }
+
+
+  await order.save();
+
 
     emitOrderRealtimeUpdate(populated, 'update');
 
     res.json(populated);
+
+  const populated = await OrderModel.findById(order._id)
+    .populate('userId', 'name email role businessName companyName')
+    .populate('driverId', 'name phone vehicleNo vehicleDetails')
+    .populate('cashPersonId', 'name phone');
+
+  emitOrderRealtimeUpdate(populated, 'update');
+
+  res.json(populated);
+
   } catch (error) {
     console.error('Admin order items update error:', error);
     res.status(500).json({ message: error.message });
