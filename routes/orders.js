@@ -2718,6 +2718,18 @@ router.put('/:id/return-delivery', protect, async (req, res) => {
       }
     });
 
+    // Restore variant stock when returned to seller
+    try {
+      const { Product: ProductModel } = getModels(req);
+      for (const item of order.items) {
+        if (item.returnStatus === 'Returned to Seller' && item.seller.sellerId.toString() === sellerId) {
+          await adjustProductStock(ProductModel, item.productId, item.variantSize, item.quantity, order.userId?.role);
+        }
+      }
+    } catch (stockErr) {
+      console.error('Failed to restore variant stock on return-delivery:', stockErr.message);
+    }
+
     const allReturnsComplete = order.sellerReturnPickups.every(sp => sp.status === 'Returned to Seller');
     if (allReturnsComplete) {
       const totalItems = order.items.length;
