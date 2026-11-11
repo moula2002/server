@@ -135,6 +135,34 @@ const orderSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  deliveryOtpExpiresAt: {
+    type: Date,
+    default: null
+  },
+  deliveryOtpCreatedAt: {
+    type: Date,
+    default: null
+  },
+  deliveryOtpAttempts: {
+    type: Number,
+    default: 0
+  },
+  deliveryOtpResendCount: {
+    type: Number,
+    default: 0
+  },
+  deliveryOtpLastResentAt: {
+    type: Date,
+    default: null
+  },
+  deliveryOtpVerifiedAt: {
+    type: Date,
+    default: null
+  },
+  deliveredAt: {
+    type: Date,
+    default: null
+  },
   returnReason: {
     type: String,
     default: null
