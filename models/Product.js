@@ -26,6 +26,7 @@ const productSchema = new mongoose.Schema({
   unitCustomerPrice: { type: Number },
   gstPercent: { type: Number, default: 0 },
   moq: { type: Number, default: 1 },
+  maxOrderQuantity: { type: Number, default: null },
   unit: { type: String, required: true },
   imageUrl: { type: String },
   sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
