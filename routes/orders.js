@@ -2243,51 +2243,248 @@ router.post('/:id/items/:itemId/return', protect, async (req, res) => {
   }
 });
 
-// @route   PUT /api/orders/:id/return-approve
-// @desc    Admin approves full order return
-router.put('/:id/return-approve', protect, async (req, res) => {
+// @route   POST /api/orders/:id/return-request
+// @desc    Customer submits a return request for the order
+// @access  Private (Customer only)
+router.post('/:id/return-request', protect, async (req, res) => {
   try {
+    const { returnReason, returnComment, returnImage, returnImages, refundAccountName, refundBankName, refundAccountNumber, refundIfscCode } = req.body;
     const { Order: OrderModel } = getModels(req);
-    const order = await OrderModel.findById(req.params.id);
+    const order = await OrderModel.findById(req.params.id).populate('userId', 'name email phone');
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
-    order.returnStatus = 'Approved';
-    order.items.forEach(item => {
-      if (item.returnStatus === 'Return Requested') {
-        item.returnStatus = 'Return Approved';
-      }
-    });
+    // Validate ownership
+    const isOwner = order.userId?._id?.toString() === req.user._id.toString();
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales'].includes(req.user.role);
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ message: '403 Forbidden: Not authorized to request return for this order' });
+    }
+
+    if (order.orderStatus !== 'Delivered' && order.orderStatus !== 'Partially Returned') {
+      return res.status(400).json({ message: 'Returns can only be requested for delivered orders.' });
+    }
+
+    if (['Pending', 'Requested', 'Approved'].includes(order.returnStatus)) {
+      return res.status(400).json({ message: 'A return request is already active for this order.' });
+    }
+
+    order.returnStatus = 'Pending';
+    order.orderStatus = 'Return Requested';
+    order.returnReason = returnReason || 'Return Requested by Customer';
+    order.returnComment = returnComment || null;
+    order.returnImage = returnImage || (Array.isArray(returnImages) && returnImages[0]) || null;
+    if (Array.isArray(returnImages)) {
+      order.returnImages = returnImages;
+    }
+    order.returnRequestedAt = new Date();
+    order.refundAccountName = refundAccountName || null;
+    order.refundBankName = refundBankName || null;
+    order.refundAccountNumber = refundAccountNumber || null;
+    order.refundIfscCode = refundIfscCode || null;
+
+    if (order.items && order.items.length > 0) {
+      order.items.forEach(item => {
+        item.returnStatus = 'Return Requested';
+        item.returnReason = returnReason || null;
+        item.returnComment = returnComment || null;
+        item.returnImage = returnImage || null;
+      });
+    }
 
     await order.save();
-    res.json(order);
+    emitOrderRealtimeUpdate(order, 'update');
+
+    res.json({
+      success: true,
+      message: 'Return request submitted successfully. Waiting for admin approval.',
+      order
+    });
   } catch (error) {
+    console.error('[POST /api/orders/:id/return-request] Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   PUT /api/orders/:id/return-approve
+// @desc    Admin approves order return request
+// @access  Private (Admin only)
+router.put('/:id/return-approve', protect, async (req, res) => {
+  try {
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    if (!isAdmin) {
+      return res.status(403).json({ message: '403 Forbidden: Only authorized Admin users can approve returns.' });
+    }
+
+    const { Order: OrderModel } = getModels(req);
+    const order = await OrderModel.findById(req.params.id).populate('userId', 'name email phone');
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    // Validate that order has a pending return request
+    const isPending = ['Pending', 'Requested', 'Return Requested'].includes(order.returnStatus) ||
+      (Array.isArray(order.items) && order.items.some(i => ['Return Requested', 'Requested', 'Pending'].includes(i.returnStatus))) ||
+      order.orderStatus === 'Return Requested';
+
+    if (!isPending) {
+      return res.status(400).json({ message: 'This order does not have a pending return request awaiting approval.' });
+    }
+
+    if (order.returnStatus === 'Approved' || order.returnStatus === 'Return Approved') {
+      return res.status(400).json({ message: 'Return request has already been approved.' });
+    }
+
+    // Update return status & metadata
+    order.returnStatus = 'Approved';
+    order.returnApprovedAt = new Date();
+    order.returnApprovedBy = {
+      id: req.user._id,
+      name: req.user.name || 'Admin',
+      email: req.user.email || ''
+    };
+    order.orderStatus = 'Return Approved';
+
+    // Update item return statuses
+    if (order.items && order.items.length > 0) {
+      order.items.forEach(item => {
+        if (['Return Requested', 'Requested', 'Pending'].includes(item.returnStatus) || item.returnStatus === 'None') {
+          item.returnStatus = 'Return Approved';
+        }
+      });
+    }
+
+    await order.save();
+    emitOrderRealtimeUpdate(order, 'update');
+
+    // Notify customer via email if available
+    const customerEmail = order.userId?.email || order.shippingAddress?.email;
+    const customerName = order.userId?.name || order.shippingAddress?.name || 'Customer';
+    if (customerEmail) {
+      sendEmail({
+        to: customerEmail,
+        subject: `Return Request Approved - Order #${order._id.toString().slice(-6).toUpperCase()}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 12px; overflow: hidden;">
+            <div style="background-color: #10b981; color: white; padding: 24px; text-align: center;">
+              <h1 style="margin: 0; font-size: 24px;">Return Request Approved</h1>
+            </div>
+            <div style="padding: 24px;">
+              <p>Hello <strong>${customerName}</strong>,</p>
+              <p>Your return request for Order <strong>#${order._id.toString().slice(-6).toUpperCase()}</strong> has been <strong>approved</strong> by our quality team on ${new Date().toLocaleDateString('en-IN')}.</p>
+              <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; padding: 16px; border-radius: 8px; margin: 16px 0;">
+                <p style="margin: 0; color: #166534; font-weight: bold;">Status: Approved for Return Pickup</p>
+                <p style="margin: 4px 0 0; color: #15803d; font-size: 13px;">Our delivery associate will be assigned shortly for reverse pickup. Please keep the item packed and ready with original tags.</p>
+              </div>
+              <p>Thank you for shopping with Zudo!</p>
+            </div>
+          </div>
+        `
+      }).catch(err => console.error('Return approval email failed:', err.message));
+    }
+
+    res.json({
+      success: true,
+      message: 'Return request approved successfully',
+      order
+    });
+  } catch (error) {
+    console.error('[PUT /api/orders/:id/return-approve] Error:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
 // @route   PUT /api/orders/:id/return-reject
-// @desc    Admin rejects full order return
+// @desc    Admin rejects order return request
+// @access  Private (Admin only)
 router.put('/:id/return-reject', protect, async (req, res) => {
   try {
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    if (!isAdmin) {
+      return res.status(403).json({ message: '403 Forbidden: Only authorized Admin users can reject returns.' });
+    }
+
+    const { rejectionReason, reason } = req.body;
+    const finalReason = rejectionReason || reason;
+    if (!finalReason || !finalReason.trim()) {
+      return res.status(400).json({ message: 'Rejection reason is required to reject a return request.' });
+    }
+
     const { Order: OrderModel } = getModels(req);
-    const order = await OrderModel.findById(req.params.id);
+    const order = await OrderModel.findById(req.params.id).populate('userId', 'name email phone');
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
-    order.returnStatus = 'Rejected';
-    order.items.forEach(item => {
-      if (item.returnStatus === 'Return Requested') {
-        item.returnStatus = 'Return Rejected';
-      }
-    });
+    // Validate that order has a pending return request
+    const isPending = ['Pending', 'Requested', 'Return Requested'].includes(order.returnStatus) ||
+      (Array.isArray(order.items) && order.items.some(i => ['Return Requested', 'Requested', 'Pending'].includes(i.returnStatus))) ||
+      order.orderStatus === 'Return Requested';
 
-    // Check if we need to revert orderStatus
+    if (!isPending) {
+      return res.status(400).json({ message: 'This order does not have a pending return request awaiting approval/rejection.' });
+    }
+
+    if (order.returnStatus === 'Rejected' || order.returnStatus === 'Return Rejected') {
+      return res.status(400).json({ message: 'Return request has already been rejected.' });
+    }
+
+    // Update return status & metadata
+    order.returnStatus = 'Rejected';
+    order.returnRejectedAt = new Date();
+    order.returnRejectedBy = {
+      id: req.user._id,
+      name: req.user.name || 'Admin',
+      email: req.user.email || ''
+    };
+    order.returnRejectionReason = finalReason.trim();
+
+    // If order was marked as Return Requested, revert to Delivered
     if (order.orderStatus === 'Return Requested') {
       order.orderStatus = 'Delivered';
     }
 
+    // Update item return statuses
+    if (order.items && order.items.length > 0) {
+      order.items.forEach(item => {
+        if (['Return Requested', 'Requested', 'Pending'].includes(item.returnStatus)) {
+          item.returnStatus = 'Return Rejected';
+        }
+      });
+    }
+
     await order.save();
-    res.json(order);
+    emitOrderRealtimeUpdate(order, 'update');
+
+    // Notify customer via email if available
+    const customerEmail = order.userId?.email || order.shippingAddress?.email;
+    const customerName = order.userId?.name || order.shippingAddress?.name || 'Customer';
+    if (customerEmail) {
+      sendEmail({
+        to: customerEmail,
+        subject: `Update on Return Request - Order #${order._id.toString().slice(-6).toUpperCase()}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 12px; overflow: hidden;">
+            <div style="background-color: #ef4444; color: white; padding: 24px; text-align: center;">
+              <h1 style="margin: 0; font-size: 24px;">Return Request Declined</h1>
+            </div>
+            <div style="padding: 24px;">
+              <p>Hello <strong>${customerName}</strong>,</p>
+              <p>Your return request for Order <strong>#${order._id.toString().slice(-6).toUpperCase()}</strong> has been reviewed and could not be approved at this time.</p>
+              <div style="background-color: #fef2f2; border: 1px solid #fecaca; padding: 16px; border-radius: 8px; margin: 16px 0;">
+                <p style="margin: 0; color: #991b1b; font-weight: bold;">Reason for Rejection:</p>
+                <p style="margin: 4px 0 0; color: #b91c1c; font-size: 14px;">${finalReason.trim()}</p>
+              </div>
+              <p>If you have any questions or require further clarification, please feel free to reach out to our support team.</p>
+              <p>Best regards,<br/><strong>Team Zudo</strong></p>
+            </div>
+          </div>
+        `
+      }).catch(err => console.error('Return rejection email failed:', err.message));
+    }
+
+    res.json({
+      success: true,
+      message: 'Return request rejected successfully',
+      order
+    });
   } catch (error) {
+    console.error('[PUT /api/orders/:id/return-reject] Error:', error);
     res.status(500).json({ message: error.message });
   }
 });
