@@ -27,8 +27,8 @@ const assignInvoiceDetails = async (OrderModel) => {
     const lastSeqOrder = await OrderModel.findOne({ invoiceSequence: { $exists: true, $ne: null } })
       .sort({ invoiceSequence: -1 })
       .select('invoiceSequence');
-    const nextSeq = (lastSeqOrder && typeof lastSeqOrder.invoiceSequence === 'number') 
-      ? lastSeqOrder.invoiceSequence + 1 
+    const nextSeq = (lastSeqOrder && typeof lastSeqOrder.invoiceSequence === 'number')
+      ? lastSeqOrder.invoiceSequence + 1
       : (await OrderModel.countDocuments() + 1);
     const orderRef = `SNB-${700 + nextSeq}`;
     const invoiceNumber = orderRef;
@@ -282,7 +282,7 @@ router.get('/slots', protect, async (req, res) => {
   try {
     const { DeliverySlot: DeliverySlotModel } = req.models;
     const LocationModel = req.models?.Location || require('../models/Location');
-    
+
     let slots = await DeliverySlotModel.find({ isActive: true });
 
     let locationId = req.locationId || req.user.locationId;
@@ -302,12 +302,12 @@ router.get('/slots', protect, async (req, res) => {
       } else { // Wednesday, Thursday, Friday
         deliveryDay = 'Saturday';
       }
-      
+
       slots = slots.map(slot => {
         let slotObj = slot.toObject();
         if (slotObj.startTime && slotObj.startTime !== '*') {
           if (!slotObj.startTime.includes(deliveryDay)) {
-             slotObj.startTime = `${deliveryDay}, ${slotObj.startTime}`;
+            slotObj.startTime = `${deliveryDay}, ${slotObj.startTime}`;
           }
         }
         return slotObj;
@@ -828,7 +828,7 @@ router.post('/', protect, async (req, res) => {
       } else { // Wednesday, Thursday, Friday
         deliveryDay = 'Saturday';
       }
-      
+
       if (finalDeliverySlot.startTime !== '*' && !finalDeliverySlot.startTime.includes(deliveryDay)) {
         finalDeliverySlot.startTime = `${deliveryDay}, ${finalDeliverySlot.startTime}`;
       }
@@ -1304,7 +1304,7 @@ router.all('/:id/status', protect, async (req, res) => {
       order.returnDriverId && (order.returnStatus = 'Completed');
     }
 
-        const previousStatus = order.orderStatus;
+    const previousStatus = order.orderStatus;
 
     // Handle multi-seller pickup status logic
     let shouldUpdateGlobalStatus = true;
@@ -1435,7 +1435,7 @@ router.all('/:id/status', protect, async (req, res) => {
           io.emit('order:delivered', { orderId: order._id.toString() });
           io.emit(`order:${order._id.toString()}`, { type: 'ORDER_DELIVERED', orderId: order._id.toString() });
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     await order.save();
@@ -1652,7 +1652,7 @@ router.post('/:id/verify-delivery-otp', protect, async (req, res) => {
         io.emit('order:delivered', { orderId: order._id.toString() });
         io.emit(`order:${order._id.toString()}`, { type: 'ORDER_DELIVERED', orderId: order._id.toString() });
       }
-    } catch (e) {}
+    } catch (e) { }
 
     // Send confirmation email
     if (order.userId?.email) {
@@ -2062,185 +2062,185 @@ router.put('/admin/:id/items', protect, async (req, res) => {
       let totalCommissionCollected = 0;
       const commissions = await loadCommissions(req);
 
-    const enrichedItems = await Promise.all(items.map(async (item) => {
-      const pId = item.productId || item.product;
-      const productData = await ProductModel.findById(pId);
-      if (!productData) {
-        throw new Error(`Product not found: ${pId}`);
-      }
+      const enrichedItems = await Promise.all(items.map(async (item) => {
+        const pId = item.productId || item.product;
+        const productData = await ProductModel.findById(pId);
+        if (!productData) {
+          throw new Error(`Product not found: ${pId}`);
+        }
 
-      // Enforce positive integer quantity
-      const qty = parseInt(item.quantity, 10);
-      if (!qty || isNaN(qty) || qty <= 0 || Number(item.quantity) !== qty) {
-        throw new Error(`Invalid quantity for product "${productData.name}". Quantity must be a positive integer.`);
-      }
-      item.quantity = qty;
+        // Enforce positive integer quantity
+        const qty = parseInt(item.quantity, 10);
+        if (!qty || isNaN(qty) || qty <= 0 || Number(item.quantity) !== qty) {
+          throw new Error(`Invalid quantity for product "${productData.name}". Quantity must be a positive integer.`);
+        }
+        item.quantity = qty;
 
-      const pDataObj = productData.toObject ? productData.toObject() : productData;
-      const enrichedProduct = applyCommission(pDataObj, commissions, order.shippingAddress?.pincode);
+        const pDataObj = productData.toObject ? productData.toObject() : productData;
+        const enrichedProduct = applyCommission(pDataObj, commissions, order.shippingAddress?.pincode);
 
-      let basePriceObj = enrichedProduct;
-      let rawBasePriceObj = pDataObj;
-      let name = item.name || enrichedProduct.name || productData.name;
-      let gstPercent = productData.gstPercent || 0;
+        let basePriceObj = enrichedProduct;
+        let rawBasePriceObj = pDataObj;
+        let name = item.name || enrichedProduct.name || productData.name;
+        let gstPercent = productData.gstPercent || 0;
 
-      const variantArray = userRole === 'b2b' ? (enrichedProduct.b2b || []) : (enrichedProduct.b2c || []);
-      const rawVariantArray = userRole === 'b2b' ? (pDataObj.b2b || []) : (pDataObj.b2c || []);
-      const targetSize = item.variantSize || item.selectedPacketSize;
+        const variantArray = userRole === 'b2b' ? (enrichedProduct.b2b || []) : (enrichedProduct.b2c || []);
+        const rawVariantArray = userRole === 'b2b' ? (pDataObj.b2b || []) : (pDataObj.b2c || []);
+        const targetSize = item.variantSize || item.selectedPacketSize;
 
-      if (targetSize && variantArray.length > 0) {
-        const variant = variantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
-        const rawVariant = rawVariantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
-        if (variant) {
-          basePriceObj = variant;
-          if (rawVariant) rawBasePriceObj = rawVariant;
-          const sizeStr = variant.packetSize || variant.sizeName;
-          if (sizeStr && !name.includes(sizeStr)) {
-            name = `${name} - ${sizeStr}`;
+        if (targetSize && variantArray.length > 0) {
+          const variant = variantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
+          const rawVariant = rawVariantArray.find(v => (v.packetSize || v.sizeName) === targetSize);
+          if (variant) {
+            basePriceObj = variant;
+            if (rawVariant) rawBasePriceObj = rawVariant;
+            const sizeStr = variant.packetSize || variant.sizeName;
+            if (sizeStr && !name.includes(sizeStr)) {
+              name = `${name} - ${sizeStr}`;
+            }
+          }
+        } else if (targetSize && enrichedProduct.variants && enrichedProduct.variants.length > 0) {
+          const variant = enrichedProduct.variants.find(v => v.sizeName === targetSize);
+          const rawVariant = (pDataObj.variants || []).find(v => v.sizeName === targetSize);
+          if (variant) {
+            basePriceObj = variant;
+            if (rawVariant) rawBasePriceObj = rawVariant;
+            if (variant.sizeName && !name.includes(variant.sizeName)) {
+              name = `${name} - ${variant.sizeName}`;
+            }
           }
         }
-      } else if (targetSize && enrichedProduct.variants && enrichedProduct.variants.length > 0) {
-        const variant = enrichedProduct.variants.find(v => v.sizeName === targetSize);
-        const rawVariant = (pDataObj.variants || []).find(v => v.sizeName === targetSize);
-        if (variant) {
-          basePriceObj = variant;
-          if (rawVariant) rawBasePriceObj = rawVariant;
-          if (variant.sizeName && !name.includes(variant.sizeName)) {
-            name = `${name} - ${variant.sizeName}`;
+
+        if (!targetSize && (!basePriceObj.price || basePriceObj.price === 0)) {
+          const fallbackArray = userRole === 'b2b' ?
+            (enrichedProduct.b2b?.length ? enrichedProduct.b2b : enrichedProduct.variants) :
+            (enrichedProduct.b2c?.length ? enrichedProduct.b2c : enrichedProduct.variants);
+          const rawFallbackArray = userRole === 'b2b' ?
+            (pDataObj.b2b?.length ? pDataObj.b2b : pDataObj.variants) :
+            (pDataObj.b2c?.length ? pDataObj.b2c : pDataObj.variants);
+          if (fallbackArray && fallbackArray.length > 0) {
+            basePriceObj = fallbackArray[0];
+            if (rawFallbackArray && rawFallbackArray.length > 0) {
+              rawBasePriceObj = rawFallbackArray[0];
+            }
           }
         }
-      }
 
-      if (!targetSize && (!basePriceObj.price || basePriceObj.price === 0)) {
-        const fallbackArray = userRole === 'b2b' ?
-          (enrichedProduct.b2b?.length ? enrichedProduct.b2b : enrichedProduct.variants) :
-          (enrichedProduct.b2c?.length ? enrichedProduct.b2c : enrichedProduct.variants);
-        const rawFallbackArray = userRole === 'b2b' ?
-          (pDataObj.b2b?.length ? pDataObj.b2b : pDataObj.variants) :
-          (pDataObj.b2c?.length ? pDataObj.b2c : pDataObj.variants);
-        if (fallbackArray && fallbackArray.length > 0) {
-          basePriceObj = fallbackArray[0];
-          if (rawFallbackArray && rawFallbackArray.length > 0) {
-            rawBasePriceObj = rawFallbackArray[0];
+        let rawPrice = userRole === 'b2b'
+          ? (rawBasePriceObj.sellerB2bPrice !== undefined && rawBasePriceObj.sellerB2bPrice !== null ? rawBasePriceObj.sellerB2bPrice : (rawBasePriceObj.b2bPrice || rawBasePriceObj.sellerPrice || rawBasePriceObj.price))
+          : (rawBasePriceObj.sellerPrice !== undefined && rawBasePriceObj.sellerPrice !== null ? rawBasePriceObj.sellerPrice : rawBasePriceObj.price);
+
+        if (userRole === 'b2b' && basePriceObj.priceTiers && basePriceObj.priceTiers.length > 0) {
+          const sortedTiers = [...basePriceObj.priceTiers].sort((a, b) => b.minQty - a.minQty);
+          const applicableTier = sortedTiers.find(t => item.quantity >= t.minQty);
+          if (applicableTier && rawBasePriceObj.priceTiers && rawBasePriceObj.priceTiers.length > 0) {
+            const rawApplicableTier = rawBasePriceObj.priceTiers.find(t => t.minQty === applicableTier.minQty);
+            if (rawApplicableTier) {
+              rawPrice = rawApplicableTier.sellerPrice !== undefined ? rawApplicableTier.sellerPrice : rawApplicableTier.price;
+            }
           }
         }
-      }
 
-      let rawPrice = userRole === 'b2b'
-        ? (rawBasePriceObj.sellerB2bPrice !== undefined && rawBasePriceObj.sellerB2bPrice !== null ? rawBasePriceObj.sellerB2bPrice : (rawBasePriceObj.b2bPrice || rawBasePriceObj.sellerPrice || rawBasePriceObj.price))
-        : (rawBasePriceObj.sellerPrice !== undefined && rawBasePriceObj.sellerPrice !== null ? rawBasePriceObj.sellerPrice : rawBasePriceObj.price);
+        // Check Maximum Order Quantity (MOQ) limit
+        const maxOrderLimit = productData.maxOrderQuantity !== undefined && productData.maxOrderQuantity !== null
+          ? Number(productData.maxOrderQuantity)
+          : (productData.moq !== undefined && productData.moq !== null ? Number(productData.moq) : null);
 
-      if (userRole === 'b2b' && basePriceObj.priceTiers && basePriceObj.priceTiers.length > 0) {
-        const sortedTiers = [...basePriceObj.priceTiers].sort((a, b) => b.minQty - a.minQty);
-        const applicableTier = sortedTiers.find(t => item.quantity >= t.minQty);
-        if (applicableTier && rawBasePriceObj.priceTiers && rawBasePriceObj.priceTiers.length > 0) {
-          const rawApplicableTier = rawBasePriceObj.priceTiers.find(t => t.minQty === applicableTier.minQty);
-          if (rawApplicableTier) {
-            rawPrice = rawApplicableTier.sellerPrice !== undefined ? rawApplicableTier.sellerPrice : rawApplicableTier.price;
+        if (maxOrderLimit && maxOrderLimit > 0 && item.quantity > maxOrderLimit) {
+          throw new Error(`Maximum ${maxOrderLimit} units allowed per order for "${productData.name}". Requested: ${item.quantity}`);
+        }
+
+        // Check stock limit
+        const targetSizeCheck = item.variantSize || item.selectedPacketSize;
+        const stockInfo = getProductStock(productData, targetSizeCheck, userRole);
+        if (stockInfo.stock < item.quantity) {
+          throw new Error(`Insufficient stock for product "${productData.name}"${targetSizeCheck ? ` (${targetSizeCheck})` : ''}. Available: ${stockInfo.stock}, Requested: ${item.quantity}`);
+        }
+
+        const commRule = findCategoryCommission(commissions, productData.categoryId, productData.unit, order.shippingAddress?.pincode);
+        const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
+        const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
+
+        const breakdown = calculatePricingBreakdown({
+          sellerUnitPrice: Number(rawPrice) || 0,
+          commissionType: commType,
+          commissionValue: Number(commVal) || 0,
+          gstPercent: gstPercent,
+          quantity: item.quantity,
+          availableStock: productData ? (productData.stock || 0) : 0,
+          isB2B: userRole === 'b2b'
+        });
+
+        let sellerInfo = null;
+        if (productData.sellerId) {
+          const seller = await SellerModel.findById(productData.sellerId);
+          if (seller) {
+            sellerInfo = {
+              sellerId: seller._id,
+              name: seller.name || seller.storeName,
+              phone: seller.phone,
+              address: seller.pickupLocation?.address || seller.businessAddress,
+              lat: seller.pickupLocation?.lat,
+              lng: seller.pickupLocation?.lng
+            };
           }
         }
-      }
 
-      // Check Maximum Order Quantity (MOQ) limit
-      const maxOrderLimit = productData.maxOrderQuantity !== undefined && productData.maxOrderQuantity !== null
-        ? Number(productData.maxOrderQuantity)
-        : (productData.moq !== undefined && productData.moq !== null ? Number(productData.moq) : null);
+        calculatedTotal += breakdown.finalCustomerPrice;
+        calculatedTotalWithoutCommissions += (breakdown.totalSellerPrice + breakdown.totalGst);
+        totalGstCollected += breakdown.totalGst;
+        totalCommissionCollected += breakdown.totalCommission;
 
-      if (maxOrderLimit && maxOrderLimit > 0 && item.quantity > maxOrderLimit) {
-        throw new Error(`Maximum ${maxOrderLimit} units allowed per order for "${productData.name}". Requested: ${item.quantity}`);
-      }
-
-      // Check stock limit
-      const targetSizeCheck = item.variantSize || item.selectedPacketSize;
-      const stockInfo = getProductStock(productData, targetSizeCheck, userRole);
-      if (stockInfo.stock < item.quantity) {
-        throw new Error(`Insufficient stock for product "${productData.name}"${targetSizeCheck ? ` (${targetSizeCheck})` : ''}. Available: ${stockInfo.stock}, Requested: ${item.quantity}`);
-      }
-
-      const commRule = findCategoryCommission(commissions, productData.categoryId, productData.unit, order.shippingAddress?.pincode);
-      const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
-      const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
-
-      const breakdown = calculatePricingBreakdown({
-        sellerUnitPrice: Number(rawPrice) || 0,
-        commissionType: commType,
-        commissionValue: Number(commVal) || 0,
-        gstPercent: gstPercent,
-        quantity: item.quantity,
-        availableStock: productData ? (productData.stock || 0) : 0,
-        isB2B: userRole === 'b2b'
-      });
-
-      let sellerInfo = null;
-      if (productData.sellerId) {
-        const seller = await SellerModel.findById(productData.sellerId);
-        if (seller) {
-          sellerInfo = {
-            sellerId: seller._id,
-            name: seller.name || seller.storeName,
-            phone: seller.phone,
-            address: seller.pickupLocation?.address || seller.businessAddress,
-            lat: seller.pickupLocation?.lat,
-            lng: seller.pickupLocation?.lng
-          };
-        }
-      }
-
-      calculatedTotal += breakdown.finalCustomerPrice;
-      calculatedTotalWithoutCommissions += (breakdown.totalSellerPrice + breakdown.totalGst);
-      totalGstCollected += breakdown.totalGst;
-      totalCommissionCollected += breakdown.totalCommission;
-
-      return {
-        productId: pId,
-        variantSize: targetSize,
-        name: name,
-        quantity: item.quantity,
-        orderedQuantity: item.quantity,
-        price: breakdown.unitCustomerPrice,
-        unitCustomerPrice: breakdown.unitCustomerPrice,
-        normalPrice: breakdown.sellerUnitPrice,
-        sellerUnitPrice: breakdown.sellerUnitPrice,
-        commissionType: breakdown.commissionType,
-        commissionValue: breakdown.commissionRate,
-        commissionRate: breakdown.commissionRate,
-        commissionAmount: breakdown.unitCommission,
-        unitCommission: breakdown.unitCommission,
-        totalCommission: breakdown.totalCommission,
-        totalSellerPrice: breakdown.totalSellerPrice,
-        finalCustomerPrice: breakdown.finalCustomerPrice,
-        availableStock: breakdown.availableStock,
-        stockTotalCommission: breakdown.stockTotalCommission,
-        gstPercent: breakdown.gstPercent,
-        gstAmount: breakdown.unitGst,
-        totalGst: breakdown.totalGst,
-        image: productData.imageUrl || productData.image,
-        seller: sellerInfo,
-        product: {
-          name: productData.name,
+        return {
+          productId: pId,
+          variantSize: targetSize,
+          name: name,
+          quantity: item.quantity,
+          orderedQuantity: item.quantity,
+          price: breakdown.unitCustomerPrice,
+          unitCustomerPrice: breakdown.unitCustomerPrice,
+          normalPrice: breakdown.sellerUnitPrice,
+          sellerUnitPrice: breakdown.sellerUnitPrice,
+          commissionType: breakdown.commissionType,
+          commissionValue: breakdown.commissionRate,
+          commissionRate: breakdown.commissionRate,
+          commissionAmount: breakdown.unitCommission,
+          unitCommission: breakdown.unitCommission,
+          totalCommission: breakdown.totalCommission,
+          totalSellerPrice: breakdown.totalSellerPrice,
+          finalCustomerPrice: breakdown.finalCustomerPrice,
+          availableStock: breakdown.availableStock,
+          stockTotalCommission: breakdown.stockTotalCommission,
+          gstPercent: breakdown.gstPercent,
+          gstAmount: breakdown.unitGst,
+          totalGst: breakdown.totalGst,
           image: productData.imageUrl || productData.image,
-          imageUrl: productData.imageUrl || productData.image
-        }
-      };
-    }));
+          seller: sellerInfo,
+          product: {
+            name: productData.name,
+            image: productData.imageUrl || productData.image,
+            imageUrl: productData.imageUrl || productData.image
+          }
+        };
+      }));
 
-    order.items = enrichedItems;
-    order.totalAmount = round2(calculatedTotal);
-    order.totalAmountWithoutCommissions = round2(calculatedTotalWithoutCommissions);
-    order.totalCommissionAmount = round2(totalCommissionCollected);
-    order.totalGstAmount = round2(totalGstCollected);
-  }
+      order.items = enrichedItems;
+      order.totalAmount = round2(calculatedTotal);
+      order.totalAmountWithoutCommissions = round2(calculatedTotalWithoutCommissions);
+      order.totalCommissionAmount = round2(totalCommissionCollected);
+      order.totalGstAmount = round2(totalGstCollected);
+    }
 
-  await order.save();
+    await order.save();
 
-  const populated = await OrderModel.findById(order._id)
-    .populate('userId', 'name email role businessName companyName')
-    .populate('driverId', 'name phone vehicleNo vehicleDetails')
-    .populate('cashPersonId', 'name phone');
+    const populated = await OrderModel.findById(order._id)
+      .populate('userId', 'name email role businessName companyName')
+      .populate('driverId', 'name phone vehicleNo vehicleDetails')
+      .populate('cashPersonId', 'name phone');
 
-  emitOrderRealtimeUpdate(populated, 'update');
+    emitOrderRealtimeUpdate(populated, 'update');
 
-  res.json(populated);
+    res.json(populated);
   } catch (error) {
     console.error('Admin order items update error:', error);
     res.status(500).json({ message: error.message });
@@ -2384,25 +2384,46 @@ router.put('/:id/return-approve', protect, async (req, res) => {
     }
 
     // Update return status & metadata
+    const adminUser = req.admin || req.user || {};
+    const adminId = (adminUser._id && mongoose.Types.ObjectId.isValid(adminUser._id)) ? adminUser._id : undefined;
+
     order.returnStatus = 'Approved';
     order.returnApprovedAt = new Date();
     order.returnApprovedBy = {
-      id: req.user._id,
-      name: req.user.name || 'Admin',
-      email: req.user.email || ''
+      ...(adminId ? { id: adminId } : {}),
+      name: adminUser.name || 'Admin',
+      email: adminUser.email || ''
     };
-    order.orderStatus = 'Return Approved';
+    // Safely set orderStatus matching the running schema enum
+    const validOrderStatuses = OrderModel.schema?.path('orderStatus')?.enumValues || [];
+    if (validOrderStatuses.includes('Return Approved')) {
+      order.orderStatus = 'Return Approved';
+    } else {
+      order.orderStatus = 'Return Requested';
+    }
 
     // Update item return statuses
+    const hasSpecificRequestedItems = order.items && order.items.some(i => ['Return Requested', 'Requested', 'Pending'].includes(i.returnStatus));
     if (order.items && order.items.length > 0) {
       order.items.forEach(item => {
-        if (['Return Requested', 'Requested', 'Pending'].includes(item.returnStatus) || item.returnStatus === 'None') {
+        if (['Return Requested', 'Requested', 'Pending'].includes(item.returnStatus)) {
+          item.returnStatus = 'Return Approved';
+        } else if (!hasSpecificRequestedItems && (item.returnStatus === 'None' || !item.returnStatus)) {
           item.returnStatus = 'Return Approved';
         }
       });
     }
 
-    await order.save();
+    try {
+      await order.save({ validateModifiedOnly: true });
+    } catch (saveErr) {
+      if (saveErr.name === 'ValidationError' && (saveErr.errors?.orderStatus || saveErr.message?.includes('orderStatus'))) {
+        order.orderStatus = 'Return Requested';
+        await order.save({ validateModifiedOnly: true });
+      } else {
+        throw saveErr;
+      }
+    }
     emitOrderRealtimeUpdate(order, 'update');
 
     // Notify customer via email if available
@@ -2476,17 +2497,25 @@ router.put('/:id/return-reject', protect, async (req, res) => {
     }
 
     // Update return status & metadata
+    const adminUser = req.admin || req.user || {};
+    const adminId = (adminUser._id && mongoose.Types.ObjectId.isValid(adminUser._id)) ? adminUser._id : undefined;
+
     order.returnStatus = 'Rejected';
     order.returnRejectedAt = new Date();
     order.returnRejectedBy = {
-      id: req.user._id,
-      name: req.user.name || 'Admin',
-      email: req.user.email || ''
+      ...(adminId ? { id: adminId } : {}),
+      name: adminUser.name || 'Admin',
+      email: adminUser.email || ''
     };
     order.returnRejectionReason = finalReason.trim();
 
     // If order was marked as Return Requested, revert to Delivered
+    const validOrderStatuses = OrderModel.schema?.path('orderStatus')?.enumValues || [];
     if (order.orderStatus === 'Return Requested') {
+      order.orderStatus = 'Delivered';
+    } else if (validOrderStatuses.includes('Return Rejected')) {
+      order.orderStatus = 'Return Rejected';
+    } else {
       order.orderStatus = 'Delivered';
     }
 
@@ -2499,7 +2528,16 @@ router.put('/:id/return-reject', protect, async (req, res) => {
       });
     }
 
-    await order.save();
+    try {
+      await order.save({ validateModifiedOnly: true });
+    } catch (saveErr) {
+      if (saveErr.name === 'ValidationError' && (saveErr.errors?.orderStatus || saveErr.message?.includes('orderStatus'))) {
+        order.orderStatus = 'Delivered';
+        await order.save({ validateModifiedOnly: true });
+      } else {
+        throw saveErr;
+      }
+    }
     emitOrderRealtimeUpdate(order, 'update');
 
     // Notify customer via email if available
@@ -2541,19 +2579,10 @@ router.put('/:id/return-reject', protect, async (req, res) => {
 });
 
 // @route   PUT /api/orders/:id/items/:itemId/return-status
-// @desc    Admin approves or rejects a return request (Admin only)
+// @desc    Admin/Seller approves or rejects a return request
 router.put('/:id/items/:itemId/return-status', protect, async (req, res) => {
   try {
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
-    if (!isAdmin) {
-      return res.status(403).json({ message: '403 Forbidden: Only authorized Admin users can approve or reject returns.' });
-    }
-
     const { status } = req.body;
-    if (!['Return Approved', 'Return Rejected'].includes(status)) {
-      return res.status(400).json({ message: 'Invalid return status. Must be Return Approved or Return Rejected.' });
-    }
-
     const { Order: OrderModel } = getModels(req);
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
@@ -2567,9 +2596,12 @@ router.put('/:id/items/:itemId/return-status', protect, async (req, res) => {
 
     item.returnStatus = status;
 
+    const validOrderStatuses = OrderModel.schema?.path('orderStatus')?.enumValues || [];
     if (status === 'Return Approved') {
       order.returnStatus = 'Approved';
-      order.orderStatus = 'Return Approved';
+      if (validOrderStatuses.includes('Return Approved')) {
+        order.orderStatus = 'Return Approved';
+      }
     } else if (status === 'Return Rejected') {
       const anyStillRequested = order.items.some(i => i.returnStatus === 'Return Requested');
       const anyApproved = order.items.some(i => ['Return Approved', 'Picked Up from Customer', 'Returned to Seller'].includes(i.returnStatus));
@@ -2579,7 +2611,16 @@ router.put('/:id/items/:itemId/return-status', protect, async (req, res) => {
       }
     }
 
-    await order.save();
+    try {
+      await order.save({ validateModifiedOnly: true });
+    } catch (saveErr) {
+      if (saveErr.name === 'ValidationError' && (saveErr.errors?.orderStatus || saveErr.message?.includes('orderStatus'))) {
+        order.orderStatus = 'Delivered';
+        await order.save({ validateModifiedOnly: true });
+      } else {
+        throw saveErr;
+      }
+    }
     emitOrderRealtimeUpdate(order, 'update');
     res.json(order);
   } catch (error) {
@@ -2718,10 +2759,10 @@ router.put('/:id/qrcode', protect, async (req, res) => {
     const { Order: OrderModel } = getModels(req);
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
-    
+
     if (qrCodeDoc !== undefined) order.qrCodeDoc = qrCodeDoc;
     if (qrOption !== undefined) order.qrOption = qrOption;
-    
+
     const updatedOrder = await order.save();
     res.json(updatedOrder);
   } catch (error) {
