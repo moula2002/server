@@ -331,6 +331,110 @@ router.get('/:id/driver-location', protect, async (req, res) => {
   }
 });
 
+// @route   POST /api/orders/validate-cart
+// @desc    Validate cart quantities against MongoDB stock and seller Maximum Order Quantity (MOQ)
+// @access  Public or Private (Customer & Admin)
+router.post('/validate-cart', async (req, res) => {
+  try {
+    const { items, role = 'b2c' } = req.body;
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: 'Cart items are required for validation', valid: false });
+    }
+
+    const { Product: ProductModel } = getModels(req);
+
+    // Calculate combined quantity per product across variants or separate lines
+    const combinedProductQuantities = {};
+    for (const item of items) {
+      const pId = (item.productId || item.product || item.id || item._id)?.toString();
+      const qty = parseInt(item.quantity, 10);
+      if (pId) {
+        combinedProductQuantities[pId] = (combinedProductQuantities[pId] || 0) + (isNaN(qty) ? 0 : qty);
+      }
+    }
+
+    const errors = [];
+    const validatedItems = [];
+
+    for (const item of items) {
+      const pId = item.productId || item.product || item.id || item._id;
+      if (!pId) {
+        errors.push({ message: 'Missing product ID in item', item });
+        continue;
+      }
+
+      const productData = await ProductModel.findById(pId);
+      if (!productData) {
+        errors.push({ productId: pId, message: `Product not found: ${item.name || pId}` });
+        continue;
+      }
+
+      const qty = parseInt(item.quantity, 10);
+      if (!qty || isNaN(qty) || qty <= 0 || Number(item.quantity) !== qty) {
+        errors.push({
+          productId: pId,
+          message: `Invalid quantity for product "${productData.name}". Quantity must be a positive integer.`
+        });
+        continue;
+      }
+
+      const maxOrderLimit = productData.maxOrderQuantity !== undefined && productData.maxOrderQuantity !== null
+        ? Number(productData.maxOrderQuantity)
+        : (productData.moq !== undefined && productData.moq !== null ? Number(productData.moq) : null);
+
+      const totalQtyForProduct = combinedProductQuantities[pId.toString()] || qty;
+
+      if (maxOrderLimit && maxOrderLimit > 0 && totalQtyForProduct > maxOrderLimit) {
+        errors.push({
+          productId: pId,
+          productName: productData.name,
+          maxOrderQuantity: maxOrderLimit,
+          requestedQuantity: totalQtyForProduct,
+          message: `Maximum ${maxOrderLimit} units allowed per order for "${productData.name}". You requested ${totalQtyForProduct} units.`
+        });
+      }
+
+      const targetSize = item.variantSize || item.selectedPacketSize;
+      const stockInfo = getProductStock(productData, targetSize, role);
+      if (stockInfo.stock < qty) {
+        errors.push({
+          productId: pId,
+          productName: productData.name,
+          availableStock: stockInfo.stock,
+          requestedQuantity: qty,
+          message: `Insufficient stock for product "${productData.name}"${targetSize ? ` (${targetSize})` : ''}. Available: ${stockInfo.stock}, Requested: ${qty}`
+        });
+      }
+
+      validatedItems.push({
+        productId: pId,
+        productName: productData.name,
+        quantity: qty,
+        maxOrderQuantity: maxOrderLimit || null,
+        availableStock: stockInfo.stock,
+        allowedQuantity: maxOrderLimit ? Math.min(maxOrderLimit, stockInfo.stock) : stockInfo.stock
+      });
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        valid: false,
+        message: errors[0].message,
+        errors,
+        validatedItems
+      });
+    }
+
+    return res.status(200).json({
+      valid: true,
+      message: 'All cart items are within allowed limits and stock',
+      validatedItems
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message, valid: false });
+  }
+});
+
 // @route   POST /api/orders
 // @desc    Create new order
 // @access  Private
@@ -389,7 +493,17 @@ router.post('/', protect, async (req, res) => {
       }
     }
 
-    // Validate stock and quantity for all items first
+    // Validate product existence, quantity, stock, and seller maximum order quantity (MOQ)
+    // Also track combined quantity per product across variants or duplicate entries
+    const combinedProductQuantities = {};
+    for (const item of items) {
+      const pId = (item.product || item.id || item._id)?.toString();
+      const qty = parseInt(item.quantity, 10);
+      if (pId) {
+        combinedProductQuantities[pId] = (combinedProductQuantities[pId] || 0) + (isNaN(qty) ? 0 : qty);
+      }
+    }
+
     for (const item of items) {
       const pId = item.product || item.id || item._id;
       const productData = await ProductModel.findById(pId);
@@ -405,6 +519,22 @@ router.post('/', protect, async (req, res) => {
         });
       }
       item.quantity = qty;
+
+      // Validate Seller Maximum Order Quantity (MOQ) restriction directly from database
+      const maxOrderLimit = productData.maxOrderQuantity !== undefined && productData.maxOrderQuantity !== null
+        ? Number(productData.maxOrderQuantity)
+        : (productData.moq !== undefined && productData.moq !== null ? Number(productData.moq) : null);
+
+      if (maxOrderLimit && maxOrderLimit > 0) {
+        const totalQtyForProduct = combinedProductQuantities[pId.toString()] || qty;
+        if (totalQtyForProduct > maxOrderLimit) {
+          return res.status(400).json({
+            message: `Maximum ${maxOrderLimit} units allowed per order for "${productData.name}". You requested ${totalQtyForProduct} units.`,
+            maxOrderQuantity: maxOrderLimit,
+            productId: pId
+          });
+        }
+      }
 
       const targetSize = item.variantSize || item.selectedPacketSize;
       const stockInfo = getProductStock(productData, targetSize, targetUserRole);
@@ -1494,7 +1624,16 @@ router.post('/admin/create', protect, async (req, res) => {
       return res.status(404).json({ message: 'Customer not found' });
     }
 
-    // Validate stock and quantity for all items first
+    // Validate stock, quantity, and seller maximum order quantity (MOQ)
+    const adminCombinedQuantities = {};
+    for (const item of items) {
+      const pId = (item.productId || item.product || item.id || item._id)?.toString();
+      const qty = parseInt(item.quantity, 10);
+      if (pId) {
+        adminCombinedQuantities[pId] = (adminCombinedQuantities[pId] || 0) + (isNaN(qty) ? 0 : qty);
+      }
+    }
+
     for (const item of items) {
       const pId = item.productId || item.product || item.id || item._id;
       const productData = await ProductModel.findById(pId);
@@ -1510,6 +1649,22 @@ router.post('/admin/create', protect, async (req, res) => {
         });
       }
       item.quantity = qty;
+
+      // Validate Seller Maximum Order Quantity (MOQ) restriction
+      const maxOrderLimit = productData.maxOrderQuantity !== undefined && productData.maxOrderQuantity !== null
+        ? Number(productData.maxOrderQuantity)
+        : (productData.moq !== undefined && productData.moq !== null ? Number(productData.moq) : null);
+
+      if (maxOrderLimit && maxOrderLimit > 0) {
+        const totalQtyForProduct = adminCombinedQuantities[pId.toString()] || qty;
+        if (totalQtyForProduct > maxOrderLimit) {
+          return res.status(400).json({
+            message: `Maximum ${maxOrderLimit} units allowed per order for "${productData.name}". You requested ${totalQtyForProduct} units.`,
+            maxOrderQuantity: maxOrderLimit,
+            productId: pId
+          });
+        }
+      }
 
       const targetSize = item.variantSize || item.selectedPacketSize;
       const stockInfo = getProductStock(productData, targetSize, targetUser.role);
@@ -1837,6 +1992,15 @@ router.put('/admin/:id/items', protect, async (req, res) => {
             rawPrice = rawApplicableTier.sellerPrice !== undefined ? rawApplicableTier.sellerPrice : rawApplicableTier.price;
           }
         }
+      }
+
+      // Check Maximum Order Quantity (MOQ) limit
+      const maxOrderLimit = productData.maxOrderQuantity !== undefined && productData.maxOrderQuantity !== null
+        ? Number(productData.maxOrderQuantity)
+        : (productData.moq !== undefined && productData.moq !== null ? Number(productData.moq) : null);
+
+      if (maxOrderLimit && maxOrderLimit > 0 && item.quantity > maxOrderLimit) {
+        throw new Error(`Maximum ${maxOrderLimit} units allowed per order for "${productData.name}". Requested: ${item.quantity}`);
       }
 
       // Check stock limit

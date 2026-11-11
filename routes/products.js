@@ -319,7 +319,7 @@ router.get('/', async (req, res) => {
 // @desc    Create a single product with image and/or pdf upload
 router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name: 'pdf', maxCount: 1 }]), async (req, res) => {
   try {
-    const { name, categoryId, subCategoryId, price, b2bPrice, moq, unit, sellerId, stock, description, gstPercent } = req.body;
+    const { name, categoryId, subCategoryId, price, b2bPrice, moq, maxOrderQuantity, unit, sellerId, stock, description, gstPercent } = req.body;
     let parsedPriceTiers = [];
     let parsedB2b = [];
     let parsedB2c = [];
@@ -329,6 +329,16 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       if (req.body.b2c) parsedB2c = typeof req.body.b2c === 'string' ? JSON.parse(req.body.b2c) : req.body.b2c;
     } catch (e) {
       console.error("Failed to parse priceTiers, b2b, or b2c", e);
+    }
+
+    // Validate and resolve Maximum Order Quantity (moq / maxOrderQuantity)
+    const rawMoq = moq !== undefined && moq !== null && moq !== '' ? moq : maxOrderQuantity;
+    let parsedMoq = 1;
+    if (rawMoq !== undefined && rawMoq !== null && rawMoq !== '') {
+      parsedMoq = parseInt(rawMoq, 10);
+      if (isNaN(parsedMoq) || parsedMoq < 1) {
+        return res.status(400).json({ message: 'Maximum order quantity must be an integer greater than 0' });
+      }
     }
 
     const productionDomain = process.env.PRODUCTION_DOMAIN || 'https://snbtradingco.in';
@@ -405,7 +415,8 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       isGstInclusive: pricingPayload.isGstInclusive,
       unitCustomerPrice: pricingPayload.unitCustomerPrice,
       gstPercent: gstPercent || 0,
-      moq,
+      moq: parsedMoq,
+      maxOrderQuantity: parsedMoq,
       unit,
       sellerId,
       sellerName: finalSellerName,
@@ -549,9 +560,15 @@ router.post('/bulk-upload', protect, excelUpload.single('file'), async (req, res
         if (item.Description && !product.description) product.description = item.Description;
         if (item.PdfUrl && !product.pdfUrl) product.pdfUrl = item.PdfUrl;
         if (determinedSellerId && !product.sellerId) product.sellerId = determinedSellerId;
+        const bulkMoq = parseInt(item.MOQ || item.MaxOrderQuantity || item.moq, 10);
+        if (!isNaN(bulkMoq) && bulkMoq >= 1) {
+          product.moq = bulkMoq;
+          product.maxOrderQuantity = bulkMoq;
+        }
 
         await product.save();
       } else {
+        const bulkMoq = parseInt(item.MOQ || item.MaxOrderQuantity || item.moq, 10) || 1;
         // Create Product
         product = await ProductModel.create({
           name: item.Name,
@@ -560,7 +577,8 @@ router.post('/bulk-upload', protect, excelUpload.single('file'), async (req, res
           price: item.Price || item.B2C_Price || 0,
           b2bPrice: item.B2BPrice || item.B2B_Price || 0,
           gstPercent: item.GST || 0,
-          moq: item.MOQ || 1,
+          moq: bulkMoq,
+          maxOrderQuantity: bulkMoq,
           unit: item.Unit || 'pcs',
           imageUrl: item.ImageUrl || 'https://snbtradingco.in/uploads/default-product.png',
           description: item.Description || '',
@@ -856,6 +874,27 @@ router.get('/:id', async (req, res) => {
 router.put('/:id', protect, async (req, res) => {
   try {
     const { Product } = getModels(req);
+
+    // If seller is updating, ensure they own the product
+    if (req.user && req.user.role === 'seller') {
+      const existingProd = await Product.findById(req.params.id).select('sellerId');
+      if (!existingProd) return res.status(404).json({ message: 'Product not found' });
+      if (existingProd.sellerId && existingProd.sellerId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: 'Not authorized to update products of another seller' });
+      }
+    }
+
+    // Validate moq / maxOrderQuantity if provided
+    const rawMoq = req.body.moq !== undefined ? req.body.moq : req.body.maxOrderQuantity;
+    if (rawMoq !== undefined && rawMoq !== null && rawMoq !== '') {
+      const parsedMoq = parseInt(rawMoq, 10);
+      if (isNaN(parsedMoq) || parsedMoq < 1) {
+        return res.status(400).json({ message: 'Maximum order quantity must be an integer greater than 0' });
+      }
+      req.body.moq = parsedMoq;
+      req.body.maxOrderQuantity = parsedMoq;
+    }
+
     const comms = await loadCommissions(req);
     const updatedPayload = processProductPricing(req.body, comms);
     if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
