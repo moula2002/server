@@ -10,7 +10,7 @@ const Seller = require('../models/Seller');
 const Driver = require('../models/Driver');
 const CashCollector = require('../models/CashCollector');
 const { loadCommissions } = require('./products');
-const { applyCommission, calculatePricingBreakdown, findCategoryCommission, round2 } = require('../utils/pricing');
+const { applyCommission, calculatePricingBreakdown, findCategoryCommission, convertMeasurement, round2 } = require('../utils/pricing');
 const {
   generate6DigitOTP,
   prepareOrderDeliveryOtp,
@@ -692,10 +692,37 @@ router.post('/', protect, async (req, res) => {
       const commType = commRule?.commissionType || basePriceObj?.commissionType || enrichedProduct?.commissionType || 'flat';
       const commVal = commRule ? commRule.commissionValue : (basePriceObj?.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
+      // --- Dynamic Product Size-Based Commission Calculation ---
+      const prodSellingUnit = productData?.sellingUnit || productData?.unit || 'BOX';
+      const prodUnitSize = (productData?.unitSize !== undefined && productData?.unitSize !== null && productData?.unitSize > 0)
+        ? Number(productData.unitSize)
+        : null;
+      const prodMeasUnit = productData?.measurementUnit ? String(productData.measurementUnit).trim().toUpperCase() : null;
+
+      let sizeBasedUnitCommission = undefined;
+      let calculatedTotalMeasurement = null;
+      let usedCommissionBasis = null;
+      let usedCommissionRate = null;
+
+      if (commRule && commRule.commissionStatus !== 'Inactive' && commRule.commissionBasis && commRule.commissionRate !== null && commRule.commissionRate !== undefined) {
+        usedCommissionBasis = String(commRule.commissionBasis).trim().toUpperCase();
+        usedCommissionRate = Number(commRule.commissionRate) || 0;
+
+        if (prodUnitSize && prodMeasUnit) {
+          const convertedSizePerUnit = convertMeasurement(prodUnitSize, prodMeasUnit, usedCommissionBasis);
+          if (convertedSizePerUnit !== null) {
+            // sizeBasedUnitCommission is the commission per selling unit (e.g. 30 KG * ₹20/KG = ₹600)
+            sizeBasedUnitCommission = round2(convertedSizePerUnit * usedCommissionRate);
+            calculatedTotalMeasurement = round2(convertedSizePerUnit * item.quantity);
+          }
+        }
+      }
+
       const breakdown = calculatePricingBreakdown({
         sellerUnitPrice: Number(rawPrice) || 0,
         commissionType: commType,
         commissionValue: Number(commVal) || 0,
+        commissionBasisRate: sizeBasedUnitCommission,
         gstPercent: gstPercent,
         quantity: item.quantity,
         availableStock: productData ? (productData.stock || 0) : 0,
@@ -718,11 +745,17 @@ router.post('/', protect, async (req, res) => {
         normalPrice: breakdown.sellerUnitPrice,
         sellerUnitPrice: breakdown.sellerUnitPrice,
         commissionType: breakdown.commissionType,
-        commissionValue: breakdown.commissionRate,
-        commissionRate: breakdown.commissionRate,
+        commissionValue: usedCommissionRate !== null ? usedCommissionRate : breakdown.commissionRate,
+        commissionRate: usedCommissionRate !== null ? usedCommissionRate : breakdown.commissionRate,
         commissionAmount: breakdown.unitCommission,
         unitCommission: breakdown.unitCommission,
         totalCommission: breakdown.totalCommission,
+        // Order-time size-based snapshot
+        sellingUnit: prodSellingUnit,
+        unitSize: prodUnitSize,
+        measurementUnit: prodMeasUnit,
+        totalMeasurement: calculatedTotalMeasurement,
+        commissionBasis: usedCommissionBasis,
         totalSellerPrice: breakdown.totalSellerPrice,
         finalCustomerPrice: breakdown.finalCustomerPrice,
         availableStock: breakdown.availableStock,

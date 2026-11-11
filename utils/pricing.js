@@ -38,6 +38,31 @@ function normalizeUnit(u) {
 }
 
 /**
+ * Measurement unit conversions.
+ * Converts amount from fromUnit to toUnit.
+ * Returns null if units are incompatible.
+ */
+function convertMeasurement(amount, fromUnit, toUnit) {
+  const num = Number(amount);
+  if (isNaN(num)) return null;
+  const f = normalizeUnit(fromUnit);
+  const t = normalizeUnit(toUnit);
+  if (!f || !t) return null;
+  if (f === t) return num;
+
+  // Weight conversions: kg <-> g
+  if (f === 'kg' && t === 'g') return num * 1000;
+  if (f === 'g' && t === 'kg') return num / 1000;
+
+  // Volume conversions: ltr <-> ml
+  if (f === 'ltr' && t === 'ml') return num * 1000;
+  if (f === 'ml' && t === 'ltr') return num / 1000;
+
+  // Incompatible (e.g. kg to ltr)
+  return null;
+}
+
+/**
  * Finds the applicable commission rule from category commissions array.
  * Priority:
  * 1. Category ID + Matching Unit + Matching Pincode
@@ -451,6 +476,7 @@ function calculatePricingBreakdown({
   commissionType = 'flat',
   commissionValue = 0,
   commissionRate = undefined,
+  commissionBasisRate = undefined,
   gstPercent = 0,
   quantity = 1,
   orderedQuantity = undefined,
@@ -467,7 +493,10 @@ function calculatePricingBreakdown({
   const cType = commissionType === 'percentage' ? 'percentage' : 'flat';
 
   let unitCommission = 0;
-  if (cType === 'flat') {
+  if (commissionBasisRate !== undefined && commissionBasisRate !== null) {
+    // Dynamic Size-based commission per selling unit
+    unitCommission = round2(Number(commissionBasisRate) || 0);
+  } else if (cType === 'flat') {
     unitCommission = cVal;
   } else {
     unitCommission = (sUnitPrice * cVal) / 100;
@@ -555,6 +584,7 @@ function calculatePricingBreakdown({
 
 module.exports = {
   round2,
+  convertMeasurement,
   calculatePricingBreakdown,
   findCategoryCommission,
   calculateCustomerPrice,
