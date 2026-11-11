@@ -33,8 +33,28 @@ function normalizeUnit(u) {
   if (clean === 'kgs' || clean === 'kilogram' || clean === 'kilograms') return 'kg';
   if (clean === 'gms' || clean === 'gm' || clean === 'gram' || clean === 'grams') return 'g';
   if (clean === 'ltrs' || clean === 'liter' || clean === 'litre' || clean === 'liters' || clean === 'litres') return 'ltr';
+  if (clean === 'mls' || clean === 'milliliter' || clean === 'millilitre') return 'ml';
   if (clean === 'pieces' || clean === 'piece' || clean === 'pkts' || clean === 'pkt') return 'pcs';
+  if (clean === 'tons' || clean === 'tonne' || clean === 'tonnes') return 'ton';
+  if (clean === 'tins') return 'tin';
+  if (clean === 'bags') return 'bag';
   return clean;
+}
+
+/**
+ * Extracts numeric unit size or weight (e.g. "30 KG", "30kg", "30", 30 -> 30)
+ * Defaults to 1 if not specified, 0, or invalid.
+ */
+function extractUnitSize(val, defaultVal = 1) {
+  if (val === undefined || val === null || val === '') return defaultVal;
+  if (typeof val === 'number') return val > 0 ? val : defaultVal;
+  const str = String(val).trim();
+  const match = str.match(/([0-9.]+)/);
+  if (match && !isNaN(parseFloat(match[1]))) {
+    const parsed = parseFloat(match[1]);
+    return parsed > 0 ? parsed : defaultVal;
+  }
+  return defaultVal;
 }
 
 /**
@@ -60,8 +80,8 @@ function findCategoryCommission(commissions, categoryId, unit, pincode = null) {
 
   // Extract possible unit from string (e.g. "20kg", "30kgs") if targetUnit is empty or "pcs"
   let extractedUnit = targetUnit;
-  if (!extractedUnit || extractedUnit === 'pcs') {
-    const match = (unit || '').toString().match(/[0-9.]*\s*(kg|g|ltr|pcs|gm|ltrs|kgs)/i);
+  if (!extractedUnit || extractedUnit === 'pcs' || extractedUnit === 'bag') {
+    const match = (unit || '').toString().match(/[0-9.]*\s*(kg|g|ltr|pcs|gm|ltrs|kgs|ton|tin|bag)/i);
     if (match && match[1]) {
       extractedUnit = normalizeUnit(match[1]);
     }
@@ -99,21 +119,23 @@ function findCategoryCommission(commissions, categoryId, unit, pincode = null) {
 }
 
 /**
- * Calculate customer price per unit given base seller price, commission type, and commission value.
+ * Calculate customer price per unit given base seller price, commission type, commission value, and unit size.
  * Formula:
- * - Flat commission: customerPrice = sellerPrice + commissionValue
- * - Percentage commission: customerPrice = sellerPrice + (sellerPrice * commissionValue / 100)
+ * - Flat commission: unitCommission = commissionValue * unitSize; customerPrice = sellerPrice + unitCommission
+ * - Percentage commission: unitCommission = (sellerPrice * commissionValue / 100); customerPrice = sellerPrice + unitCommission
  */
-function calculateCustomerPrice(sellerPrice, commissionType, commissionValue) {
+function calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize = 1) {
   const sPrice = typeof sellerPrice === 'number' ? sellerPrice : (parseFloat(sellerPrice) || 0);
-  if (sPrice <= 0) return { customerPrice: 0, commissionAmount: 0 };
+  if (sPrice <= 0) return { customerPrice: 0, commissionAmount: 0, unitCommission: 0, unitSize: 1 };
 
   const cVal = typeof commissionValue === 'number' ? commissionValue : (parseFloat(commissionValue) || 0);
   const cType = commissionType === 'percentage' ? 'percentage' : 'flat';
+  const uSize = extractUnitSize(unitSize, 1);
 
   let commissionAmount = 0;
   if (cType === 'flat') {
-    commissionAmount = cVal;
+    // Admin Commission Per Unit * Product Unit Size
+    commissionAmount = cVal * uSize;
   } else {
     commissionAmount = (sPrice * cVal) / 100;
   }
@@ -122,7 +144,9 @@ function calculateCustomerPrice(sellerPrice, commissionType, commissionValue) {
   const finalCustomerPrice = round2(sPrice + commissionAmount);
   return {
     customerPrice: finalCustomerPrice,
-    commissionAmount: commissionAmount
+    commissionAmount: commissionAmount,
+    unitCommission: commissionAmount,
+    unitSize: uSize
   };
 }
 
@@ -133,6 +157,7 @@ function calculateCustomerPrice(sellerPrice, commissionType, commissionValue) {
 function processProductPricing(payload, commissions = []) {
   const categoryId = payload.categoryId;
   const unit = payload.unit || 'pcs';
+  const unitSize = extractUnitSize(payload.unitSize, 1);
 
   const adminRule = findCategoryCommission(commissions, categoryId, unit);
 
@@ -159,22 +184,25 @@ function processProductPricing(payload, commissions = []) {
         ? parseFloat(payload.sellerB2bPrice) || 0
         : (parseFloat(payload.price) || parseFloat(payload.b2bPrice) || 0));
 
-  const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue);
-  const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue);
+  const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize);
+  const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize);
 
   // Process B2C variants
   const processedB2c = (payload.b2c || []).map(v => {
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== '' && v.sellerPrice !== null
       ? parseFloat(v.sellerPrice) || 0
       : (parseFloat(v.price) || 0);
-    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue);
+    const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
+    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
     return {
       ...v,
+      unitSize: vUnitSize,
       sellerPrice: vSellerPrice,
       price: vCalc.customerPrice,
       commissionType,
       commissionValue,
-      commissionAmount: vCalc.commissionAmount
+      commissionAmount: vCalc.commissionAmount,
+      unitCommission: vCalc.unitCommission
     };
   });
 
@@ -183,7 +211,8 @@ function processProductPricing(payload, commissions = []) {
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== '' && v.sellerPrice !== null
       ? parseFloat(v.sellerPrice) || 0
       : (parseFloat(v.price) || 0);
-    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue);
+    const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
+    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
 
     let processedTiers = v.priceTiers;
     if (Array.isArray(v.priceTiers)) {
@@ -191,7 +220,7 @@ function processProductPricing(payload, commissions = []) {
         const tSellerPrice = tier.sellerPrice !== undefined && tier.sellerPrice !== '' && tier.sellerPrice !== null
           ? parseFloat(tier.sellerPrice) || 0
           : (parseFloat(tier.price) || 0);
-        const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue);
+        const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize);
         return {
           ...tier,
           sellerPrice: tSellerPrice,
@@ -202,11 +231,13 @@ function processProductPricing(payload, commissions = []) {
 
     return {
       ...v,
+      unitSize: vUnitSize,
       sellerPrice: vSellerPrice,
       price: vCalc.customerPrice,
       commissionType,
       commissionValue,
       commissionAmount: vCalc.commissionAmount,
+      unitCommission: vCalc.unitCommission,
       priceTiers: processedTiers
     };
   });
@@ -218,7 +249,7 @@ function processProductPricing(payload, commissions = []) {
       const tSellerPrice = tier.sellerPrice !== undefined && tier.sellerPrice !== '' && tier.sellerPrice !== null
         ? parseFloat(tier.sellerPrice) || 0
         : (parseFloat(tier.price) || 0);
-      const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue);
+      const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, unitSize);
       return {
         ...tier,
         sellerPrice: tSellerPrice,
@@ -256,6 +287,7 @@ function processProductPricing(payload, commissions = []) {
 
   return {
     ...payload,
+    unitSize,
     sellerPrice,
     sellerUnitPrice: sellerPrice,
     sellerB2bPrice,
@@ -294,6 +326,7 @@ function processProductPricing(payload, commissions = []) {
 function applyCommission(product, commissions = [], pincode = null) {
   if (!product) return product;
 
+  const unitSize = extractUnitSize(product.unitSize, 1);
   const adminRule = findCategoryCommission(commissions, product.categoryId, product.unit, pincode);
 
   let commissionType = 'flat';
@@ -319,31 +352,35 @@ function applyCommission(product, commissions = [], pincode = null) {
         ? product.sellerB2bPrice
         : (product.price || product.b2bPrice || 0));
 
-  const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue);
-  const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue);
+  const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize);
+  const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize);
 
   const newB2c = (product.b2c || []).map(v => {
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
-    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue);
+    const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
+    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
     return {
       ...v,
+      unitSize: vUnitSize,
       sellerPrice: vSellerPrice,
       price: vCustomerPrice,
       commissionType,
       commissionValue,
-      commissionAmount: vCommAmt
+      commissionAmount: vCommAmt,
+      unitCommission: vCommAmt
     };
   });
 
   const newB2b = (product.b2b || []).map(v => {
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
-    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue);
+    const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
+    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
 
     let newTiers = v.priceTiers;
     if (Array.isArray(v.priceTiers)) {
       newTiers = v.priceTiers.map(t => {
         const tSellerPrice = t.sellerPrice !== undefined && t.sellerPrice !== null ? t.sellerPrice : (t.price || 0);
-        const { customerPrice: tCustomerPrice } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue);
+        const { customerPrice: tCustomerPrice } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize);
         return {
           ...t,
           sellerPrice: tSellerPrice,
@@ -354,11 +391,13 @@ function applyCommission(product, commissions = [], pincode = null) {
 
     return {
       ...v,
+      unitSize: vUnitSize,
       sellerPrice: vSellerPrice,
       price: vCustomerPrice,
       commissionType,
       commissionValue,
       commissionAmount: vCommAmt,
+      unitCommission: vCommAmt,
       priceTiers: newTiers
     };
   });
@@ -367,7 +406,7 @@ function applyCommission(product, commissions = [], pincode = null) {
   if (Array.isArray(product.priceTiers)) {
     newPriceTiers = product.priceTiers.map(t => {
       const tSellerPrice = t.sellerPrice !== undefined && t.sellerPrice !== null ? t.sellerPrice : (t.price || 0);
-      const { customerPrice: tCustomerPrice } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue);
+      const { customerPrice: tCustomerPrice } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, unitSize);
       return {
         ...t,
         sellerPrice: tSellerPrice,
@@ -405,6 +444,7 @@ function applyCommission(product, commissions = [], pincode = null) {
 
   return {
     ...product,
+    unitSize,
     sellerPrice,
     sellerUnitPrice: sellerPrice,
     sellerB2bPrice,
@@ -435,10 +475,13 @@ function applyCommission(product, commissions = [], pincode = null) {
 }
 
 /**
- * Exact pricing breakdown calculation based on selected quantity and commission rules.
+ * Exact pricing breakdown calculation based on selected quantity, unit size, and commission rules.
  * Handles:
- * - Flat commission: Flat Commission Per Unit * Ordered Quantity
+ * - Unit Size: Size or weight per product (e.g. 30 KG per bag)
+ * - Flat commission: Flat Commission Per Unit * Product Unit Size * Ordered Quantity
+ *     e.g., ₹20 per KG * 30 KG * 2 bags = ₹1,200
  * - Percentage commission: (Seller Unit Price * (Commission Rate / 100)) * Ordered Quantity
+ * - Total Product Weight: Product Unit Size * Ordered Quantity (e.g. 30 KG * 2 = 60 KG)
  * - Stock-level commission: Unit Commission * Available Stock (for display only)
  * - GST rules:
  *     - B2B: GST added on top of totalCustomerBase (totalCustomerBase * (gstPercent / 100))
@@ -451,6 +494,7 @@ function calculatePricingBreakdown({
   commissionType = 'flat',
   commissionValue = 0,
   commissionRate = undefined,
+  unitSize = 1,
   gstPercent = 0,
   quantity = 1,
   orderedQuantity = undefined,
@@ -465,10 +509,12 @@ function calculatePricingBreakdown({
   const rawCommVal = commissionRate !== undefined ? commissionRate : commissionValue;
   const cVal = typeof rawCommVal === 'number' ? rawCommVal : (parseFloat(rawCommVal) || 0);
   const cType = commissionType === 'percentage' ? 'percentage' : 'flat';
+  const uSize = extractUnitSize(unitSize, 1);
 
   let unitCommission = 0;
   if (cType === 'flat') {
-    unitCommission = cVal;
+    // Admin Commission Per Unit * Product Unit Size (e.g. ₹20 * 30 KG = ₹600 per bag)
+    unitCommission = cVal * uSize;
   } else {
     unitCommission = (sUnitPrice * cVal) / 100;
   }
@@ -500,8 +546,10 @@ function calculatePricingBreakdown({
   const stockTotalAmount = stockIsInclusive ? stockSubtotal : round2(stockSubtotal + sellerGstAmount);
 
   // Calculation for ordered quantity (orders / checkout)
+  // Commission Per Order = Admin Commission Per Unit * Product Unit Size * Ordered Quantity
   const totalSellerPrice = round2(sUnitPrice * qty);
   const totalCommission = round2(unitCommission * qty);
+  const totalProductWeight = round2(uSize * qty);
   const totalCustomerBase = round2(totalSellerPrice + totalCommission);
 
   let totalGst = 0;
@@ -525,6 +573,8 @@ function calculatePricingBreakdown({
     sellerUnitPrice: sUnitPrice,
     commissionType: cType,
     commissionRate: cVal,
+    unitSize: uSize,
+    totalProductWeight,
     unitCommission,
     availableStock: stock,
     stockTotalCommission,
@@ -555,6 +605,8 @@ function calculatePricingBreakdown({
 
 module.exports = {
   round2,
+  normalizeUnit,
+  extractUnitSize,
   calculatePricingBreakdown,
   findCategoryCommission,
   calculateCustomerPrice,

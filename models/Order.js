@@ -68,6 +68,9 @@ const orderSchema = new mongoose.Schema({
     gstPercent: { type: Number, default: 0 },
     gstAmount: { type: Number, default: 0 },
     totalGst: { type: Number, default: 0 },
+    unitSize: { type: Number, default: 1 },
+    unit: { type: String, default: null },
+    totalProductWeight: { type: Number, default: 0 },
     returnStatus: { 
       type: String, 
       enum: ['None', 'Return Requested', 'Return Approved', 'Return Rejected', 'Picked Up from Customer', 'Returned to Seller'], 

@@ -121,7 +121,10 @@ router.post('/generate', protect, async (req, res) => {
         validOrders.push(order);
         sellerItemsInOrder.forEach(item => {
           if (item.returnStatus !== 'Returned to Seller') {
-            totalAmount += (item.normalPrice || item.price) * item.quantity;
+            const itemCommission = item.totalCommission || ((item.unitCommission || 0) * item.quantity) || 0;
+            const itemSellerPrice = (item.sellerUnitPrice || item.normalPrice || item.price) * item.quantity;
+            totalAmount += itemSellerPrice;
+            totalCommission += itemCommission;
           }
         });
       }
@@ -138,7 +141,7 @@ router.post('/generate', protect, async (req, res) => {
       startDate: start,
       endDate: end,
       totalAmount: totalAmount,
-      totalCommission: 0, // Simplified for now
+      totalCommission: totalCommission,
       netAmount: totalAmount,
       orderCount: orderIds.length,
       orders: orderIds,

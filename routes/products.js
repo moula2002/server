@@ -706,6 +706,7 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
     const pricingPayload = processProductPricing({
       categoryId,
       unit: cleanUnit,
+      unitSize: req.body.unitSize !== undefined ? req.body.unitSize : 1,
       sellerPrice: req.body.sellerPrice || req.body.sellerB2bPrice || price,
       sellerB2bPrice: req.body.sellerB2bPrice || req.body.sellerPrice || b2bPrice || price,
       price,
@@ -760,6 +761,7 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       moq: parsedMoq,
       maxOrderQuantity: parsedMoq,
       unit: cleanUnit,
+      unitSize: pricingPayload.unitSize || req.body.unitSize || 1,
       customUnits: cleanCustomUnits,
       sellerId,
       sellerName: finalSellerName,
@@ -1309,6 +1311,9 @@ router.put('/:id', protect, async (req, res) => {
     }
 
     const comms = await loadCommissions(req);
+    if (req.body.unitSize === undefined && existingProd.unitSize) {
+      req.body.unitSize = existingProd.unitSize;
+    }
     const updatedPayload = processProductPricing(req.body, comms);
     if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
       updatedPayload.subCategoryId = null;
@@ -1318,6 +1323,9 @@ router.put('/:id', protect, async (req, res) => {
     }
     if (req.body.unit) {
       updatedPayload.unit = req.body.unit;
+    }
+    if (req.body.unitSize !== undefined) {
+      updatedPayload.unitSize = req.body.unitSize;
     }
     const product = await targetProductModel.findByIdAndUpdate(id, updatedPayload, { returnDocument: 'after' });
     if (!product) return res.status(404).json({ message: 'Product not found' });

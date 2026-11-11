@@ -10,7 +10,7 @@ const Seller = require('../models/Seller');
 const Driver = require('../models/Driver');
 const CashCollector = require('../models/CashCollector');
 const { loadCommissions } = require('./products');
-const { applyCommission, calculatePricingBreakdown, findCategoryCommission, round2 } = require('../utils/pricing');
+const { applyCommission, calculatePricingBreakdown, findCategoryCommission, round2, extractUnitSize } = require('../utils/pricing');
 const {
   generate6DigitOTP,
   prepareOrderDeliveryOtp,
@@ -692,10 +692,19 @@ router.post('/', protect, async (req, res) => {
       const commType = commRule?.commissionType || basePriceObj?.commissionType || enrichedProduct?.commissionType || 'flat';
       const commVal = commRule ? commRule.commissionValue : (basePriceObj?.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
+      const targetUnitSize = extractUnitSize(
+        item.unitSize ||
+        (basePriceObj && basePriceObj.unitSize) ||
+        targetSize ||
+        (productData && productData.unitSize),
+        1
+      );
+
       const breakdown = calculatePricingBreakdown({
         sellerUnitPrice: Number(rawPrice) || 0,
         commissionType: commType,
         commissionValue: Number(commVal) || 0,
+        unitSize: targetUnitSize,
         gstPercent: gstPercent,
         quantity: item.quantity,
         availableStock: productData ? (productData.stock || 0) : 0,
@@ -717,6 +726,9 @@ router.post('/', protect, async (req, res) => {
         unitCustomerPrice: breakdown.unitCustomerPrice,
         normalPrice: breakdown.sellerUnitPrice,
         sellerUnitPrice: breakdown.sellerUnitPrice,
+        unitSize: breakdown.unitSize,
+        unit: productData?.unit || 'pcs',
+        totalProductWeight: breakdown.totalProductWeight,
         commissionType: breakdown.commissionType,
         commissionValue: breakdown.commissionRate,
         commissionRate: breakdown.commissionRate,
@@ -1863,10 +1875,19 @@ router.post('/admin/create', protect, async (req, res) => {
       const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
       const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
+      const targetUnitSize = extractUnitSize(
+        item.unitSize ||
+        (basePriceObj && basePriceObj.unitSize) ||
+        targetSize ||
+        (productData && productData.unitSize),
+        1
+      );
+
       const breakdown = calculatePricingBreakdown({
         sellerUnitPrice: Number(rawPrice) || 0,
         commissionType: commType,
         commissionValue: Number(commVal) || 0,
+        unitSize: targetUnitSize,
         gstPercent: gstPercent,
         quantity: item.quantity,
         availableStock: productData ? (productData.stock || 0) : 0,
@@ -1904,6 +1925,9 @@ router.post('/admin/create', protect, async (req, res) => {
         unitCustomerPrice: breakdown.unitCustomerPrice,
         normalPrice: breakdown.sellerUnitPrice,
         sellerUnitPrice: breakdown.sellerUnitPrice,
+        unitSize: breakdown.unitSize,
+        unit: productData?.unit || 'pcs',
+        totalProductWeight: breakdown.totalProductWeight,
         commissionType: breakdown.commissionType,
         commissionValue: breakdown.commissionRate,
         commissionRate: breakdown.commissionRate,
@@ -2128,10 +2152,19 @@ router.put('/admin/:id/items', protect, async (req, res) => {
         const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
         const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
+        const targetUnitSize = extractUnitSize(
+          item.unitSize ||
+          (basePriceObj && basePriceObj.unitSize) ||
+          targetSizeCheck ||
+          (productData && productData.unitSize),
+          1
+        );
+
         const breakdown = calculatePricingBreakdown({
           sellerUnitPrice: Number(rawPrice) || 0,
           commissionType: commType,
           commissionValue: Number(commVal) || 0,
+          unitSize: targetUnitSize,
           gstPercent: gstPercent,
           quantity: item.quantity,
           availableStock: productData ? (productData.stock || 0) : 0,
@@ -2168,6 +2201,9 @@ router.put('/admin/:id/items', protect, async (req, res) => {
           unitCustomerPrice: breakdown.unitCustomerPrice,
           normalPrice: breakdown.sellerUnitPrice,
           sellerUnitPrice: breakdown.sellerUnitPrice,
+          unitSize: breakdown.unitSize,
+          unit: productData?.unit || 'pcs',
+          totalProductWeight: breakdown.totalProductWeight,
           commissionType: breakdown.commissionType,
           commissionValue: breakdown.commissionRate,
           commissionRate: breakdown.commissionRate,
