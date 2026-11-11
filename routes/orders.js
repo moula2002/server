@@ -1030,6 +1030,11 @@ router.get('/driver/history', protect, async (req, res) => {
 // @desc    Ship an order and assign driver
 router.put('/:id/ship', protect, async (req, res) => {
   try {
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    if (!isAdmin) {
+      return res.status(403).json({ message: '403 Forbidden: Only Admins have permission to assign drivers and dispatch orders.' });
+    }
+
     const { Order: OrderModel, Driver: DriverModel } = getModels(req);
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
@@ -1089,6 +1094,23 @@ router.put('/:id/cancel', protect, async (req, res) => {
     const order = await OrderModel.findById(req.params.id).populate('userId', 'role');
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
+    const isCustomer = order.userId?._id?.toString() === req.user._id.toString();
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user.role);
+    const isDriver = req.user.role === 'driver' || order.driverId?.toString() === req.user._id.toString() || order.returnDriverId?.toString() === req.user._id.toString();
+
+    // Drivers are strictly forbidden from cancelling orders
+    if (isDriver && !isAdmin) {
+      return res.status(403).json({ message: '403 Forbidden: Drivers are not permitted to cancel orders. Only Admins have permission to cancel orders.' });
+    }
+
+    if (!isAdmin && !isCustomer) {
+      return res.status(403).json({ message: '403 Forbidden: Not authorized to cancel this order.' });
+    }
+
+    if (isCustomer && !isAdmin && order.orderStatus !== 'Pending') {
+      return res.status(400).json({ message: 'Customers can only cancel orders in Pending status.' });
+    }
+
     if (order.orderStatus === 'Cancelled') {
       return res.status(400).json({ message: 'Order is already cancelled' });
     }
@@ -1129,15 +1151,76 @@ router.all('/:id/status', protect, async (req, res) => {
     console.log(`[PUT /:id/status] Order found: ${!!order}`);
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
-    // Authorization check: User can only cancel their own order, or admin, or assigned personnel
+    // Authorization check
     const isCustomer = order.userId?._id?.toString() === req.user._id.toString();
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales'].includes(req.user.role);
-    const isDriver = order.driverId?.toString() === req.user._id.toString() || order.returnDriverId?.toString() === req.user._id.toString();
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user.role);
+    const isDriver = req.user.role === 'driver' || order.driverId?.toString() === req.user._id.toString() || order.returnDriverId?.toString() === req.user._id.toString();
     const isCollector = order.cashPersonId?.toString() === req.user._id.toString();
     const isSeller = req.user.role === 'seller';
 
     if (!isCustomer && !isAdmin && !isDriver && !isCollector && !isSeller) {
-      return res.status(403).json({ message: 'Not authorized to update this order' });
+      return res.status(403).json({ message: '403 Forbidden: Not authorized to update this order' });
+    }
+
+    // Role-based restrictions: Drivers cannot manually update Delivery, Out for Delivery, or Cancelled statuses
+    if (isDriver && !isAdmin) {
+      const normalizedStatus = (status || '').trim().toLowerCase();
+
+      // 1. Out for Delivery: strictly forbidden for drivers (Admin dispatch only)
+      if (normalizedStatus === 'out for delivery') {
+        return res.status(403).json({
+          message: '403 Forbidden: Drivers are not permitted to manually change order status to Out for Delivery. Only Admins have permission to dispatch orders.'
+        });
+      }
+
+      // 2. Cancelled: strictly forbidden for drivers
+      if (normalizedStatus === 'cancelled' || normalizedStatus === 'canceled') {
+        return res.status(403).json({
+          message: '403 Forbidden: Drivers are not permitted to cancel orders. Only Admins can cancel orders.'
+        });
+      }
+
+      // 3. Delivered: Drivers cannot manually mark orders as Delivered without valid OTP verification
+      if (normalizedStatus === 'delivered' || normalizedStatus === 'delivery') {
+        const enteredOtp = req.body.otp || req.body.deliveryOtp;
+        if (!enteredOtp) {
+          return res.status(403).json({
+            message: '403 Forbidden: Drivers cannot manually mark orders as Delivered. Delivery completion strictly requires customer 6-digit OTP verification via the authorized delivery workflow.'
+          });
+        }
+        // If OTP is provided, execute verification
+        const verifyResult = verifyOrderDeliveryOtp(order, enteredOtp);
+        if (!verifyResult.success) {
+          await order.save();
+          return res.status(400).json({
+            message: verifyResult.message,
+            remainingAttempts: verifyResult.remainingAttempts,
+            code: verifyResult.code
+          });
+        }
+      } else {
+        // Any other manual status change (Pending, Confirmed, Packed, etc.) by a driver is forbidden
+        return res.status(403).json({
+          message: `403 Forbidden: Drivers are not permitted to manually change order status to '${status}'.`
+        });
+      }
+    }
+
+    // Customers can only cancel their own orders in Pending status
+    if (isCustomer && !isAdmin) {
+      if (status !== 'Cancelled') {
+        return res.status(403).json({ message: '403 Forbidden: Customers are only allowed to cancel their orders.' });
+      }
+      if (order.orderStatus !== 'Pending') {
+        return res.status(400).json({ message: 'Orders can only be cancelled while in Pending status.' });
+      }
+    }
+
+    // Sellers can only mark Packed or Rejected by Seller for their items
+    if (isSeller && !isAdmin && !isCustomer && !isDriver) {
+      if (!['Packed', 'Rejected by Seller'].includes(status)) {
+        return res.status(403).json({ message: `403 Forbidden: Sellers are not permitted to set status to '${status}'.` });
+      }
     }
 
     // Update returnStatus to Completed when return driver marks as Returned
@@ -1145,23 +1228,23 @@ router.all('/:id/status', protect, async (req, res) => {
       order.returnStatus = 'Completed';
     }
 
-    // Strict Delivery OTP Verification: Require valid 6-digit OTP to transition to Delivered
-    if (status === 'Delivered') {
+    // Strict Delivery OTP Verification for Admin:
+    // If Admin provides OTP, verify it; if Admin does not provide OTP, Admin has manual override authority.
+    if (status === 'Delivered' && isAdmin) {
       const enteredOtp = req.body.otp || req.body.deliveryOtp;
-      if (!enteredOtp) {
-        return res.status(400).json({
-          message: 'Customer 6-digit delivery OTP is required to mark order as Delivered. Please collect it from the customer.'
-        });
-      }
-
-      const verifyResult = verifyOrderDeliveryOtp(order, enteredOtp);
-      if (!verifyResult.success) {
-        await order.save(); // Persist attempt counter to prevent brute force
-        return res.status(400).json({
-          message: verifyResult.message,
-          remainingAttempts: verifyResult.remainingAttempts,
-          code: verifyResult.code
-        });
+      if (enteredOtp) {
+        const verifyResult = verifyOrderDeliveryOtp(order, enteredOtp);
+        if (!verifyResult.success) {
+          await order.save();
+          return res.status(400).json({
+            message: verifyResult.message,
+            remainingAttempts: verifyResult.remainingAttempts,
+            code: verifyResult.code
+          });
+        }
+      } else {
+        order.deliveredAt = new Date();
+        order.deliveryOtp = null; // Prevent OTP reuse
       }
     }
 
