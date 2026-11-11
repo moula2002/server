@@ -177,9 +177,24 @@ const orderSchema = new mongoose.Schema({
   },
   returnStatus: { 
     type: String, 
-    enum: ['None', 'Requested', 'Approved', 'Rejected', 'Completed'], 
+    enum: ['None', 'Pending', 'Requested', 'Return Requested', 'Approved', 'Return Approved', 'Rejected', 'Return Rejected', 'Return Picked Up', 'Picked Up from Customer', 'Return Completed', 'Returned to Seller', 'Completed'], 
     default: 'None' 
   },
+  returnImages: [{ type: String }],
+  returnRequestedAt: { type: Date, default: null },
+  returnApprovedAt: { type: Date, default: null },
+  returnApprovedBy: {
+    id: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
+    name: String,
+    email: String
+  },
+  returnRejectedAt: { type: Date, default: null },
+  returnRejectedBy: {
+    id: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
+    name: String,
+    email: String
+  },
+  returnRejectionReason: { type: String, default: null },
   returnDriverId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Driver',
