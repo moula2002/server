@@ -2381,7 +2381,16 @@ router.put('/:id/return-approve', protect, async (req, res) => {
       });
     }
 
-    await order.save({ validateModifiedOnly: true });
+    try {
+      await order.save({ validateModifiedOnly: true });
+    } catch (saveErr) {
+      if (saveErr.name === 'ValidationError' && (saveErr.errors?.orderStatus || saveErr.message?.includes('orderStatus'))) {
+        order.orderStatus = 'Return Requested';
+        await order.save({ validateModifiedOnly: true });
+      } else {
+        throw saveErr;
+      }
+    }
     emitOrderRealtimeUpdate(order, 'update');
 
     // Notify customer via email if available
@@ -2486,7 +2495,16 @@ router.put('/:id/return-reject', protect, async (req, res) => {
       });
     }
 
-    await order.save({ validateModifiedOnly: true });
+    try {
+      await order.save({ validateModifiedOnly: true });
+    } catch (saveErr) {
+      if (saveErr.name === 'ValidationError' && (saveErr.errors?.orderStatus || saveErr.message?.includes('orderStatus'))) {
+        order.orderStatus = 'Delivered';
+        await order.save({ validateModifiedOnly: true });
+      } else {
+        throw saveErr;
+      }
+    }
     emitOrderRealtimeUpdate(order, 'update');
 
     // Notify customer via email if available
@@ -2545,15 +2563,32 @@ router.put('/:id/items/:itemId/return-status', protect, async (req, res) => {
 
     item.returnStatus = status;
 
-    if (status === 'Return Rejected') {
+    const validOrderStatuses = OrderModel.schema?.path('orderStatus')?.enumValues || [];
+    if (status === 'Return Approved') {
+      order.returnStatus = 'Approved';
+      if (validOrderStatuses.includes('Return Approved')) {
+        order.orderStatus = 'Return Approved';
+      }
+    } else if (status === 'Return Rejected') {
       const anyStillRequested = order.items.some(i => i.returnStatus === 'Return Requested');
       const anyApproved = order.items.some(i => ['Return Approved', 'Picked Up from Customer', 'Returned to Seller'].includes(i.returnStatus));
       if (!anyStillRequested && !anyApproved) {
         order.orderStatus = 'Delivered';
+        order.returnStatus = 'Rejected';
       }
     }
 
-    await order.save();
+    try {
+      await order.save({ validateModifiedOnly: true });
+    } catch (saveErr) {
+      if (saveErr.name === 'ValidationError' && (saveErr.errors?.orderStatus || saveErr.message?.includes('orderStatus'))) {
+        order.orderStatus = 'Delivered';
+        await order.save({ validateModifiedOnly: true });
+      } else {
+        throw saveErr;
+      }
+    }
+    emitOrderRealtimeUpdate(order, 'update');
     res.json(order);
   } catch (error) {
     res.status(500).json({ message: error.message });
