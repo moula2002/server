@@ -265,7 +265,11 @@ router.put('/:id', protect, async (req, res) => {
     await recalculateProductRating(ProductModel, ReviewModel, review.productId);
 
     const populated = await ReviewModel.findById(review._id).populate('userId', 'name profilePicture role');
-    res.json({ message: 'Review updated successfully', review: populated });
+    res.json({
+      success: true,
+      message: 'Review updated successfully',
+      review: populated
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -406,6 +410,7 @@ router.post('/:id/reply', protect, async (req, res) => {
 
     await review.save();
     res.json({
+      success: true,
       message: 'Admin reply posted successfully',
       review
     });
@@ -437,7 +442,10 @@ router.delete('/:id', protect, async (req, res) => {
     // Update product rating after review removal
     await recalculateProductRating(ProductModel, ReviewModel, productId);
 
-    res.json({ message: 'Review deleted successfully' });
+    res.json({
+      success: true,
+      message: 'Review deleted successfully'
+    });
   } catch (error) {
     console.error('[DELETE /api/reviews/:id] Error:', error);
     res.status(500).json({ message: error.message });
