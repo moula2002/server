@@ -18,6 +18,82 @@ const getModels = (req) => ({
   User: getModel('User', req)
 });
 
+// Helper to gather all database connections in cluster (tenant-aware fallback)
+const getAllDbConnections = async (req = null) => {
+  const { connectDBByLocation, getTenantConnections } = require('../utils/db_manager');
+  const connectionsMap = new Map();
+
+  if (mongoose.connection && mongoose.connection.readyState === 1) {
+    connectionsMap.set(mongoose.connection.name || 'default', mongoose.connection);
+  }
+
+  if (req?.db && req.db.readyState === 1) {
+    connectionsMap.set(req.db.name || 'scoped', req.db);
+  }
+
+  const cachedConns = getTenantConnections();
+  for (const [key, conn] of Object.entries(cachedConns)) {
+    if (conn && conn.readyState === 1) {
+      connectionsMap.set(conn.name || key, conn);
+    }
+  }
+
+  const baseTenants = ['zudo-bengaluru', 'zudo-bangalore', 'zudo-central', 'zudodb'];
+  for (const name of baseTenants) {
+    try {
+      const conn = await connectDBByLocation(name, name);
+      if (conn && conn.readyState === 1) {
+        connectionsMap.set(conn.name || name, conn);
+      }
+    } catch (e) {}
+  }
+
+  try {
+    const centralConn = connectionsMap.get('zudo-central') || connectionsMap.get('zudo-bengaluru');
+    if (centralConn) {
+      const LocationModel = centralConn.models.Location || centralConn.model('Location', require('../models/Location').schema);
+      const locs = await LocationModel.find({ isActive: true }).lean();
+      for (const l of locs) {
+        if (l.city) {
+          const dbName = `zudo-${l.city.toLowerCase().replace(/\s+/g, '-')}`;
+          if (!connectionsMap.has(dbName)) {
+            try {
+              const conn = await connectDBByLocation(l._id ? l._id.toString() : dbName, dbName);
+              if (conn && conn.readyState === 1) {
+                connectionsMap.set(conn.name || dbName, conn);
+              }
+            } catch (ce) {}
+          }
+        }
+      }
+    }
+  } catch (e) {}
+
+  return Array.from(connectionsMap.values());
+};
+
+// Helper to find a product across tenants if not found in current scoped connection
+async function findProductAcrossTenants(productId, req, populate = true) {
+  if (!mongoose.Types.ObjectId.isValid(productId)) {
+    return null;
+  }
+  const allConns = await getAllDbConnections(req);
+  for (const conn of allConns) {
+    try {
+      const Model = conn.models.Product || conn.model('Product', require('../models/Product').schema);
+      let query = Model.findById(productId);
+      if (populate) {
+        query = query.populate('categoryId').populate('subCategoryId');
+      }
+      const item = await query.lean();
+      if (item) {
+        return { product: item, conn, Model };
+      }
+    } catch (err) {}
+  }
+  return null;
+}
+
 // Helper: Load all commissions from DB (tenant-aware)
 async function loadCommissions(req) {
   try {
@@ -806,15 +882,29 @@ router.get('/:id/pricing', async (req, res) => {
 // @route   GET /api/products/:id
 router.get('/:id', async (req, res) => {
   try {
+    const { id } = req.params;
+    if (!id || id === 'undefined' || id === 'null' || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid product ID' });
+    }
+
     const { Product } = getModels(req);
-    const product = await Product.findById(req.params.id)
+    let product = await Product.findById(id)
       .populate('categoryId')
       .populate('subCategoryId')
       .lean();
 
+    // Cross-tenant fallback lookup if not found in current scoped tenant DB
+    if (!product) {
+      const crossTenant = await findProductAcrossTenants(id, req, true);
+      if (crossTenant) {
+        product = crossTenant.product;
+      }
+    }
+
     if (!product) return res.status(404).json({ message: 'Product not found' });
 
     let isAdmin = false;
+    let isSellerOwner = false;
     if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
       try {
         const jwt = require('jsonwebtoken');
@@ -824,11 +914,16 @@ router.get('/:id', async (req, res) => {
           const Admin = require('../models/Admin');
           const adminAcc = await Admin.findById(decoded.id);
           if (adminAcc) isAdmin = true;
+
+          // Check if the requester is the seller who owns this product
+          if (product.sellerId && String(product.sellerId) === String(decoded.id)) {
+            isSellerOwner = true;
+          }
         }
       } catch (e) {}
     }
 
-    if (!isAdmin && product.isProductVisible === false) {
+    if (!isAdmin && !isSellerOwner && product.isProductVisible === false) {
       return res.status(404).json({ message: 'Product not found' });
     }
 
@@ -873,12 +968,27 @@ router.get('/:id', async (req, res) => {
 // @route   PUT /api/products/:id
 router.put('/:id', protect, async (req, res) => {
   try {
-    const { Product } = getModels(req);
+    const { id } = req.params;
+    if (!id || id === 'undefined' || id === 'null' || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid product ID' });
+    }
+
+    let { Product } = getModels(req);
+    let targetProductModel = Product;
+
+    let existingProd = await Product.findById(id).select('sellerId');
+    if (!existingProd) {
+      const crossTenant = await findProductAcrossTenants(id, req, false);
+      if (crossTenant) {
+        existingProd = crossTenant.product;
+        targetProductModel = crossTenant.Model;
+      }
+    }
+
+    if (!existingProd) return res.status(404).json({ message: 'Product not found' });
 
     // If seller is updating, ensure they own the product
     if (req.user && req.user.role === 'seller') {
-      const existingProd = await Product.findById(req.params.id).select('sellerId');
-      if (!existingProd) return res.status(404).json({ message: 'Product not found' });
       if (existingProd.sellerId && existingProd.sellerId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: 'Not authorized to update products of another seller' });
       }
@@ -900,7 +1010,7 @@ router.put('/:id', protect, async (req, res) => {
     if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
       updatedPayload.subCategoryId = null;
     }
-    const product = await Product.findByIdAndUpdate(req.params.id, updatedPayload, { returnDocument: 'after' });
+    const product = await targetProductModel.findByIdAndUpdate(id, updatedPayload, { returnDocument: 'after' });
     if (!product) return res.status(404).json({ message: 'Product not found' });
     res.json(product);
   } catch (error) {
@@ -911,8 +1021,32 @@ router.put('/:id', protect, async (req, res) => {
 // @route   DELETE /api/products/:id
 router.delete('/:id', protect, async (req, res) => {
   try {
-    const { Product } = getModels(req);
-    const product = await Product.findByIdAndDelete(req.params.id);
+    const { id } = req.params;
+    if (!id || id === 'undefined' || id === 'null' || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid product ID' });
+    }
+
+    let { Product } = getModels(req);
+    let targetProductModel = Product;
+
+    let existing = await Product.findById(id).select('sellerId');
+    if (!existing) {
+      const crossTenant = await findProductAcrossTenants(id, req, false);
+      if (crossTenant) {
+        existing = crossTenant.product;
+        targetProductModel = crossTenant.Model;
+      }
+    }
+
+    if (!existing) return res.status(404).json({ message: 'Product not found' });
+
+    if (req.user && req.user.role === 'seller') {
+      if (existing.sellerId && existing.sellerId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: 'Not authorized to delete products of another seller' });
+      }
+    }
+
+    const product = await targetProductModel.findByIdAndDelete(id);
     if (!product) return res.status(404).json({ message: 'Product not found' });
     res.json({ message: 'Product deleted successfully' });
   } catch (error) {
