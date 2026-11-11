@@ -391,6 +391,157 @@ router.get('/', async (req, res) => {
   }
 });
 
+// @route   GET /api/products/custom-units
+// @desc    Get all custom units (main and variant) for the authenticated seller
+router.get('/custom-units', protect, async (req, res) => {
+  try {
+    const { Product, Seller } = getModels(req);
+    const sellerId = req.user ? req.user._id : null;
+
+    let sellerMainCustom = [];
+    let sellerVariantCustom = [];
+
+    // 1. Fetch from Seller profile if available
+    if (sellerId) {
+      const sellerDoc = await Seller.findById(sellerId).select('customUnits customVariantUnits').lean();
+      if (sellerDoc) {
+        if (Array.isArray(sellerDoc.customUnits)) {
+          sellerMainCustom.push(...sellerDoc.customUnits);
+        }
+        if (Array.isArray(sellerDoc.customVariantUnits)) {
+          sellerVariantCustom.push(...sellerDoc.customVariantUnits);
+        }
+      }
+    }
+
+    // 2. Fetch distinct custom units from products belonging to this seller
+    const productFilter = sellerId ? { sellerId } : {};
+    const prods = await Product.find(productFilter).select('unit customUnits b2b').lean();
+
+    for (const p of prods) {
+      if (p.unit && p.unit !== 'BOX' && p.unit !== 'BAG') {
+        sellerMainCustom.push(String(p.unit).trim().toUpperCase());
+      }
+      if (Array.isArray(p.customUnits)) {
+        sellerMainCustom.push(...p.customUnits.map(u => String(u || '').trim().toUpperCase()));
+      }
+      if (Array.isArray(p.b2b)) {
+        const DEFAULT_VARIANTS = ['pcs', 'g', 'kg', 'ltr', 'ml', 'bag'];
+        for (const v of p.b2b) {
+          if (v && v.packetSize) {
+            const valMatch = String(v.packetSize).match(/^[\d\.]+/);
+            const val = valMatch ? valMatch[0] : '';
+            const unit = String(v.packetSize).slice(val.length).trim();
+            if (unit && !DEFAULT_VARIANTS.includes(unit.toLowerCase())) {
+              sellerVariantCustom.push(unit.toUpperCase());
+            }
+          }
+        }
+      }
+    }
+
+    const cleanMain = Array.from(new Set(sellerMainCustom))
+      .filter(u => u && u !== 'BOX' && u !== 'BAG');
+    const DEFAULT_VARIANTS_SET = new Set(['PCS', 'G', 'KG', 'LTR', 'ML', 'BAG', 'pcs', 'g', 'kg', 'ltr', 'ml', 'bag']);
+    const cleanVariant = Array.from(new Set(sellerVariantCustom))
+      .filter(u => u && !DEFAULT_VARIANTS_SET.has(u) && !DEFAULT_VARIANTS_SET.has(u.toLowerCase()));
+
+    res.json({
+      mainUnits: cleanMain,
+      variantUnits: cleanVariant
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   DELETE /api/products/custom-units
+// @desc    Delete a custom unit (main or variant) after verifying it is not in use
+router.delete('/custom-units', protect, async (req, res) => {
+  try {
+    const { unit, type } = req.body;
+    if (!unit || typeof unit !== 'string' || !unit.trim()) {
+      return res.status(400).json({ message: 'Unit name is required' });
+    }
+    const cleanUnit = unit.trim().toUpperCase();
+
+    // Guard against deleting permanent defaults
+    if (cleanUnit === 'BOX' || cleanUnit === 'BAG') {
+      return res.status(400).json({ message: `Cannot delete permanent default unit "${cleanUnit}"` });
+    }
+    const DEFAULT_VARIANTS = ['PCS', 'G', 'KG', 'LTR', 'ML', 'BAG'];
+    if (DEFAULT_VARIANTS.includes(cleanUnit) || ['pcs', 'g', 'kg', 'ltr', 'ml', 'bag'].includes(cleanUnit.toLowerCase())) {
+      return res.status(400).json({ message: `Cannot delete standard default variant unit "${unit}"` });
+    }
+
+    const { Product, Seller } = getModels(req);
+    const sellerId = req.user ? req.user._id : null;
+    const sellerQuery = sellerId ? { sellerId } : {};
+
+    // 1. Check if unit is in use by any product's main unit
+    if (type === 'main' || !type) {
+      const mainInUse = await Product.findOne({
+        ...sellerQuery,
+        unit: { $regex: new RegExp(`^${cleanUnit}$`, 'i') }
+      }).select('name').lean();
+
+      if (mainInUse) {
+        return res.status(400).json({
+          message: `Cannot delete unit "${cleanUnit}". It is currently used by product: "${mainInUse.name}". Please reassign or update the product first.`,
+          inUse: true,
+          productName: mainInUse.name
+        });
+      }
+    }
+
+    // 2. Check if unit is in use by any product's size variants
+    if (type === 'variant' || !type) {
+      // Regex matches packetSize ending with the unit name (e.g. "500CARTON", "10PACKET")
+      const variantRegex = new RegExp(`[\\d\\.]*\\s*${cleanUnit}$`, 'i');
+      const variantInUse = await Product.findOne({
+        ...sellerQuery,
+        'b2b.packetSize': { $regex: variantRegex }
+      }).select('name b2b').lean();
+
+      if (variantInUse) {
+        return res.status(400).json({
+          message: `Cannot delete variant unit "${cleanUnit}". It is currently used in size variants of product: "${variantInUse.name}". Please update the variant first.`,
+          inUse: true,
+          productName: variantInUse.name
+        });
+      }
+    }
+
+    // 3. Remove from customUnits array in Product documents of this seller
+    await Product.updateMany(
+      sellerQuery,
+      { $pull: { customUnits: cleanUnit } }
+    );
+
+    // 4. Remove from Seller document if stored there
+    if (sellerId) {
+      const pullUpdate = {};
+      if (type === 'main') {
+        pullUpdate.customUnits = cleanUnit;
+      } else if (type === 'variant') {
+        pullUpdate.customVariantUnits = cleanUnit;
+      } else {
+        pullUpdate.customUnits = cleanUnit;
+        pullUpdate.customVariantUnits = cleanUnit;
+      }
+      await Seller.findByIdAndUpdate(sellerId, { $pull: pullUpdate });
+    }
+
+    res.json({
+      success: true,
+      message: `Custom unit "${cleanUnit}" deleted successfully`,
+      deletedUnit: cleanUnit
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // @route   POST /api/products
 // @desc    Create a single product with image and/or pdf upload
 router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name: 'pdf', maxCount: 1 }]), async (req, res) => {
@@ -436,10 +587,30 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       if (seller) finalSellerName = seller.businessName || seller.storeName || seller.name;
     }
 
+    // Sanitize unit and customUnits
+    const cleanUnit = (unit ? String(unit).trim().toUpperCase() : 'BOX') || 'BOX';
+    let cleanCustomUnits = [];
+    if (req.body.customUnits) {
+      try {
+        const rawCustom = typeof req.body.customUnits === 'string' ? JSON.parse(req.body.customUnits) : req.body.customUnits;
+        if (Array.isArray(rawCustom)) {
+          cleanCustomUnits = rawCustom
+            .map(u => String(u || '').trim().toUpperCase())
+            .filter(u => u.length > 0 && u !== 'BOX' && u !== 'BAG');
+        }
+      } catch (e) {
+        console.error('Failed to parse customUnits:', e);
+      }
+    }
+    if (cleanUnit !== 'BOX' && cleanUnit !== 'BAG' && !cleanCustomUnits.includes(cleanUnit)) {
+      cleanCustomUnits.push(cleanUnit);
+    }
+    cleanCustomUnits = Array.from(new Set(cleanCustomUnits));
+
     const comms = await loadCommissions(req);
     const pricingPayload = processProductPricing({
       categoryId,
-      unit,
+      unit: cleanUnit,
       sellerPrice: req.body.sellerPrice || req.body.sellerB2bPrice || price,
       sellerB2bPrice: req.body.sellerB2bPrice || req.body.sellerPrice || b2bPrice || price,
       price,
@@ -493,7 +664,8 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       gstPercent: gstPercent || 0,
       moq: parsedMoq,
       maxOrderQuantity: parsedMoq,
-      unit,
+      unit: cleanUnit,
+      customUnits: cleanCustomUnits,
       sellerId,
       sellerName: finalSellerName,
       stock: stock || 0,
@@ -509,6 +681,17 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       b2b: pricingPayload.b2b,
       b2c: pricingPayload.b2c
     });
+
+    // Also persist customUnits to Seller profile if available
+    if (sellerId && cleanCustomUnits.length > 0) {
+      try {
+        await Seller.findByIdAndUpdate(sellerId, {
+          $addToSet: { customUnits: { $each: cleanCustomUnits } }
+        });
+      } catch (e) {
+        console.error('Failed to update seller customUnits:', e.message);
+      }
+    }
 
     res.status(201).json(product);
   } catch (error) {
@@ -976,7 +1159,7 @@ router.put('/:id', protect, async (req, res) => {
     let { Product } = getModels(req);
     let targetProductModel = Product;
 
-    let existingProd = await Product.findById(id).select('sellerId');
+    let existingProd = await Product.findById(id).select('sellerId customUnits unit');
     if (!existingProd) {
       const crossTenant = await findProductAcrossTenants(id, req, false);
       if (crossTenant) {
@@ -992,6 +1175,31 @@ router.put('/:id', protect, async (req, res) => {
       if (existingProd.sellerId && existingProd.sellerId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: 'Not authorized to update products of another seller' });
       }
+    }
+
+    // Merge and sanitize customUnits and unit if provided
+    if (req.body.unit) {
+      req.body.unit = String(req.body.unit).trim().toUpperCase();
+    }
+    if (req.body.customUnits !== undefined || req.body.unit) {
+      let existingCustom = Array.isArray(existingProd.customUnits) ? existingProd.customUnits : [];
+      let incomingCustom = [];
+      if (req.body.customUnits) {
+        try {
+          const raw = typeof req.body.customUnits === 'string' ? JSON.parse(req.body.customUnits) : req.body.customUnits;
+          if (Array.isArray(raw)) {
+            incomingCustom = raw.map(u => String(u || '').trim().toUpperCase()).filter(Boolean);
+          }
+        } catch (e) {
+          console.error('Failed to parse customUnits in PUT:', e);
+        }
+      }
+      const combined = [...existingCustom, ...incomingCustom]
+        .filter(u => u !== 'BOX' && u !== 'BAG' && u.length > 0);
+      if (req.body.unit && req.body.unit !== 'BOX' && req.body.unit !== 'BAG') {
+        combined.push(req.body.unit);
+      }
+      req.body.customUnits = Array.from(new Set(combined));
     }
 
     // Validate moq / maxOrderQuantity if provided
@@ -1010,8 +1218,28 @@ router.put('/:id', protect, async (req, res) => {
     if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
       updatedPayload.subCategoryId = null;
     }
+    if (req.body.customUnits) {
+      updatedPayload.customUnits = req.body.customUnits;
+    }
+    if (req.body.unit) {
+      updatedPayload.unit = req.body.unit;
+    }
     const product = await targetProductModel.findByIdAndUpdate(id, updatedPayload, { returnDocument: 'after' });
     if (!product) return res.status(404).json({ message: 'Product not found' });
+
+    // Also persist customUnits to Seller profile if available
+    const sellerIdToUpdate = existingProd.sellerId || (req.user ? req.user._id : null);
+    if (sellerIdToUpdate && Array.isArray(req.body.customUnits) && req.body.customUnits.length > 0) {
+      try {
+        const { Seller } = getModels(req);
+        await Seller.findByIdAndUpdate(sellerIdToUpdate, {
+          $addToSet: { customUnits: { $each: req.body.customUnits } }
+        });
+      } catch (e) {
+        console.error('Failed to update seller customUnits in PUT:', e.message);
+      }
+    }
+
     res.json(product);
   } catch (error) {
     res.status(500).json({ message: error.message });

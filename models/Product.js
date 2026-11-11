@@ -28,6 +28,7 @@ const productSchema = new mongoose.Schema({
   moq: { type: Number, default: 1 },
   maxOrderQuantity: { type: Number, default: null },
   unit: { type: String, required: true },
+  customUnits: [{ type: String }],
   imageUrl: { type: String },
   sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
   sellerName: { type: String, default: 'Zudo Official' },

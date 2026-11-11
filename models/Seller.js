@@ -37,6 +37,8 @@ const sellerSchema = new mongoose.Schema({
   currentSessionToken: { type: String, default: null },
   b2b: { type: Boolean, default: false },
   b2c: { type: Boolean, default: false },
+  customUnits: [{ type: String }],
+  customVariantUnits: [{ type: String }],
   isProductVisible: { type: Boolean, default: true }
 }, { timestamps: true });
 
