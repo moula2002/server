@@ -2351,12 +2351,15 @@ router.put('/:id/return-approve', protect, async (req, res) => {
     }
 
     // Update return status & metadata
+    const adminUser = req.admin || req.user || {};
+    const adminId = (adminUser._id && mongoose.Types.ObjectId.isValid(adminUser._id)) ? adminUser._id : undefined;
+
     order.returnStatus = 'Approved';
     order.returnApprovedAt = new Date();
     order.returnApprovedBy = {
-      id: req.user._id,
-      name: req.user.name || 'Admin',
-      email: req.user.email || ''
+      ...(adminId ? { id: adminId } : {}),
+      name: adminUser.name || 'Admin',
+      email: adminUser.email || ''
     };
     order.orderStatus = 'Return Approved';
 
@@ -2443,12 +2446,15 @@ router.put('/:id/return-reject', protect, async (req, res) => {
     }
 
     // Update return status & metadata
+    const adminUser = req.admin || req.user || {};
+    const adminId = (adminUser._id && mongoose.Types.ObjectId.isValid(adminUser._id)) ? adminUser._id : undefined;
+
     order.returnStatus = 'Rejected';
     order.returnRejectedAt = new Date();
     order.returnRejectedBy = {
-      id: req.user._id,
-      name: req.user.name || 'Admin',
-      email: req.user.email || ''
+      ...(adminId ? { id: adminId } : {}),
+      name: adminUser.name || 'Admin',
+      email: adminUser.email || ''
     };
     order.returnRejectionReason = finalReason.trim();
 
