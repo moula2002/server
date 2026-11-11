@@ -11,6 +11,13 @@ const Driver = require('../models/Driver');
 const CashCollector = require('../models/CashCollector');
 const { loadCommissions } = require('./products');
 const { applyCommission, calculatePricingBreakdown, findCategoryCommission, round2 } = require('../utils/pricing');
+const {
+  generate6DigitOTP,
+  prepareOrderDeliveryOtp,
+  canResendDeliveryOtp,
+  verifyOrderDeliveryOtp,
+  dispatchDeliveryOtpNotification
+} = require('../utils/otpService');
 
 // Helper to get models from req with fallback to global imports
 
@@ -230,8 +237,11 @@ const checkAndNotifyLowStock = async (result, item, req) => {
   }
 };
 
-// Helper function to generate OTP
-const generateOTP = (length = 4) => {
+// Helper function to generate OTP (defaults to 6-digit cryptographic OTP)
+const generateOTP = (length = 6) => {
+  if (length === 6) {
+    return generate6DigitOTP();
+  }
   return Math.floor(Math.pow(10, length - 1) + Math.random() * (Math.pow(10, length) - Math.pow(10, length - 1) - 1)).toString();
 };
 
@@ -321,6 +331,110 @@ router.get('/:id/driver-location', protect, async (req, res) => {
   }
 });
 
+// @route   POST /api/orders/validate-cart
+// @desc    Validate cart quantities against MongoDB stock and seller Maximum Order Quantity (MOQ)
+// @access  Public or Private (Customer & Admin)
+router.post('/validate-cart', async (req, res) => {
+  try {
+    const { items, role = 'b2c' } = req.body;
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: 'Cart items are required for validation', valid: false });
+    }
+
+    const { Product: ProductModel } = getModels(req);
+
+    // Calculate combined quantity per product across variants or separate lines
+    const combinedProductQuantities = {};
+    for (const item of items) {
+      const pId = (item.productId || item.product || item.id || item._id)?.toString();
+      const qty = parseInt(item.quantity, 10);
+      if (pId) {
+        combinedProductQuantities[pId] = (combinedProductQuantities[pId] || 0) + (isNaN(qty) ? 0 : qty);
+      }
+    }
+
+    const errors = [];
+    const validatedItems = [];
+
+    for (const item of items) {
+      const pId = item.productId || item.product || item.id || item._id;
+      if (!pId) {
+        errors.push({ message: 'Missing product ID in item', item });
+        continue;
+      }
+
+      const productData = await ProductModel.findById(pId);
+      if (!productData) {
+        errors.push({ productId: pId, message: `Product not found: ${item.name || pId}` });
+        continue;
+      }
+
+      const qty = parseInt(item.quantity, 10);
+      if (!qty || isNaN(qty) || qty <= 0 || Number(item.quantity) !== qty) {
+        errors.push({
+          productId: pId,
+          message: `Invalid quantity for product "${productData.name}". Quantity must be a positive integer.`
+        });
+        continue;
+      }
+
+      const maxOrderLimit = productData.maxOrderQuantity !== undefined && productData.maxOrderQuantity !== null
+        ? Number(productData.maxOrderQuantity)
+        : (productData.moq !== undefined && productData.moq !== null ? Number(productData.moq) : null);
+
+      const totalQtyForProduct = combinedProductQuantities[pId.toString()] || qty;
+
+      if (maxOrderLimit && maxOrderLimit > 0 && totalQtyForProduct > maxOrderLimit) {
+        errors.push({
+          productId: pId,
+          productName: productData.name,
+          maxOrderQuantity: maxOrderLimit,
+          requestedQuantity: totalQtyForProduct,
+          message: `Maximum ${maxOrderLimit} units allowed per order for "${productData.name}". You requested ${totalQtyForProduct} units.`
+        });
+      }
+
+      const targetSize = item.variantSize || item.selectedPacketSize;
+      const stockInfo = getProductStock(productData, targetSize, role);
+      if (stockInfo.stock < qty) {
+        errors.push({
+          productId: pId,
+          productName: productData.name,
+          availableStock: stockInfo.stock,
+          requestedQuantity: qty,
+          message: `Insufficient stock for product "${productData.name}"${targetSize ? ` (${targetSize})` : ''}. Available: ${stockInfo.stock}, Requested: ${qty}`
+        });
+      }
+
+      validatedItems.push({
+        productId: pId,
+        productName: productData.name,
+        quantity: qty,
+        maxOrderQuantity: maxOrderLimit || null,
+        availableStock: stockInfo.stock,
+        allowedQuantity: maxOrderLimit ? Math.min(maxOrderLimit, stockInfo.stock) : stockInfo.stock
+      });
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        valid: false,
+        message: errors[0].message,
+        errors,
+        validatedItems
+      });
+    }
+
+    return res.status(200).json({
+      valid: true,
+      message: 'All cart items are within allowed limits and stock',
+      validatedItems
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message, valid: false });
+  }
+});
+
 // @route   POST /api/orders
 // @desc    Create new order
 // @access  Private
@@ -379,7 +493,17 @@ router.post('/', protect, async (req, res) => {
       }
     }
 
-    // Validate stock and quantity for all items first
+    // Validate product existence, quantity, stock, and seller maximum order quantity (MOQ)
+    // Also track combined quantity per product across variants or duplicate entries
+    const combinedProductQuantities = {};
+    for (const item of items) {
+      const pId = (item.product || item.id || item._id)?.toString();
+      const qty = parseInt(item.quantity, 10);
+      if (pId) {
+        combinedProductQuantities[pId] = (combinedProductQuantities[pId] || 0) + (isNaN(qty) ? 0 : qty);
+      }
+    }
+
     for (const item of items) {
       const pId = item.product || item.id || item._id;
       const productData = await ProductModel.findById(pId);
@@ -395,6 +519,22 @@ router.post('/', protect, async (req, res) => {
         });
       }
       item.quantity = qty;
+
+      // Validate Seller Maximum Order Quantity (MOQ) restriction directly from database
+      const maxOrderLimit = productData.maxOrderQuantity !== undefined && productData.maxOrderQuantity !== null
+        ? Number(productData.maxOrderQuantity)
+        : (productData.moq !== undefined && productData.moq !== null ? Number(productData.moq) : null);
+
+      if (maxOrderLimit && maxOrderLimit > 0) {
+        const totalQtyForProduct = combinedProductQuantities[pId.toString()] || qty;
+        if (totalQtyForProduct > maxOrderLimit) {
+          return res.status(400).json({
+            message: `Maximum ${maxOrderLimit} units allowed per order for "${productData.name}". You requested ${totalQtyForProduct} units.`,
+            maxOrderQuantity: maxOrderLimit,
+            productId: pId
+          });
+        }
+      }
 
       const targetSize = item.variantSize || item.selectedPacketSize;
       const stockInfo = getProductStock(productData, targetSize, targetUserRole);
@@ -652,7 +792,7 @@ router.post('/', protect, async (req, res) => {
       orderStatus: 'Pending',
       pickupCode: globalPickupOtp,
       sellerPickups: sellerPickups,
-      deliveryOtp: generateOTP(4),
+      deliveryOtp: null,
       deliverySlot: finalDeliverySlot,
       placedBySalesAssociate: isSalesOrder,
       salesAssociateId: salesAssociateId,
@@ -849,6 +989,11 @@ router.get('/driver/assigned', protect, async (req, res) => {
           }
         }
       }
+      if (req.user.role === 'driver') {
+        // Driver must collect the 6-digit OTP from the customer directly; do not expose it in driver's query response!
+        orderObj.deliveryOtp = undefined;
+        orderObj.otpVerificationRequired = true;
+      }
       return orderObj;
     });
 
@@ -890,9 +1035,12 @@ router.put('/:id/ship', protect, async (req, res) => {
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
     // Status stays as is (Packed) when admin assigns driver
-
     order.driverId = req.body.driverId;
-    order.deliveryOtp = generateOTP(4);
+    if (order.orderStatus === 'Out for Delivery' || req.body.outForDelivery) {
+      if (req.body.outForDelivery) order.orderStatus = 'Out for Delivery';
+      const otp = prepareOrderDeliveryOtp(order);
+      await dispatchDeliveryOtpNotification({ order, otp, user: order.userId });
+    }
     await order.save();
 
     // Populate user to check role
@@ -995,6 +1143,34 @@ router.all('/:id/status', protect, async (req, res) => {
     // Update returnStatus to Completed when return driver marks as Returned
     if (status === 'Returned' && order.returnDriverId?.toString() === req.user._id.toString()) {
       order.returnStatus = 'Completed';
+    }
+
+    // Strict Delivery OTP Verification: Require valid 6-digit OTP to transition to Delivered
+    if (status === 'Delivered') {
+      const enteredOtp = req.body.otp || req.body.deliveryOtp;
+      if (!enteredOtp) {
+        return res.status(400).json({
+          message: 'Customer 6-digit delivery OTP is required to mark order as Delivered. Please collect it from the customer.'
+        });
+      }
+
+      const verifyResult = verifyOrderDeliveryOtp(order, enteredOtp);
+      if (!verifyResult.success) {
+        await order.save(); // Persist attempt counter to prevent brute force
+        return res.status(400).json({
+          message: verifyResult.message,
+          remainingAttempts: verifyResult.remainingAttempts,
+          code: verifyResult.code
+        });
+      }
+    }
+
+    // Generate 6-digit OTP when order transitions to Out for Delivery
+    if (status === 'Out for Delivery') {
+      if (!order.deliveryOtp || (order.deliveryOtpExpiresAt && new Date() > new Date(order.deliveryOtpExpiresAt))) {
+        const otp = prepareOrderDeliveryOtp(order);
+        await dispatchDeliveryOtpNotification({ order, otp, user: order.userId });
+      }
     }
 
     const previousStatus = order.orderStatus;
@@ -1116,8 +1292,19 @@ router.all('/:id/status', protect, async (req, res) => {
       order.paymentStatus = 'Cancelled';
     }
 
-    if (status === 'Picked Up' || status === 'Out for Delivery') {
-      order.deliveryOtp = generateOTP(4);
+    if (status === 'Delivered') {
+      order.deliveredAt = order.deliveredAt || new Date();
+      order.deliveryOtp = null; // Prevent OTP reuse!
+      order.deliveryOtpExpiresAt = null;
+
+      try {
+        const { getIO } = require('../utils/socket');
+        const io = getIO();
+        if (io) {
+          io.emit('order:delivered', { orderId: order._id.toString() });
+          io.emit(`order:${order._id.toString()}`, { type: 'ORDER_DELIVERED', orderId: order._id.toString() });
+        }
+      } catch (e) {}
     }
 
     await order.save();
@@ -1179,26 +1366,188 @@ router.put('/:id/payment', protect, async (req, res) => {
 });
 
 // @route   POST /api/orders/:id/delivery-otp
-// @desc    Generate/Regenerate delivery OTP
+// @desc    Generate/Regenerate 6-digit delivery OTP (Admin/Driver)
 router.post('/:id/delivery-otp', protect, async (req, res) => {
   try {
     const { Order: OrderModel } = getModels(req);
-    const order = await OrderModel.findById(req.params.id);
+    const order = await OrderModel.findById(req.params.id).populate('userId', 'name email phone fcmToken role');
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    // Generate new 4-digit OTP
-    const newOtp = Math.floor(1000 + Math.random() * 9000).toString();
-    order.deliveryOtp = newOtp;
+    if (order.orderStatus === 'Delivered') {
+      return res.status(400).json({ message: 'Order is already delivered' });
+    }
 
+    // Generate 6-digit OTP
+    const newOtp = prepareOrderDeliveryOtp(order);
     await order.save();
+
+    // Dispatch SMS, Push, Email notification to customer
+    await dispatchDeliveryOtpNotification({ order, otp: newOtp, user: order.userId });
+
     res.json({
-      message: 'Delivery OTP updated successfully',
-      deliveryOtp: newOtp
+      success: true,
+      message: '6-digit Delivery OTP generated and sent to customer',
+      deliveryOtp: newOtp,
+      expiresAt: order.deliveryOtpExpiresAt
     });
   } catch (error) {
     console.error('OTP generation error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   POST /api/orders/:id/resend-delivery-otp
+// @desc    Resend 6-digit delivery OTP to customer mobile (Driver/Customer/Admin)
+// @access  Private
+router.post('/:id/resend-delivery-otp', protect, async (req, res) => {
+  try {
+    const { Order: OrderModel } = getModels(req);
+    const order = await OrderModel.findById(req.params.id).populate('userId', 'name email phone fcmToken role');
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    // Authorization check: User, Driver, or Admin
+    const isCustomer = order.userId?._id?.toString() === req.user._id.toString();
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales'].includes(req.user.role);
+    const isDriver = order.driverId?.toString() === req.user._id.toString();
+
+    if (!isCustomer && !isAdmin && !isDriver) {
+      return res.status(403).json({ message: 'Not authorized to resend OTP for this order' });
+    }
+
+    // Check resend limits & cooldown
+    const check = canResendDeliveryOtp(order);
+    if (!check.allowed) {
+      return res.status(429).json({ message: check.message, retryAfterSeconds: check.retryAfterSeconds });
+    }
+
+    // Generate fresh 6-digit OTP
+    const otp = prepareOrderDeliveryOtp(order);
+    order.deliveryOtpResendCount = (order.deliveryOtpResendCount || 0) + 1;
+    order.deliveryOtpLastResentAt = new Date();
+    await order.save();
+
+    // Dispatch SMS, Push, Email
+    await dispatchDeliveryOtpNotification({ order, otp, user: order.userId });
+
+    res.json({
+      success: true,
+      message: '6-digit Delivery OTP has been resent to customer registered mobile number.',
+      resendCount: order.deliveryOtpResendCount,
+      expiresAt: order.deliveryOtpExpiresAt
+    });
+  } catch (error) {
+    console.error('Resend delivery OTP error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   POST /api/orders/:id/verify-delivery-otp
+// @desc    Verify customer 6-digit OTP and complete delivery (Driver/Admin)
+// @access  Private (Driver or Admin)
+router.post('/:id/verify-delivery-otp', protect, async (req, res) => {
+  try {
+    const { otp, paymentStatus, isCash } = req.body;
+    const { Order: OrderModel, Driver: DriverModel, CashCollector: CashCollectorModel } = getModels(req);
+    const order = await OrderModel.findById(req.params.id).populate('userId', 'name email role phone');
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    // Authorization check: Assigned Driver or Admin
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales'].includes(req.user.role);
+    const isDriver = order.driverId?.toString() === req.user._id.toString();
+
+    if (!isAdmin && !isDriver) {
+      return res.status(403).json({ message: 'Not authorized to verify delivery for this order' });
+    }
+
+    if (!otp) {
+      return res.status(400).json({ message: 'Please provide the 6-digit Delivery OTP collected from the customer.' });
+    }
+
+    // Perform secure OTP verification
+    const verifyResult = verifyOrderDeliveryOtp(order, otp);
+    if (!verifyResult.success) {
+      await order.save(); // Persist attempt counter
+      return res.status(400).json({
+        message: verifyResult.message,
+        remainingAttempts: verifyResult.remainingAttempts,
+        code: verifyResult.code
+      });
+    }
+
+    // Handle multi-seller pickups status sync
+    if (order.sellerPickups && order.sellerPickups.length > 0) {
+      order.sellerPickups.forEach(sp => {
+        sp.status = 'Delivered';
+      });
+    }
+
+    // Handle payment update if delivered with Cash
+    if (isCash || req.body.isCash) {
+      if (order.cashPersonId) {
+        const collector = await CashCollectorModel.findById(order.cashPersonId);
+        if (collector) {
+          collector.amount = (collector.amount || 0) + order.totalAmount;
+          await collector.save();
+        }
+      } else if (order.driverId) {
+        const driver = await DriverModel.findById(order.driverId);
+        if (driver) {
+          driver.wallet = (driver.wallet || 0) + order.totalAmount;
+          await driver.save();
+        }
+      }
+      order.paymentMethod = 'Cash';
+      order.paymentStatus = 'Completed';
+      order.paidAt = new Date();
+    } else if (paymentStatus) {
+      order.paymentStatus = paymentStatus;
+    }
+
+    await order.save();
+
+    // Emit Socket.IO delivery event
+    try {
+      const { getIO } = require('../utils/socket');
+      const io = getIO();
+      if (io) {
+        io.emit('order:delivered', { orderId: order._id.toString() });
+        io.emit(`order:${order._id.toString()}`, { type: 'ORDER_DELIVERED', orderId: order._id.toString() });
+      }
+    } catch (e) {}
+
+    // Send confirmation email
+    if (order.userId?.email) {
+      sendEmail({
+        to: order.userId.email,
+        subject: `Package Delivered! Order #${order._id.toString().slice(-6).toUpperCase()}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 12px; overflow: hidden;">
+            <div style="background-color: #059669; color: white; padding: 24px; text-align: center;">
+              <h1 style="margin: 0; font-size: 24px;">Order Delivered Successfully!</h1>
+            </div>
+            <div style="padding: 24px;">
+              <p>Hello <strong>${order.userId?.name || 'Customer'}</strong>,</p>
+              <p>Your order <strong>#${order._id.toString().slice(-6).toUpperCase()}</strong> has been delivered via verified OTP on ${new Date().toLocaleString('en-IN')}.</p>
+              <p>Thank you for shopping with Zudo!</p>
+            </div>
+          </div>
+        `
+      }).catch(err => console.error('Delivery confirmation email failed:', err.message));
+    }
+
+    res.json({
+      success: true,
+      message: 'OTP verified successfully. Order marked as Delivered!',
+      order
+    });
+  } catch (error) {
+    console.error('Verify delivery OTP error:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -1226,6 +1575,8 @@ router.get('/:id/track', protect, async (req, res) => {
       paymentStatus: order.paymentStatus,
       totalAmount: order.totalAmount,
       shippingAddress: order.shippingAddress,
+      deliveryOtp: order.orderStatus === 'Out for Delivery' ? order.deliveryOtp : null,
+      deliveryOtpExpiresAt: order.orderStatus === 'Out for Delivery' ? order.deliveryOtpExpiresAt : null,
       createdAt: order.createdAt,
       updatedAt: order.updatedAt
     };
@@ -1273,7 +1624,16 @@ router.post('/admin/create', protect, async (req, res) => {
       return res.status(404).json({ message: 'Customer not found' });
     }
 
-    // Validate stock and quantity for all items first
+    // Validate stock, quantity, and seller maximum order quantity (MOQ)
+    const adminCombinedQuantities = {};
+    for (const item of items) {
+      const pId = (item.productId || item.product || item.id || item._id)?.toString();
+      const qty = parseInt(item.quantity, 10);
+      if (pId) {
+        adminCombinedQuantities[pId] = (adminCombinedQuantities[pId] || 0) + (isNaN(qty) ? 0 : qty);
+      }
+    }
+
     for (const item of items) {
       const pId = item.productId || item.product || item.id || item._id;
       const productData = await ProductModel.findById(pId);
@@ -1289,6 +1649,22 @@ router.post('/admin/create', protect, async (req, res) => {
         });
       }
       item.quantity = qty;
+
+      // Validate Seller Maximum Order Quantity (MOQ) restriction
+      const maxOrderLimit = productData.maxOrderQuantity !== undefined && productData.maxOrderQuantity !== null
+        ? Number(productData.maxOrderQuantity)
+        : (productData.moq !== undefined && productData.moq !== null ? Number(productData.moq) : null);
+
+      if (maxOrderLimit && maxOrderLimit > 0) {
+        const totalQtyForProduct = adminCombinedQuantities[pId.toString()] || qty;
+        if (totalQtyForProduct > maxOrderLimit) {
+          return res.status(400).json({
+            message: `Maximum ${maxOrderLimit} units allowed per order for "${productData.name}". You requested ${totalQtyForProduct} units.`,
+            maxOrderQuantity: maxOrderLimit,
+            productId: pId
+          });
+        }
+      }
 
       const targetSize = item.variantSize || item.selectedPacketSize;
       const stockInfo = getProductStock(productData, targetSize, targetUser.role);
@@ -1483,7 +1859,7 @@ router.post('/admin/create', protect, async (req, res) => {
       orderStatus: 'Pending',
       pickupCode: globalPickupOtp,
       sellerPickups: sellerPickups,
-      deliveryOtp: generateOTP(4),
+      deliveryOtp: null,
       invoiceSequence: adminInvSeq,
       orderRef: adminOrdRef,
       invoiceNumber: adminInvNum
@@ -1616,6 +1992,15 @@ router.put('/admin/:id/items', protect, async (req, res) => {
             rawPrice = rawApplicableTier.sellerPrice !== undefined ? rawApplicableTier.sellerPrice : rawApplicableTier.price;
           }
         }
+      }
+
+      // Check Maximum Order Quantity (MOQ) limit
+      const maxOrderLimit = productData.maxOrderQuantity !== undefined && productData.maxOrderQuantity !== null
+        ? Number(productData.maxOrderQuantity)
+        : (productData.moq !== undefined && productData.moq !== null ? Number(productData.moq) : null);
+
+      if (maxOrderLimit && maxOrderLimit > 0 && item.quantity > maxOrderLimit) {
+        throw new Error(`Maximum ${maxOrderLimit} units allowed per order for "${productData.name}". Requested: ${item.quantity}`);
       }
 
       // Check stock limit
@@ -1855,14 +2240,14 @@ router.put('/:id/assign-return-driver', protect, async (req, res) => {
     }
 
     order.returnDriverId = driverId;
-    order.returnCustomerOtp = generateOTP(4);
+    order.returnCustomerOtp = generateOTP(6);
     order.orderStatus = 'Return Driver Assigned';
 
     const uniqueSellerIds = [...new Set(approvedItems.map(i => i.seller.sellerId.toString()))];
     order.sellerReturnPickups = uniqueSellerIds.map(sId => ({
       sellerId: sId,
       status: 'Pending',
-      returnOtp: generateOTP(4)
+      returnOtp: generateOTP(6)
     }));
 
     await order.save();

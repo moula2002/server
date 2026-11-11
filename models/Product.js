@@ -26,6 +26,7 @@ const productSchema = new mongoose.Schema({
   unitCustomerPrice: { type: Number },
   gstPercent: { type: Number, default: 0 },
   moq: { type: Number, default: 1 },
+  maxOrderQuantity: { type: Number, default: null },
   unit: { type: String, required: true },
   imageUrl: { type: String },
   sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
@@ -37,6 +38,7 @@ const productSchema = new mongoose.Schema({
   description: { type: String },
   pdfUrl: { type: String },
   rating: { type: Number, default: 0 },
+  numReviews: { type: Number, default: 0 },
   variants: [{
     sizeName: { type: String, required: true }, // e.g. "1kg", "500g"
     price: { type: Number, required: true },
