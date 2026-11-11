@@ -1987,7 +1987,7 @@ router.post('/admin/create', protect, async (req, res) => {
 });
 
 // @route   PUT /api/orders/admin/:id/items
-// @desc    Admin update order items and recalculate total
+// @desc    Admin update order items and/or consignee shipping address and recalculate total
 // @access  Private (Admin only)
 router.put('/admin/:id/items', protect, async (req, res) => {
   try {
@@ -1995,9 +1995,9 @@ router.put('/admin/:id/items', protect, async (req, res) => {
       return res.status(403).json({ message: 'Not authorized, admin only' });
     }
 
-    const { items } = req.body;
-    if (!items || items.length === 0) {
-      return res.status(400).json({ message: 'Items list cannot be empty' });
+    const { items, shippingAddress } = req.body;
+    if ((!items || items.length === 0) && !shippingAddress) {
+      return res.status(400).json({ message: 'Items list or shipping address is required' });
     }
 
     const { Order: OrderModel, User: UserModel, Product: ProductModel, Seller: SellerModel } = getModels(req);
@@ -2006,14 +2006,28 @@ router.put('/admin/:id/items', protect, async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    const targetUser = await UserModel.findById(order.userId);
-    const userRole = targetUser ? targetUser.role : 'b2c';
+    // Update consignee shipping address if provided
+    if (shippingAddress && typeof shippingAddress === 'object') {
+      order.shippingAddress = {
+        name: shippingAddress.name || order.shippingAddress?.name || '',
+        phone: shippingAddress.phone || order.shippingAddress?.phone || '',
+        address: shippingAddress.address || order.shippingAddress?.address || '',
+        city: shippingAddress.city || order.shippingAddress?.city || '',
+        pincode: shippingAddress.pincode || order.shippingAddress?.pincode || '',
+        state: shippingAddress.state || order.shippingAddress?.state || '',
+        landmark: shippingAddress.landmark || order.shippingAddress?.landmark || ''
+      };
+    }
 
-    let calculatedTotal = 0;
-    let calculatedTotalWithoutCommissions = 0;
-    let totalGstCollected = 0;
-    let totalCommissionCollected = 0;
-    const commissions = await loadCommissions(req);
+    if (items && Array.isArray(items) && items.length > 0) {
+      const targetUser = await UserModel.findById(order.userId);
+      const userRole = targetUser ? targetUser.role : 'b2c';
+
+      let calculatedTotal = 0;
+      let calculatedTotalWithoutCommissions = 0;
+      let totalGstCollected = 0;
+      let totalCommissionCollected = 0;
+      const commissions = await loadCommissions(req);
 
     const enrichedItems = await Promise.all(items.map(async (item) => {
       const pId = item.productId || item.product;
@@ -2182,14 +2196,18 @@ router.put('/admin/:id/items', protect, async (req, res) => {
     order.totalAmountWithoutCommissions = round2(calculatedTotalWithoutCommissions);
     order.totalCommissionAmount = round2(totalCommissionCollected);
     order.totalGstAmount = round2(totalGstCollected);
-    await order.save();
+  }
 
-    const populated = await OrderModel.findById(order._id)
-      .populate('userId', 'name email role businessName companyName')
-      .populate('driverId', 'name phone vehicleNo vehicleDetails')
-      .populate('cashPersonId', 'name phone');
+  await order.save();
 
-    res.json(populated);
+  const populated = await OrderModel.findById(order._id)
+    .populate('userId', 'name email role businessName companyName')
+    .populate('driverId', 'name phone vehicleNo vehicleDetails')
+    .populate('cashPersonId', 'name phone');
+
+  emitOrderRealtimeUpdate(populated, 'update');
+
+  res.json(populated);
   } catch (error) {
     console.error('Admin order items update error:', error);
     res.status(500).json({ message: error.message });
