@@ -2490,10 +2490,19 @@ router.put('/:id/return-reject', protect, async (req, res) => {
 });
 
 // @route   PUT /api/orders/:id/items/:itemId/return-status
-// @desc    Admin/Seller approves or rejects a return request
+// @desc    Admin approves or rejects a return request (Admin only)
 router.put('/:id/items/:itemId/return-status', protect, async (req, res) => {
   try {
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    if (!isAdmin) {
+      return res.status(403).json({ message: '403 Forbidden: Only authorized Admin users can approve or reject returns.' });
+    }
+
     const { status } = req.body;
+    if (!['Return Approved', 'Return Rejected'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid return status. Must be Return Approved or Return Rejected.' });
+    }
+
     const { Order: OrderModel } = getModels(req);
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
@@ -2507,15 +2516,20 @@ router.put('/:id/items/:itemId/return-status', protect, async (req, res) => {
 
     item.returnStatus = status;
 
-    if (status === 'Return Rejected') {
+    if (status === 'Return Approved') {
+      order.returnStatus = 'Approved';
+      order.orderStatus = 'Return Approved';
+    } else if (status === 'Return Rejected') {
       const anyStillRequested = order.items.some(i => i.returnStatus === 'Return Requested');
       const anyApproved = order.items.some(i => ['Return Approved', 'Picked Up from Customer', 'Returned to Seller'].includes(i.returnStatus));
       if (!anyStillRequested && !anyApproved) {
         order.orderStatus = 'Delivered';
+        order.returnStatus = 'Rejected';
       }
     }
 
     await order.save();
+    emitOrderRealtimeUpdate(order, 'update');
     res.json(order);
   } catch (error) {
     res.status(500).json({ message: error.message });
