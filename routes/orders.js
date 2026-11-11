@@ -39,6 +39,36 @@ const assignInvoiceDetails = async (OrderModel) => {
   }
 };
 
+const emitOrderRealtimeUpdate = (order, operation = 'update') => {
+  try {
+    const { getIO } = require('../utils/socket');
+    const io = getIO();
+    if (io && order) {
+      const orderId = order._id ? order._id.toString() : String(order);
+      const payload = {
+        model: 'Order',
+        operation,
+        orderId,
+        orderStatus: order.orderStatus,
+        paymentStatus: order.paymentStatus,
+        driverId: order.driverId,
+        cashPersonId: order.cashPersonId,
+        totalAmount: order.totalAmount,
+        timestamp: new Date()
+      };
+      io.emit('data_updated', payload);
+      io.emit('order:updated', payload);
+      io.emit('order:status_changed', payload);
+      if (order.orderStatus === 'Delivered') {
+        io.emit('order:delivered', { orderId });
+      }
+      io.emit(`order:${orderId}`, { type: 'ORDER_STATUS_CHANGED', ...payload });
+    }
+  } catch (e) {
+    // Socket not initialized or offline
+  }
+};
+
 const getModels = (req) => {
   return {
     Order: req.models?.Order || Order,
@@ -1051,6 +1081,7 @@ router.put('/:id/ship', protect, async (req, res) => {
       await dispatchDeliveryOtpNotification({ order, otp, user: order.userId });
     }
     await order.save();
+    emitOrderRealtimeUpdate(order, 'update');
 
     // Populate user to check role
     await order.populate('userId', 'role');
@@ -1078,6 +1109,7 @@ router.put('/:id/assign-cash', protect, async (req, res) => {
 
     order.cashPersonId = req.body.cashPersonId;
     await order.save();
+    emitOrderRealtimeUpdate(order, 'update');
 
     const populatedOrder = await OrderModel.findById(order._id)
       .populate('userId', 'name email role businessName companyName')
@@ -1136,6 +1168,7 @@ router.put('/:id/cancel', protect, async (req, res) => {
     }
 
     await order.save();
+    emitOrderRealtimeUpdate(order, 'cancel');
 
     // Restore stock
     for (const item of order.items) {
@@ -1373,6 +1406,7 @@ router.all('/:id/status', protect, async (req, res) => {
     }
 
     await order.save();
+    emitOrderRealtimeUpdate(order, 'update');
 
     // If status changed to Cancelled, restore stock
     if (status === 'Cancelled' && previousStatus !== 'Cancelled') {
@@ -1575,6 +1609,7 @@ router.post('/:id/verify-delivery-otp', protect, async (req, res) => {
     }
 
     await order.save();
+    emitOrderRealtimeUpdate(order, 'update');
 
     // Emit Socket.IO delivery event
     try {
