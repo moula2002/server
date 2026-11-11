@@ -438,7 +438,10 @@ router.get('/custom-units', async (req, res) => {
 
       for (const p of prods) {
         if (p.unit && p.unit !== 'BOX' && p.unit !== 'BAG') {
-          sellerMainCustom.push(String(p.unit).trim().toUpperCase());
+          const upperU = String(p.unit).trim().toUpperCase();
+          if (upperU !== 'KG' && upperU !== 'PCS') {
+            sellerMainCustom.push(upperU);
+          }
         }
         if (Array.isArray(p.customUnits)) {
           sellerMainCustom.push(...p.customUnits.map(u => String(u || '').trim().toUpperCase()));
@@ -460,7 +463,7 @@ router.get('/custom-units', async (req, res) => {
     } catch (e) {}
 
     const cleanMain = Array.from(new Set(sellerMainCustom))
-      .filter(u => u && u !== 'BOX' && u !== 'BAG');
+      .filter(u => u && u !== 'BOX' && u !== 'BAG' && u !== 'KG' && u !== 'PCS');
     const DEFAULT_VARIANTS_SET = new Set(['PCS', 'G', 'KG', 'LTR', 'ML', 'BAG', 'pcs', 'g', 'kg', 'ltr', 'ml', 'bag']);
     const cleanVariant = Array.from(new Set(sellerVariantCustom))
       .filter(u => u && !DEFAULT_VARIANTS_SET.has(u) && !DEFAULT_VARIANTS_SET.has(u.toLowerCase()));
