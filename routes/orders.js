@@ -717,12 +717,21 @@ router.post('/', protect, async (req, res) => {
         unitCustomerPrice: breakdown.unitCustomerPrice,
         normalPrice: breakdown.sellerUnitPrice,
         sellerUnitPrice: breakdown.sellerUnitPrice,
+        unitSize: breakdown.unitSize,
+        unit: productData?.unit || 'pcs',
+        totalProductWeight: breakdown.totalProductWeight,
         commissionType: breakdown.commissionType,
-        commissionValue: breakdown.commissionRate,
-        commissionRate: breakdown.commissionRate,
+        commissionValue: usedCommissionRate !== null ? usedCommissionRate : breakdown.commissionRate,
+        commissionRate: usedCommissionRate !== null ? usedCommissionRate : breakdown.commissionRate,
         commissionAmount: breakdown.unitCommission,
         unitCommission: breakdown.unitCommission,
         totalCommission: breakdown.totalCommission,
+        // Order-time size-based snapshot
+        sellingUnit: prodSellingUnit,
+        unitSize: prodUnitSize,
+        measurementUnit: prodMeasUnit,
+        totalMeasurement: calculatedTotalMeasurement,
+        commissionBasis: usedCommissionBasis,
         totalSellerPrice: breakdown.totalSellerPrice,
         finalCustomerPrice: breakdown.finalCustomerPrice,
         availableStock: breakdown.availableStock,
@@ -1863,10 +1872,19 @@ router.post('/admin/create', protect, async (req, res) => {
       const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
       const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
+      const targetUnitSize = extractUnitSize(
+        item.unitSize ||
+        (basePriceObj && basePriceObj.unitSize) ||
+        targetSize ||
+        (productData && productData.unitSize),
+        1
+      );
+
       const breakdown = calculatePricingBreakdown({
         sellerUnitPrice: Number(rawPrice) || 0,
         commissionType: commType,
         commissionValue: Number(commVal) || 0,
+        unitSize: targetUnitSize,
         gstPercent: gstPercent,
         quantity: item.quantity,
         availableStock: productData ? (productData.stock || 0) : 0,
@@ -1904,6 +1922,9 @@ router.post('/admin/create', protect, async (req, res) => {
         unitCustomerPrice: breakdown.unitCustomerPrice,
         normalPrice: breakdown.sellerUnitPrice,
         sellerUnitPrice: breakdown.sellerUnitPrice,
+        unitSize: breakdown.unitSize,
+        unit: productData?.unit || 'pcs',
+        totalProductWeight: breakdown.totalProductWeight,
         commissionType: breakdown.commissionType,
         commissionValue: breakdown.commissionRate,
         commissionRate: breakdown.commissionRate,
@@ -2128,10 +2149,19 @@ router.put('/admin/:id/items', protect, async (req, res) => {
         const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
         const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
+        const targetUnitSize = extractUnitSize(
+          item.unitSize ||
+          (basePriceObj && basePriceObj.unitSize) ||
+          targetSizeCheck ||
+          (productData && productData.unitSize),
+          1
+        );
+
         const breakdown = calculatePricingBreakdown({
           sellerUnitPrice: Number(rawPrice) || 0,
           commissionType: commType,
           commissionValue: Number(commVal) || 0,
+          unitSize: targetUnitSize,
           gstPercent: gstPercent,
           quantity: item.quantity,
           availableStock: productData ? (productData.stock || 0) : 0,
@@ -2168,6 +2198,9 @@ router.put('/admin/:id/items', protect, async (req, res) => {
           unitCustomerPrice: breakdown.unitCustomerPrice,
           normalPrice: breakdown.sellerUnitPrice,
           sellerUnitPrice: breakdown.sellerUnitPrice,
+          unitSize: breakdown.unitSize,
+          unit: productData?.unit || 'pcs',
+          totalProductWeight: breakdown.totalProductWeight,
           commissionType: breakdown.commissionType,
           commissionValue: breakdown.commissionRate,
           commissionRate: breakdown.commissionRate,
@@ -2684,6 +2717,18 @@ router.put('/:id/return-delivery', protect, async (req, res) => {
         item.returnStatus = 'Returned to Seller';
       }
     });
+
+    // Restore variant stock when returned to seller
+    try {
+      const { Product: ProductModel } = getModels(req);
+      for (const item of order.items) {
+        if (item.returnStatus === 'Returned to Seller' && item.seller.sellerId.toString() === sellerId) {
+          await adjustProductStock(ProductModel, item.productId, item.variantSize, item.quantity, order.userId?.role);
+        }
+      }
+    } catch (stockErr) {
+      console.error('Failed to restore variant stock on return-delivery:', stockErr.message);
+    }
 
     const allReturnsComplete = order.sellerReturnPickups.every(sp => sp.status === 'Returned to Seller');
     if (allReturnsComplete) {

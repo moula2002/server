@@ -28,6 +28,9 @@ const productSchema = new mongoose.Schema({
   moq: { type: Number, default: 1 },
   maxOrderQuantity: { type: Number, default: null },
   unit: { type: String, required: true },
+  sellingUnit: { type: String, default: 'BOX' },
+  unitSize: { type: Number, default: 1 },
+  measurementUnit: { type: String, default: null },
   customUnits: [{ type: String }],
   imageUrl: { type: String },
   sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
@@ -42,6 +45,7 @@ const productSchema = new mongoose.Schema({
   numReviews: { type: Number, default: 0 },
   variants: [{
     sizeName: { type: String, required: true }, // e.g. "1kg", "500g"
+    unitSize: { type: Number, default: 1 },
     price: { type: Number, required: true },
     sellerPrice: { type: Number },
     b2bPrice: { type: Number, required: true },
@@ -55,6 +59,7 @@ const productSchema = new mongoose.Schema({
   }],
   b2c: [{
     packetSize: { type: String },
+    unitSize: { type: Number, default: 1 },
     mrp: { type: Number },
     price: { type: Number },
     sellerPrice: { type: Number },
@@ -63,6 +68,7 @@ const productSchema = new mongoose.Schema({
   }],
   b2b: [{
     packetSize: { type: String },
+    unitSize: { type: Number, default: 1 },
     mrp: { type: Number },
     price: { type: Number },
     sellerPrice: { type: Number },

@@ -706,6 +706,7 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
     const pricingPayload = processProductPricing({
       categoryId,
       unit: cleanUnit,
+      unitSize: req.body.unitSize !== undefined ? req.body.unitSize : 1,
       sellerPrice: req.body.sellerPrice || req.body.sellerB2bPrice || price,
       sellerB2bPrice: req.body.sellerB2bPrice || req.body.sellerPrice || b2bPrice || price,
       price,
@@ -760,6 +761,7 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       moq: parsedMoq,
       maxOrderQuantity: parsedMoq,
       unit: cleanUnit,
+      unitSize: pricingPayload.unitSize || req.body.unitSize || 1,
       customUnits: cleanCustomUnits,
       sellerId,
       sellerName: finalSellerName,
@@ -961,7 +963,7 @@ router.post('/bulk-upload', protect, excelUpload.single('file'), async (req, res
   }
 });
 
-// Helper to extract stock for variant
+// Helper to extract stock for variant (B2B Size Variants as single source of truth)
 function getProductAvailableStock(product, variantSize, role = 'b2c') {
   if (variantSize) {
     const variantArray = role === 'b2b' ? (product.b2b || []) : (product.b2c || []);
@@ -970,6 +972,10 @@ function getProductAvailableStock(product, variantSize, role = 'b2c') {
       found = product.variants.find(v => (v.packetSize || v.sizeName) === variantSize);
     }
     if (found) return found.stock !== undefined ? found.stock : 0;
+  }
+  // Single source of truth: If B2B product has variants, use B2B variant stock
+  if (role === 'b2b' && product.b2b && product.b2b.length > 0) {
+    return product.b2b[0].stock !== undefined ? product.b2b[0].stock : 0;
   }
   return product.stock !== undefined ? product.stock : 0;
 }
@@ -1309,6 +1315,9 @@ router.put('/:id', protect, async (req, res) => {
     }
 
     const comms = await loadCommissions(req);
+    if (req.body.unitSize === undefined && existingProd.unitSize) {
+      req.body.unitSize = existingProd.unitSize;
+    }
     const updatedPayload = processProductPricing(req.body, comms);
     if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
       updatedPayload.subCategoryId = null;
@@ -1318,6 +1327,9 @@ router.put('/:id', protect, async (req, res) => {
     }
     if (req.body.unit) {
       updatedPayload.unit = req.body.unit;
+    }
+    if (req.body.unitSize !== undefined) {
+      updatedPayload.unitSize = req.body.unitSize;
     }
     const product = await targetProductModel.findByIdAndUpdate(id, updatedPayload, { returnDocument: 'after' });
     if (!product) return res.status(404).json({ message: 'Product not found' });
