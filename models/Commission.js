@@ -10,6 +10,19 @@ const commissionSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  commissionBasis: {
+    type: String, // e.g. 'KG', 'LTR', 'G', 'ML'
+    default: null
+  },
+  commissionRate: {
+    type: Number,
+    default: null
+  },
+  commissionStatus: {
+    type: String,
+    enum: ['Active', 'Inactive'],
+    default: 'Active'
+  },
   commissionType: {
     type: String,
     enum: ['percentage', 'flat'],

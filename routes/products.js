@@ -963,7 +963,7 @@ router.post('/bulk-upload', protect, excelUpload.single('file'), async (req, res
   }
 });
 
-// Helper to extract stock for variant
+// Helper to extract stock for variant (B2B Size Variants as single source of truth)
 function getProductAvailableStock(product, variantSize, role = 'b2c') {
   if (variantSize) {
     const variantArray = role === 'b2b' ? (product.b2b || []) : (product.b2c || []);
@@ -972,6 +972,10 @@ function getProductAvailableStock(product, variantSize, role = 'b2c') {
       found = product.variants.find(v => (v.packetSize || v.sizeName) === variantSize);
     }
     if (found) return found.stock !== undefined ? found.stock : 0;
+  }
+  // Single source of truth: If B2B product has variants, use B2B variant stock
+  if (role === 'b2b' && product.b2b && product.b2b.length > 0) {
+    return product.b2b[0].stock !== undefined ? product.b2b[0].stock : 0;
   }
   return product.stock !== undefined ? product.stock : 0;
 }

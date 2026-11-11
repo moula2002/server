@@ -58,6 +58,31 @@ function extractUnitSize(val, defaultVal = 1) {
 }
 
 /**
+ * Measurement unit conversions.
+ * Converts amount from fromUnit to toUnit.
+ * Returns null if units are incompatible.
+ */
+function convertMeasurement(amount, fromUnit, toUnit) {
+  const num = Number(amount);
+  if (isNaN(num)) return null;
+  const f = normalizeUnit(fromUnit);
+  const t = normalizeUnit(toUnit);
+  if (!f || !t) return null;
+  if (f === t) return num;
+
+  // Weight conversions: kg <-> g
+  if (f === 'kg' && t === 'g') return num * 1000;
+  if (f === 'g' && t === 'kg') return num / 1000;
+
+  // Volume conversions: ltr <-> ml
+  if (f === 'ltr' && t === 'ml') return num * 1000;
+  if (f === 'ml' && t === 'ltr') return num / 1000;
+
+  // Incompatible (e.g. kg to ltr)
+  return null;
+}
+
+/**
  * Finds the applicable commission rule from category commissions array.
  * Priority:
  * 1. Category ID + Matching Unit + Matching Pincode
@@ -494,6 +519,7 @@ function calculatePricingBreakdown({
   commissionType = 'flat',
   commissionValue = 0,
   commissionRate = undefined,
+  commissionBasisRate = undefined,
   unitSize = 1,
   gstPercent = 0,
   quantity = 1,
@@ -512,7 +538,10 @@ function calculatePricingBreakdown({
   const uSize = extractUnitSize(unitSize, 1);
 
   let unitCommission = 0;
-  if (cType === 'flat') {
+  if (commissionBasisRate !== undefined && commissionBasisRate !== null) {
+    // Dynamic Size-based commission per selling unit
+    unitCommission = round2(Number(commissionBasisRate) || 0);
+  } else if (cType === 'flat') {
     // Admin Commission Per Unit * Product Unit Size (e.g. ₹20 * 30 KG = ₹600 per bag)
     unitCommission = cVal * uSize;
   } else {
@@ -607,6 +636,7 @@ module.exports = {
   round2,
   normalizeUnit,
   extractUnitSize,
+  convertMeasurement,
   calculatePricingBreakdown,
   findCategoryCommission,
   calculateCustomerPrice,

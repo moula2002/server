@@ -434,11 +434,27 @@ router.get('/stats', protect, async (req, res) => {
             { sellerId: sellerId.toString() },
             { seller: sellerId }
         ]
-    }).select('_id name price imageUrl stock');
+    }).select('_id name price imageUrl stock b2b b2c');
     const productIds = sellerProducts.map(p => p._id);
 
+    // Helper to calculate stock using B2B variants as single source of truth
+    const getProductStockSum = (p) => {
+      if (Array.isArray(p.b2b) && p.b2b.length > 0) {
+        return p.b2b.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+      }
+      return Number(p.stock) || 0;
+    };
+
     // Low stock products (stock <= 5)
-    const lowStockProducts = sellerProducts.filter(p => (p.stock || 0) <= 5);
+    const lowStockProducts = sellerProducts
+      .map(p => ({
+        _id: p._id,
+        name: p.name,
+        price: p.price,
+        imageUrl: p.imageUrl,
+        stock: getProductStockSum(p)
+      }))
+      .filter(p => p.stock <= 5);
 
     // Orders stats
     const orders = await OrderModel.find({

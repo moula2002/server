@@ -43,6 +43,12 @@ const orderSchema = new mongoose.Schema({
     commissionAmount: { type: Number, default: 0 },
     unitCommission: { type: Number, default: 0 },
     totalCommission: { type: Number, default: 0 },
+    // Size-based dynamic commission snapshot
+    sellingUnit: { type: String, default: null },
+    unitSize: { type: Number, default: null },
+    measurementUnit: { type: String, default: null },
+    totalMeasurement: { type: Number, default: null },
+    commissionBasis: { type: String, default: null },
     sellerUnitPrice: { type: Number, default: 0 },
     orderedQuantity: { type: Number },
     totalSellerPrice: { type: Number, default: 0 },
