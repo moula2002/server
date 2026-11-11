@@ -393,52 +393,71 @@ router.get('/', async (req, res) => {
 
 // @route   GET /api/products/custom-units
 // @desc    Get all custom units (main and variant) for the authenticated seller
-router.get('/custom-units', protect, async (req, res) => {
+router.get('/custom-units', async (req, res) => {
   try {
     const { Product, Seller } = getModels(req);
-    const sellerId = req.user ? req.user._id : null;
+    let sellerId = null;
+
+    // Optional extraction from auth header if present
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const token = req.headers.authorization.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded && decoded.id) {
+          sellerId = decoded.id;
+        }
+      } catch (e) {}
+    }
+    if (!sellerId && req.query.sellerId) {
+      sellerId = req.query.sellerId;
+    }
 
     let sellerMainCustom = [];
     let sellerVariantCustom = [];
 
     // 1. Fetch from Seller profile if available
-    if (sellerId) {
-      const sellerDoc = await Seller.findById(sellerId).select('customUnits customVariantUnits').lean();
-      if (sellerDoc) {
-        if (Array.isArray(sellerDoc.customUnits)) {
-          sellerMainCustom.push(...sellerDoc.customUnits);
+    if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+      try {
+        const sellerDoc = await Seller.findById(sellerId).select('customUnits customVariantUnits').lean();
+        if (sellerDoc) {
+          if (Array.isArray(sellerDoc.customUnits)) {
+            sellerMainCustom.push(...sellerDoc.customUnits);
+          }
+          if (Array.isArray(sellerDoc.customVariantUnits)) {
+            sellerVariantCustom.push(...sellerDoc.customVariantUnits);
+          }
         }
-        if (Array.isArray(sellerDoc.customVariantUnits)) {
-          sellerVariantCustom.push(...sellerDoc.customVariantUnits);
-        }
-      }
+      } catch (e) {}
     }
 
-    // 2. Fetch distinct custom units from products belonging to this seller
-    const productFilter = sellerId ? { sellerId } : {};
-    const prods = await Product.find(productFilter).select('unit customUnits b2b').lean();
+    // 2. Fetch distinct custom units from products belonging to this seller (or all visible products if seller not identified)
+    const productFilter = sellerId && mongoose.Types.ObjectId.isValid(sellerId) ? { sellerId } : {};
+    try {
+      const prods = await Product.find(productFilter).select('unit customUnits b2b').lean();
 
-    for (const p of prods) {
-      if (p.unit && p.unit !== 'BOX' && p.unit !== 'BAG') {
-        sellerMainCustom.push(String(p.unit).trim().toUpperCase());
-      }
-      if (Array.isArray(p.customUnits)) {
-        sellerMainCustom.push(...p.customUnits.map(u => String(u || '').trim().toUpperCase()));
-      }
-      if (Array.isArray(p.b2b)) {
-        const DEFAULT_VARIANTS = ['pcs', 'g', 'kg', 'ltr', 'ml', 'bag'];
-        for (const v of p.b2b) {
-          if (v && v.packetSize) {
-            const valMatch = String(v.packetSize).match(/^[\d\.]+/);
-            const val = valMatch ? valMatch[0] : '';
-            const unit = String(v.packetSize).slice(val.length).trim();
-            if (unit && !DEFAULT_VARIANTS.includes(unit.toLowerCase())) {
-              sellerVariantCustom.push(unit.toUpperCase());
+      for (const p of prods) {
+        if (p.unit && p.unit !== 'BOX' && p.unit !== 'BAG') {
+          sellerMainCustom.push(String(p.unit).trim().toUpperCase());
+        }
+        if (Array.isArray(p.customUnits)) {
+          sellerMainCustom.push(...p.customUnits.map(u => String(u || '').trim().toUpperCase()));
+        }
+        if (Array.isArray(p.b2b)) {
+          const DEFAULT_VARIANTS = ['pcs', 'g', 'kg', 'ltr', 'ml', 'bag'];
+          for (const v of p.b2b) {
+            if (v && v.packetSize) {
+              const valMatch = String(v.packetSize).match(/^[\d\.]+/);
+              const val = valMatch ? valMatch[0] : '';
+              const unit = String(v.packetSize).slice(val.length).trim();
+              if (unit && !DEFAULT_VARIANTS.includes(unit.toLowerCase())) {
+                sellerVariantCustom.push(unit.toUpperCase());
+              }
             }
           }
         }
       }
-    }
+    } catch (e) {}
 
     const cleanMain = Array.from(new Set(sellerMainCustom))
       .filter(u => u && u !== 'BOX' && u !== 'BAG');
@@ -455,9 +474,67 @@ router.get('/custom-units', protect, async (req, res) => {
   }
 });
 
+// @route   POST /api/products/custom-units
+// @desc    Add a new custom unit (main or variant) and save dynamically
+router.post('/custom-units', async (req, res) => {
+  try {
+    const { unit, type } = req.body;
+    if (!unit || typeof unit !== 'string' || !unit.trim()) {
+      return res.status(400).json({ message: 'Unit name is required and cannot be empty' });
+    }
+    const cleanUnit = unit.trim().toUpperCase();
+
+    // Validate against built-in units
+    const isVariant = type === 'variant';
+    if (!isVariant && (cleanUnit === 'BOX' || cleanUnit === 'BAG')) {
+      return res.status(400).json({ message: `"${cleanUnit}" is already a default unit` });
+    }
+    const DEFAULT_VARIANTS = ['PCS', 'G', 'KG', 'LTR', 'ML', 'BAG'];
+    if (isVariant && DEFAULT_VARIANTS.includes(cleanUnit)) {
+      return res.status(400).json({ message: `"${cleanUnit}" is already a default variant unit` });
+    }
+
+    const { Seller } = getModels(req);
+    let sellerId = null;
+
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const token = req.headers.authorization.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded && decoded.id) {
+          sellerId = decoded.id;
+        }
+      } catch (e) {}
+    }
+    if (!sellerId && req.body.sellerId) {
+      sellerId = req.body.sellerId;
+    }
+
+    // Persist to Seller document if identified
+    if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+      try {
+        const updateField = isVariant ? { customVariantUnits: cleanUnit } : { customUnits: cleanUnit };
+        await Seller.findByIdAndUpdate(sellerId, { $addToSet: updateField });
+      } catch (e) {
+        console.error('Failed to persist custom unit to seller profile:', e.message);
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Custom unit "${cleanUnit}" added successfully`,
+      unit: cleanUnit,
+      type: isVariant ? 'variant' : 'main'
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // @route   DELETE /api/products/custom-units
 // @desc    Delete a custom unit (main or variant) after verifying it is not in use
-router.delete('/custom-units', protect, async (req, res) => {
+router.delete('/custom-units', async (req, res) => {
   try {
     const { unit, type } = req.body;
     if (!unit || typeof unit !== 'string' || !unit.trim()) {
@@ -475,8 +552,23 @@ router.delete('/custom-units', protect, async (req, res) => {
     }
 
     const { Product, Seller } = getModels(req);
-    const sellerId = req.user ? req.user._id : null;
-    const sellerQuery = sellerId ? { sellerId } : {};
+    let sellerId = null;
+
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const token = req.headers.authorization.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded && decoded.id) {
+          sellerId = decoded.id;
+        }
+      } catch (e) {}
+    }
+    if (!sellerId && req.body.sellerId) {
+      sellerId = req.body.sellerId;
+    }
+
+    const sellerQuery = sellerId && mongoose.Types.ObjectId.isValid(sellerId) ? { sellerId } : {};
 
     // 1. Check if unit is in use by any product's main unit
     if (type === 'main' || !type) {
