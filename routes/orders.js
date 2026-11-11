@@ -1039,10 +1039,14 @@ router.put('/:id/ship', protect, async (req, res) => {
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
-    // Status stays as is (Packed) when admin assigns driver
+    if (['Delivered', 'Cancelled'].includes(order.orderStatus)) {
+      return res.status(400).json({ message: `Cannot ship an order that is already ${order.orderStatus}.` });
+    }
+
+    // Status updates to Out for Delivery when admin assigns driver to ship
     order.driverId = req.body.driverId;
-    if (order.orderStatus === 'Out for Delivery' || req.body.outForDelivery) {
-      if (req.body.outForDelivery) order.orderStatus = 'Out for Delivery';
+    if (order.orderStatus === 'Out for Delivery' || req.body.outForDelivery !== false || order.orderStatus === 'Packed') {
+      order.orderStatus = 'Out for Delivery';
       const otp = prepareOrderDeliveryOtp(order);
       await dispatchDeliveryOtpNotification({ order, otp, user: order.userId });
     }
@@ -1115,7 +1119,15 @@ router.put('/:id/cancel', protect, async (req, res) => {
       return res.status(400).json({ message: 'Order is already cancelled' });
     }
 
+    if (order.orderStatus === 'Delivered') {
+      return res.status(400).json({ message: 'Delivered orders cannot be cancelled.' });
+    }
+
     order.orderStatus = 'Cancelled';
+    order.cancelledAt = new Date();
+    if (req.body.cancellationReason) {
+      order.cancellationReason = req.body.cancellationReason;
+    }
 
     if (order.sellerPickups && order.sellerPickups.length > 0) {
       order.sellerPickups.forEach(sp => {
@@ -1162,61 +1174,59 @@ router.all('/:id/status', protect, async (req, res) => {
       return res.status(403).json({ message: '403 Forbidden: Not authorized to update this order' });
     }
 
-    // Role-based restrictions: Drivers cannot manually update Delivery, Out for Delivery, or Cancelled statuses
+    // 1. Restrict already updated/locked statuses:
+    // If order is already in Out for Delivery, Delivered, or Cancelled, lock from manual status changes
+    const lockedCurrentStatuses = ['Out for Delivery', 'Delivered', 'Cancelled'];
+    if (lockedCurrentStatuses.includes(order.orderStatus)) {
+      const isReturnAction = status === 'Returned' && order.returnDriverId?.toString() === req.user._id.toString();
+      if (!isReturnAction) {
+        return res.status(403).json({
+          message: `403 Forbidden: Order is currently '${order.orderStatus}' and is locked from manual status changes. Repeated status transitions are restricted.`
+        });
+      }
+    }
+
+    // 2. Drivers cannot manually update ANY order status via this endpoint
     if (isDriver && !isAdmin) {
-      const normalizedStatus = (status || '').trim().toLowerCase();
-
-      // 1. Out for Delivery: strictly forbidden for drivers (Admin dispatch only)
-      if (normalizedStatus === 'out for delivery') {
-        return res.status(403).json({
-          message: '403 Forbidden: Drivers are not permitted to manually change order status to Out for Delivery. Only Admins have permission to dispatch orders.'
-        });
-      }
-
-      // 2. Cancelled: strictly forbidden for drivers
-      if (normalizedStatus === 'cancelled' || normalizedStatus === 'canceled') {
-        return res.status(403).json({
-          message: '403 Forbidden: Drivers are not permitted to cancel orders. Only Admins can cancel orders.'
-        });
-      }
-
-      // 3. Delivered: Drivers cannot manually mark orders as Delivered without valid OTP verification
-      if (normalizedStatus === 'delivered' || normalizedStatus === 'delivery') {
-        const enteredOtp = req.body.otp || req.body.deliveryOtp;
-        if (!enteredOtp) {
-          return res.status(403).json({
-            message: '403 Forbidden: Drivers cannot manually mark orders as Delivered. Delivery completion strictly requires customer 6-digit OTP verification via the authorized delivery workflow.'
-          });
-        }
-        // If OTP is provided, execute verification
-        const verifyResult = verifyOrderDeliveryOtp(order, enteredOtp);
-        if (!verifyResult.success) {
-          await order.save();
-          return res.status(400).json({
-            message: verifyResult.message,
-            remainingAttempts: verifyResult.remainingAttempts,
-            code: verifyResult.code
-          });
-        }
-      } else {
-        // Any other manual status change (Pending, Confirmed, Packed, etc.) by a driver is forbidden
-        return res.status(403).json({
-          message: `403 Forbidden: Drivers are not permitted to manually change order status to '${status}'.`
-        });
-      }
+      return res.status(403).json({
+        message: '403 Forbidden: Drivers are not permitted to manually change order statuses. Delivery completion requires customer 6-digit OTP verification via /api/orders/:id/verify-delivery-otp.'
+      });
     }
 
-    // Customers can only cancel their own orders in Pending status
+    // 3. Reject manual selection of Out for Delivery, Delivered, or Cancelled
+    const normalizedTargetStatus = (status || '').trim();
+    if (normalizedTargetStatus === 'Out for Delivery') {
+      return res.status(403).json({
+        message: "403 Forbidden: 'Out for Delivery' cannot be set manually. Please use the authorized Dispatch Hub / Assign Driver workflow."
+      });
+    }
+    if (normalizedTargetStatus === 'Delivered') {
+      return res.status(403).json({
+        message: "403 Forbidden: 'Delivered' cannot be set manually. Orders must be completed through the customer 6-digit OTP verification workflow."
+      });
+    }
+    if (normalizedTargetStatus === 'Cancelled') {
+      return res.status(403).json({
+        message: "403 Forbidden: 'Cancelled' cannot be set manually via status updates. Please use the authorized Cancel Order workflow."
+      });
+    }
+
+    // 4. Allowed manual status options for Admin: Only Pending and Packed
+    const allowedManualAdminStatuses = ['Pending', 'Packed'];
+    if (isAdmin && !allowedManualAdminStatuses.includes(normalizedTargetStatus)) {
+      return res.status(403).json({
+        message: "403 Forbidden: Only 'Pending' and 'Packed' statuses can be manually updated in the Orders panel."
+      });
+    }
+
+    // 5. Customers can only cancel their own orders via the /cancel endpoint
     if (isCustomer && !isAdmin) {
-      if (status !== 'Cancelled') {
-        return res.status(403).json({ message: '403 Forbidden: Customers are only allowed to cancel their orders.' });
-      }
-      if (order.orderStatus !== 'Pending') {
-        return res.status(400).json({ message: 'Orders can only be cancelled while in Pending status.' });
-      }
+      return res.status(403).json({
+        message: '403 Forbidden: Customers must use the authorized Cancel Order endpoint.'
+      });
     }
 
-    // Sellers can only mark Packed or Rejected by Seller for their items
+    // 6. Sellers can only mark Packed or Rejected by Seller for their items
     if (isSeller && !isAdmin && !isCustomer && !isDriver) {
       if (!['Packed', 'Rejected by Seller'].includes(status)) {
         return res.status(403).json({ message: `403 Forbidden: Sellers are not permitted to set status to '${status}'.` });
@@ -1225,38 +1235,10 @@ router.all('/:id/status', protect, async (req, res) => {
 
     // Update returnStatus to Completed when return driver marks as Returned
     if (status === 'Returned' && order.returnDriverId?.toString() === req.user._id.toString()) {
-      order.returnStatus = 'Completed';
+      order.returnDriverId && (order.returnStatus = 'Completed');
     }
 
-    // Strict Delivery OTP Verification for Admin:
-    // If Admin provides OTP, verify it; if Admin does not provide OTP, Admin has manual override authority.
-    if (status === 'Delivered' && isAdmin) {
-      const enteredOtp = req.body.otp || req.body.deliveryOtp;
-      if (enteredOtp) {
-        const verifyResult = verifyOrderDeliveryOtp(order, enteredOtp);
-        if (!verifyResult.success) {
-          await order.save();
-          return res.status(400).json({
-            message: verifyResult.message,
-            remainingAttempts: verifyResult.remainingAttempts,
-            code: verifyResult.code
-          });
-        }
-      } else {
-        order.deliveredAt = new Date();
-        order.deliveryOtp = null; // Prevent OTP reuse
-      }
-    }
-
-    // Generate 6-digit OTP when order transitions to Out for Delivery
-    if (status === 'Out for Delivery') {
-      if (!order.deliveryOtp || (order.deliveryOtpExpiresAt && new Date() > new Date(order.deliveryOtpExpiresAt))) {
-        const otp = prepareOrderDeliveryOtp(order);
-        await dispatchDeliveryOtpNotification({ order, otp, user: order.userId });
-      }
-    }
-
-    const previousStatus = order.orderStatus;
+        const previousStatus = order.orderStatus;
 
     // Handle multi-seller pickup status logic
     let shouldUpdateGlobalStatus = true;
