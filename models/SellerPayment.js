@@ -27,6 +27,23 @@ const sellerPaymentSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  receiptNumber: {
+    type: String,
+    trim: true,
+    index: true
+  },
+  receiptSequence: {
+    type: Number,
+    index: true
+  },
+  totalPayableAtSettlement: {
+    type: Number,
+    default: 0
+  },
+  previouslySettledAtSettlement: {
+    type: Number,
+    default: 0
+  },
   adminId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Admin',
