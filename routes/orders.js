@@ -692,10 +692,16 @@ router.post('/', protect, async (req, res) => {
       const commType = commRule?.commissionType || basePriceObj?.commissionType || enrichedProduct?.commissionType || 'flat';
       const commVal = commRule ? commRule.commissionValue : (basePriceObj?.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
+      const targetUnitSize = extractUnitSize(
+        targetSize || enrichedProduct?.unitSize || productData?.unitSize || item.unitSize,
+        1
+      );
+
       const breakdown = calculatePricingBreakdown({
         sellerUnitPrice: Number(rawPrice) || 0,
         commissionType: commType,
         commissionValue: Number(commVal) || 0,
+        unitSize: targetUnitSize,
         gstPercent: gstPercent,
         quantity: item.quantity,
         availableStock: productData ? (productData.stock || 0) : 0,
