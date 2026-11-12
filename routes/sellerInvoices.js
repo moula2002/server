@@ -14,7 +14,7 @@ const { round2 } = require('../utils/pricing');
 const { connectDBByLocation, getTenantConnections } = require('../utils/db_manager');
 const { generateSellerInvoicePDF } = require('../utils/pdfInvoice');
 
-// Configure multer to store file in memory as Buffer for MongoDB binary storage
+// Configure multer to store files in memory as Buffer for MongoDB binary storage
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -33,12 +33,15 @@ const upload = multer({
   }
 });
 
+/**
+ * Robust model resolver using req.models, req.tenantModels, or fallback to global imports
+ */
 const getModels = (req) => {
   return {
-    Order: req.models?.Order || Order,
-    SellerInvoice: req.models?.SellerInvoice || SellerInvoice,
-    InvoiceImage: req.models?.InvoiceImage || InvoiceImage,
-    Seller: req.models?.Seller || Seller
+    Order: req.models?.Order || req.tenantModels?.Order || Order,
+    SellerInvoice: req.models?.SellerInvoice || req.tenantModels?.SellerInvoice || SellerInvoice,
+    InvoiceImage: req.models?.InvoiceImage || req.tenantModels?.InvoiceImage || InvoiceImage,
+    Seller: req.models?.Seller || req.tenantModels?.Seller || Seller
   };
 };
 
@@ -82,16 +85,16 @@ const findInvoiceAcrossAllDBs = async (id, req) => {
     const connections = getTenantConnections();
     for (const [dbName, tenantConn] of Object.entries(connections)) {
       try {
-        const TenantInvoice = tenantConn.models.SellerInvoice || tenantConn.model('SellerInvoice', SellerInvoice.schema);
+        const TenantInvoice = tenantConn.models?.SellerInvoice || tenantConn.model('SellerInvoice', SellerInvoice.schema);
         const inv = await TenantInvoice.findById(id);
         if (inv) {
           return {
             invoice: inv,
             models: {
-              Order: tenantConn.models.Order || tenantConn.model('Order', Order.schema),
+              Order: tenantConn.models?.Order || tenantConn.model('Order', Order.schema),
               SellerInvoice: TenantInvoice,
-              InvoiceImage: tenantConn.models.InvoiceImage || tenantConn.model('InvoiceImage', InvoiceImage.schema),
-              Seller: tenantConn.models.Seller || tenantConn.model('Seller', Seller.schema)
+              InvoiceImage: tenantConn.models?.InvoiceImage || tenantConn.model('InvoiceImage', InvoiceImage.schema),
+              Seller: tenantConn.models?.Seller || tenantConn.model('Seller', Seller.schema)
             },
             db: tenantConn
           };
@@ -114,7 +117,6 @@ router.param('id', async (req, res, next, id) => {
   try {
     const { invoice, models, db } = await findInvoiceAcrossAllDBs(id, req);
     if (invoice) {
-      // Merge models onto req.models to preserve User, Seller, Location, etc. loaded by tenant/auth middleware
       req.models = { ...(req.models || {}), ...(models || {}) };
       if (db) req.db = db;
       req.targetInvoice = invoice;
@@ -157,17 +159,16 @@ const protectImage = async (req, res, next) => {
     if (!account && decoded.locationId) {
       try {
         const tenantConn = await connectDBByLocation(decoded.locationId, decoded.dbName);
-        const TenantSeller = tenantConn.models.Seller || tenantConn.model('Seller', Seller.schema);
+        const TenantSeller = tenantConn.models?.Seller || tenantConn.model('Seller', Seller.schema);
         account = await TenantSeller.findById(decoded.id).select('-password');
       } catch (e) {}
     }
 
     if (!account) {
-      // Check across known tenant connections
       const connections = getTenantConnections();
       for (const [dbName, tenantConn] of Object.entries(connections)) {
         try {
-          const TenantSeller = tenantConn.models.Seller || tenantConn.model('Seller', Seller.schema);
+          const TenantSeller = tenantConn.models?.Seller || tenantConn.model('Seller', Seller.schema);
           account = await TenantSeller.findById(decoded.id).select('-password');
           if (account) break;
         } catch (e) {}
@@ -200,6 +201,10 @@ router.get('/next-number', protect, async (req, res) => {
       sellerId = req.query.sellerId;
     }
 
+    if (!sellerId) {
+      return res.status(400).json({ message: 'Seller ID is required' });
+    }
+
     const { SellerInvoice: InvoiceModel } = getModels(req);
     if (!InvoiceModel) {
       return res.status(503).json({ message: 'Database service unavailable. Please check database connection.' });
@@ -207,12 +212,13 @@ router.get('/next-number', protect, async (req, res) => {
 
     const existingInvoices = await InvoiceModel.find({ sellerId })
       .select('invoiceNumber invoiceSequenceNumber createdAt')
-      .sort({ createdAt: 1 });
+      .sort({ createdAt: 1 })
+      .lean();
 
     const usedNumbers = [];
     const usedNumericSequences = [];
 
-    existingInvoices.forEach(inv => {
+    (existingInvoices || []).forEach(inv => {
       const numStr = (inv.invoiceNumber || '').toString().trim();
       if (numStr) usedNumbers.push(numStr);
 
@@ -247,18 +253,18 @@ router.get('/next-number', protect, async (req, res) => {
  * Helper to calculate un-invoiced orders and totals for a given seller and date range.
  */
 const calculateSellerOrdersForRange = async ({ OrderModel, InvoiceModel, sellerId, seller, start, end }) => {
-  // Fetch existing non-cancelled invoices to find already invoiced order IDs
   const existingSellerInvoices = await InvoiceModel.find({
     sellerId: sellerId,
     status: { $nin: ['Cancelled', 'Rejected'] }
   }).select('orders invoiceNumber').lean();
 
   const alreadyInvoicedOrderIds = new Set();
-  existingSellerInvoices.forEach(inv => {
-    (inv.orders || []).forEach(oId => alreadyInvoicedOrderIds.add(oId.toString()));
+  (existingSellerInvoices || []).forEach(inv => {
+    (inv.orders || []).forEach(oId => {
+      if (oId) alreadyInvoicedOrderIds.add(oId.toString());
+    });
   });
 
-  // Query Delivered orders in date range
   const orders = await OrderModel.find({
     orderStatus: { $in: ['Delivered', 'Partially Returned', 'Returned'] },
     createdAt: { $gte: start, $lte: end }
@@ -269,12 +275,12 @@ const calculateSellerOrdersForRange = async ({ OrderModel, InvoiceModel, sellerI
   const orderIds = [];
   const validOrders = [];
 
-  orders.forEach(order => {
+  (orders || []).forEach(order => {
     if (alreadyInvoicedOrderIds.has(order._id.toString())) {
       return;
     }
 
-    let sellerItemsInOrder = order.items.filter(item => {
+    let sellerItemsInOrder = (order.items || []).filter(item => {
       const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerId.toString();
       const matchesDirectSellerId = item.sellerId && item.sellerId.toString() === sellerId.toString();
       const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerId.toString();
@@ -307,9 +313,9 @@ const calculateSellerOrdersForRange = async ({ OrderModel, InvoiceModel, sellerI
     validOrders,
     totalAmount,
     totalCommission,
-    allOrdersInRangeCount: orders.length,
+    allOrdersInRangeCount: (orders || []).length,
     alreadyInvoicedOrderCount: alreadyInvoicedOrderIds.size,
-    existingInvoiceNumbers: existingSellerInvoices.map(i => i.invoiceNumber).filter(Boolean)
+    existingInvoiceNumbers: (existingSellerInvoices || []).map(i => i.invoiceNumber).filter(Boolean)
   };
 };
 
@@ -361,7 +367,7 @@ router.post('/generate', protect, (req, res, next) => {
     // 1. Calculate next sequential invoice number
     const allSellerInvoices = await InvoiceModel.find({ sellerId }).select('invoiceNumber invoiceSequenceNumber').lean();
     const usedNumericSequences = [];
-    allSellerInvoices.forEach(inv => {
+    (allSellerInvoices || []).forEach(inv => {
       const numStr = (inv.invoiceNumber || '').toString().trim();
       const p = parseInt(numStr, 10);
       if (/^\d+$/.test(numStr) && !isNaN(p) && p > 0) {
@@ -385,7 +391,6 @@ router.post('/generate', protect, (req, res, next) => {
       if (numericInvoiceNumber <= 0) {
         return res.status(400).json({ message: 'Invoice number must be greater than 0.' });
       }
-      // Allow manual entry if not duplicate
     } else {
       numericInvoiceNumber = nextExpectedNumber;
     }
@@ -411,50 +416,42 @@ router.post('/generate', protect, (req, res, next) => {
       orderIds,
       validOrders,
       totalAmount,
-      totalCommission,
-      allOrdersInRangeCount,
-      alreadyInvoicedOrderCount,
-      existingInvoiceNumbers
+      totalCommission
     } = await calculateSellerOrdersForRange({ OrderModel, InvoiceModel, sellerId, seller, start, end });
 
-    // Fallback: If all delivered orders were already invoiced, or no delivered orders exist,
-    // support multiple invoices for the same billing period by calculating orders in range or 0 amount settlement
     let finalOrderIds = orderIds;
     let finalOrders = validOrders;
     let finalTotalAmount = totalAmount;
     let finalTotalCommission = totalCommission;
 
     if (finalOrderIds.length === 0) {
-      // Find delivered orders in range regardless of previous invoice to display in breakdown
       const allOrdersInRange = await OrderModel.find({
         orderStatus: { $in: ['Delivered', 'Partially Returned', 'Returned'] },
         createdAt: { $gte: start, $lte: end }
       }).populate('items.productId');
 
-      if (allOrdersInRange.length > 0) {
-        allOrdersInRange.forEach(order => {
-          let sellerItemsInOrder = order.items.filter(item => {
-            const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerId.toString();
-            const matchesDirectSellerId = item.sellerId && item.sellerId.toString() === sellerId.toString();
-            const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerId.toString();
-            const matchesName = item.sellerName && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
-            return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName;
-          });
-          if (sellerItemsInOrder.length > 0) {
-            finalOrderIds.push(order._id);
-            finalOrders.push(order);
-            sellerItemsInOrder.forEach(item => {
-              if (item.returnStatus !== 'Returned to Seller') {
-                const qty = Number(item.quantity) || 1;
-                const itemCommission = Number(item.totalCommission) || ((Number(item.unitCommission) || 0) * qty) || 0;
-                const itemSellerPrice = (Number(item.sellerUnitPrice) || Number(item.normalPrice) || Number(item.price) || 0) * qty;
-                finalTotalAmount += itemSellerPrice;
-                finalTotalCommission += itemCommission;
-              }
-            });
-          }
+      (allOrdersInRange || []).forEach(order => {
+        let sellerItemsInOrder = (order.items || []).filter(item => {
+          const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerId.toString();
+          const matchesDirectSellerId = item.sellerId && item.sellerId.toString() === sellerId.toString();
+          const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerId.toString();
+          const matchesName = item.sellerName && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
+          return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName;
         });
-      }
+        if (sellerItemsInOrder.length > 0) {
+          finalOrderIds.push(order._id);
+          finalOrders.push(order);
+          sellerItemsInOrder.forEach(item => {
+            if (item.returnStatus !== 'Returned to Seller') {
+              const qty = Number(item.quantity) || 1;
+              const itemCommission = Number(item.totalCommission) || ((Number(item.unitCommission) || 0) * qty) || 0;
+              const itemSellerPrice = (Number(item.sellerUnitPrice) || Number(item.normalPrice) || Number(item.price) || 0) * qty;
+              finalTotalAmount += itemSellerPrice;
+              finalTotalCommission += itemCommission;
+            }
+          });
+        }
+      });
     }
 
     const roundedTotalAmount = round2(finalTotalAmount);
@@ -479,7 +476,6 @@ router.post('/generate', protect, (req, res, next) => {
       generatedBy: req.user ? req.user._id : sellerId
     });
 
-    // Save invoice first to get ID
     await newInvoice.save();
 
     // Store raw binary images in MongoDB
@@ -504,7 +500,6 @@ router.post('/generate', protect, (req, res, next) => {
       newInvoice.imageIds.push(imageDoc._id);
     }
 
-    // Preserve legacy fields with the primary (first) image for backwards compatibility
     if (uploadedFiles.length > 0) {
       const firstFile = uploadedFiles[0];
       newInvoice.invoiceImage = {
@@ -523,7 +518,7 @@ router.post('/generate', protect, (req, res, next) => {
 
     await newInvoice.save();
 
-    // Generate Redesigned Professional PDF Invoice with Embedded Images
+    // Generate PDF & Email Admin in background
     try {
       const pdfBuffer = await generateSellerInvoicePDF({
         invoice: newInvoice,
@@ -536,7 +531,6 @@ router.post('/generate', protect, (req, res, next) => {
         }))
       });
 
-      // Email Admin
       const adminEmail = process.env.EMAIL_USER;
       sendEmail({
         to: adminEmail,
@@ -564,7 +558,6 @@ router.post('/generate', protect, (req, res, next) => {
       console.error('Error generating initial PDF for email:', pdfErr.message);
     }
 
-    // Strip binary buffer from JSON response for efficiency
     const invoiceResp = newInvoice.toObject();
     if (invoiceResp.invoiceImage) {
       delete invoiceResp.invoiceImage.data;
@@ -608,6 +601,10 @@ router.post('/generate-batch', protect, (req, res, next) => {
       sellerId = req.body.sellerId;
     }
 
+    if (!sellerId) {
+      return res.status(400).json({ message: 'Seller ID is required' });
+    }
+
     const { Order: OrderModel, SellerInvoice: InvoiceModel, InvoiceImage: InvoiceImageModel, Seller: SellerModel } = getModels(req);
 
     const seller = await SellerModel.findById(sellerId);
@@ -615,7 +612,6 @@ router.post('/generate-batch', protect, (req, res, next) => {
       return res.status(404).json({ message: 'Seller not found' });
     }
 
-    // Parse invoices metadata
     let invoicesMetadata = [];
     try {
       invoicesMetadata = typeof req.body.invoices === 'string' 
@@ -631,7 +627,6 @@ router.post('/generate-batch', protect, (req, res, next) => {
 
     const uploadedFiles = req.files || [];
 
-    // Map files by invoice index: e.g. "invoice_0_image_0"
     const filesByInvoiceIndex = {};
     uploadedFiles.forEach(file => {
       const match = file.fieldname.match(/invoice_(\d+)_image/);
@@ -642,7 +637,6 @@ router.post('/generate-batch', protect, (req, res, next) => {
       }
     });
 
-    // Validate duplicate numbers within the batch
     const batchNumbers = new Set();
     for (let i = 0; i < invoicesMetadata.length; i++) {
       const item = invoicesMetadata[i];
@@ -664,14 +658,13 @@ router.post('/generate-batch', protect, (req, res, next) => {
       }
     }
 
-    // Check duplicate against existing DB invoices
     const existingDuplicates = await InvoiceModel.find({
       sellerId: sellerId,
       invoiceNumber: { $in: Array.from(batchNumbers) },
       status: { $nin: ['Cancelled', 'Rejected'] }
     }).select('invoiceNumber');
 
-    if (existingDuplicates.length > 0) {
+    if (existingDuplicates && existingDuplicates.length > 0) {
       const dupList = existingDuplicates.map(d => d.invoiceNumber).join(', ');
       return res.status(400).json({ 
         message: `Invoice number(s) "${dupList}" have already been used for this seller.` 
@@ -680,7 +673,6 @@ router.post('/generate-batch', protect, (req, res, next) => {
 
     const createdInvoices = [];
 
-    // Process each invoice in sequential order
     for (let i = 0; i < invoicesMetadata.length; i++) {
       const item = invoicesMetadata[i];
       const trimmedInvNum = (item.invoiceNumber || '').toString().trim();
@@ -691,7 +683,6 @@ router.post('/generate-batch', protect, (req, res, next) => {
 
       const itemFiles = filesByInvoiceIndex[i] || [];
 
-      // Calculate orders for date range
       const {
         orderIds,
         validOrders,
@@ -710,8 +701,8 @@ router.post('/generate-batch', protect, (req, res, next) => {
           createdAt: { $gte: start, $lte: end }
         }).populate('items.productId');
 
-        allOrdersInRange.forEach(order => {
-          let sellerItemsInOrder = order.items.filter(it => {
+        (allOrdersInRange || []).forEach(order => {
+          let sellerItemsInOrder = (order.items || []).filter(it => {
             const matchesSellerObj = it.seller && it.seller.sellerId && it.seller.sellerId.toString() === sellerId.toString();
             const matchesDirectSellerId = it.sellerId && it.sellerId.toString() === sellerId.toString();
             const matchesProductRef = it.productId && it.productId.sellerId && it.productId.sellerId.toString() === sellerId.toString();
@@ -757,7 +748,6 @@ router.post('/generate-batch', protect, (req, res, next) => {
 
       await newInvoice.save();
 
-      // Save raw binary image records in MongoDB
       const savedDocs = [];
       for (let fIdx = 0; fIdx < itemFiles.length; fIdx++) {
         const file = itemFiles[fIdx];
@@ -778,7 +768,6 @@ router.post('/generate-batch', protect, (req, res, next) => {
         newInvoice.imageIds.push(imageDoc._id);
       }
 
-      // Legacy fallback on newInvoice
       if (itemFiles.length > 0) {
         newInvoice.invoiceImage = {
           data: itemFiles[0].buffer,
@@ -796,7 +785,6 @@ router.post('/generate-batch', protect, (req, res, next) => {
 
       await newInvoice.save();
 
-      // Generate PDF in background & fire email
       try {
         const pdfBuffer = await generateSellerInvoicePDF({
           invoice: newInvoice,
@@ -876,10 +864,10 @@ router.get('/:id/images', protect, async (req, res) => {
     const InvoiceImageModel = models.InvoiceImage || InvoiceImage;
     const images = await InvoiceImageModel.find({ invoiceId: invoice._id })
       .select('-data -imageData')
-      .sort({ createdAt: 1 });
+      .sort({ createdAt: 1 })
+      .lean();
 
-    // Backwards compatibility: If no records in InvoiceImage collection but invoice has invoiceImage embedded
-    if (images.length === 0 && (invoice.hasInvoiceImage || invoice.invoiceImage)) {
+    if ((!images || images.length === 0) && (invoice.hasInvoiceImage || invoice.invoiceImage)) {
       return res.json([{
         _id: 'legacy',
         invoiceId: invoice._id,
@@ -890,7 +878,7 @@ router.get('/:id/images', protect, async (req, res) => {
       }]);
     }
 
-    res.json(images);
+    res.json(images || []);
   } catch (error) {
     console.error('Error fetching invoice images list:', error);
     res.status(500).json({ message: error.message });
@@ -974,7 +962,6 @@ router.get('/:id/image', protectImage, async (req, res) => {
     let mimeType = 'image/jpeg';
     let filename = `invoice-${invoice.invoiceNumber || invoice._id}`;
 
-    // 1. Try InvoiceImage collection first (latest architecture)
     const InvoiceImageModel = models.InvoiceImage || InvoiceImage;
     const imageDoc = await InvoiceImageModel.findOne({ invoiceId: invoice._id }).sort({ createdAt: 1 });
     if (imageDoc && (imageDoc.data || imageDoc.imageData)) {
@@ -983,7 +970,6 @@ router.get('/:id/image', protectImage, async (req, res) => {
       filename = imageDoc.originalName || imageDoc.filename || filename;
     }
 
-    // 2. Fallback to invoice.invoiceImage.data (embedded buffer)
     if (!binaryData && invoice.invoiceImage && invoice.invoiceImage.data) {
       binaryData = invoice.invoiceImage.data;
       mimeType = invoice.invoiceImage.contentType || invoice.imageMetadata?.mimeType || 'image/jpeg';
@@ -1009,37 +995,56 @@ router.get('/:id/image', protectImage, async (req, res) => {
 // @desc    Get all invoices for logged in seller (excludes large image binary data from JSON payload)
 router.get('/my-invoices', protect, async (req, res) => {
   try {
-    if (req.user.role !== 'seller') {
+    if (req.user?.role !== 'seller') {
       return res.status(403).json({ message: 'Only sellers can access this' });
     }
+
+    const sellerId = req.user?._id;
+    if (!sellerId) {
+      return res.status(400).json({ message: 'Seller ID is required' });
+    }
+
     const { SellerInvoice: InvoiceModel, InvoiceImage: InvoiceImageModel } = getModels(req);
     if (!InvoiceModel) {
       return res.json([]);
     }
-    const invoices = await InvoiceModel.find({ sellerId: req.user._id })
+
+    const invoices = await InvoiceModel.find({ sellerId })
       .select('-invoiceImage.data')
       .populate('sellerId', 'businessName name email storeName')
       .sort({ createdAt: -1 })
       .lean();
 
-    // Attach image metadata & counts
+    if (!invoices || invoices.length === 0) {
+      return res.json([]);
+    }
+
     const invoiceIds = invoices.map(i => i._id);
-    const allImages = await InvoiceImageModel.find({ invoiceId: { $in: invoiceIds } })
-      .select('_id invoiceId filename originalName mimeType size fileSize createdAt')
-      .sort({ createdAt: 1 })
-      .lean();
+    let allImages = [];
+    if (InvoiceImageModel) {
+      try {
+        allImages = await InvoiceImageModel.find({ invoiceId: { $in: invoiceIds } })
+          .select('_id invoiceId filename originalName mimeType size fileSize createdAt')
+          .sort({ createdAt: 1 })
+          .lean();
+      } catch (imgErr) {
+        console.warn('Could not query InvoiceImageModel:', imgErr.message);
+      }
+    }
 
     const imagesByInvoice = {};
-    allImages.forEach(img => {
-      const invId = img.invoiceId.toString();
-      if (!imagesByInvoice[invId]) imagesByInvoice[invId] = [];
-      imagesByInvoice[invId].push({
-        _id: img._id,
-        filename: img.filename,
-        originalName: img.originalName,
-        mimeType: img.mimeType,
-        size: img.fileSize || img.size
-      });
+    (allImages || []).forEach(img => {
+      const invId = img.invoiceId?.toString();
+      if (invId) {
+        if (!imagesByInvoice[invId]) imagesByInvoice[invId] = [];
+        imagesByInvoice[invId].push({
+          _id: img._id,
+          filename: img.filename,
+          originalName: img.originalName,
+          mimeType: img.mimeType,
+          size: img.fileSize || img.size
+        });
+      }
     });
 
     const enrichedInvoices = invoices.map(inv => {
@@ -1082,14 +1087,14 @@ router.get('/admin/all', protect, async (req, res) => {
         '-invoiceImage.data', 
         { createdAt: -1 }
       );
-      return res.json(invoices);
+      return res.json(invoices || []);
     } else {
       const { SellerInvoice: InvoiceModel } = getModels(req);
       const invoices = await InvoiceModel.find()
         .select('-invoiceImage.data')
         .populate('sellerId', 'businessName name email storeName phone')
         .sort({ createdAt: -1 });
-      return res.json(invoices);
+      return res.json(invoices || []);
     }
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1126,12 +1131,12 @@ router.get('/:id', protect, async (req, res) => {
       delete invObj.invoiceImage.data;
     }
 
-    invObj.images = imageDocs;
-    invObj.imageCount = imageDocs.length || (invObj.hasInvoiceImage ? 1 : 0);
+    invObj.images = imageDocs || [];
+    invObj.imageCount = (imageDocs && imageDocs.length > 0) ? imageDocs.length : (invObj.hasInvoiceImage ? 1 : 0);
 
     res.json({
       ...invObj,
-      ordersList: orders
+      ordersList: orders || []
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1181,15 +1186,13 @@ router.get('/:id/download', protect, async (req, res) => {
     const OrderModel = models.Order || Order;
     const InvoiceImageModel = models.InvoiceImage || InvoiceImage;
 
-    // Fetch seller and orders
     const seller = await SellerModel.findById(invoice.sellerId);
     const orders = await OrderModel.find({ _id: { $in: invoice.orders } });
 
-    // Retrieve ALL raw binary image buffers from MongoDB
     const imageDocs = await InvoiceImageModel.find({ invoiceId: invoice._id }).sort({ createdAt: 1 });
     const images = [];
 
-    imageDocs.forEach(doc => {
+    (imageDocs || []).forEach(doc => {
       const buf = doc.data || doc.imageData;
       if (buf && Buffer.isBuffer(buf) && buf.length > 0) {
         images.push({
@@ -1200,7 +1203,6 @@ router.get('/:id/download', protect, async (req, res) => {
       }
     });
 
-    // Fallback: If no docs in InvoiceImage, check embedded invoice.invoiceImage
     if (images.length === 0 && invoice.invoiceImage && invoice.invoiceImage.data) {
       images.push({
         data: invoice.invoiceImage.data,
@@ -1209,11 +1211,10 @@ router.get('/:id/download', protect, async (req, res) => {
       });
     }
 
-    // Generate the professional PDF with all images
     const pdfBuffer = await generateSellerInvoicePDF({
       invoice,
       seller,
-      orders,
+      orders: orders || [],
       images
     });
 
@@ -1246,7 +1247,6 @@ router.delete('/:id', protect, async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to delete this invoice' });
     }
 
-    // Clean up all stored images in InvoiceImage collection
     try {
       const InvoiceImageModel = models.InvoiceImage || InvoiceImage;
       await InvoiceImageModel.deleteMany({ invoiceId: invoice._id });
