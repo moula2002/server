@@ -142,7 +142,86 @@ const orderSchema = new mongoose.Schema({
   },
   paymentStatus: {
     type: String,
-    default: 'Pending' // Match frontend "Completed" or "Pending"
+    default: 'Pending' // Customer Payment Status: Pending, Paid, Completed, Failed, Refunded
+  },
+  // COD Payment Management
+  codCollectionStatus: {
+    type: String,
+    enum: ['Not Collected', 'Collected', 'Verified', 'Disputed'],
+    default: 'Not Collected'
+  },
+  codCollectedAmount: {
+    type: Number,
+    default: 0
+  },
+  codCollectedAt: {
+    type: Date,
+    default: null
+  },
+  codCollectedBy: {
+    id: { type: mongoose.Schema.Types.ObjectId },
+    name: { type: String, default: null },
+    role: { type: String, default: null }
+  },
+  codVerifiedAt: {
+    type: Date,
+    default: null
+  },
+  codVerifiedBy: {
+    id: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
+    name: { type: String, default: null }
+  },
+  codReference: {
+    type: String,
+    default: null
+  },
+  codRemarks: {
+    type: String,
+    default: null
+  },
+  // Online Payment Management
+  onlinePaymentGateway: {
+    type: String,
+    default: null
+  },
+  onlineTransactionId: {
+    type: String,
+    default: null
+  },
+  onlinePaymentStatus: {
+    type: String,
+    enum: ['Pending', 'Verified', 'Failed', 'Refunded'],
+    default: 'Pending'
+  },
+  onlineVerifiedAt: {
+    type: Date,
+    default: null
+  },
+  onlineVerifiedBy: {
+    id: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
+    name: { type: String, default: null }
+  },
+  onlineRemarks: {
+    type: String,
+    default: null
+  },
+  // Seller Settlement Status (distinct from customer payment and COD collection)
+  sellerSettlementStatus: {
+    type: String,
+    enum: ['Pending', 'Approved', 'Processing', 'Partially Settled', 'Settled', 'Rejected'],
+    default: 'Pending'
+  },
+  sellerSettledAmount: {
+    type: Number,
+    default: 0
+  },
+  sellerSettledAt: {
+    type: Date,
+    default: null
+  },
+  sellerSettlementRemarks: {
+    type: String,
+    default: null
   },
   driverId: {
     type: mongoose.Schema.Types.ObjectId,

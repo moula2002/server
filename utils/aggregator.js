@@ -44,6 +44,7 @@ const aggregateGET = async (modelName, req, query = {}, populate = [], select = 
       CashCollector: require('../models/CashCollector').schema,
       Location: require('../models/Location').schema,
       SellerPayment: require('../models/SellerPayment').schema,
+      PaymentAuditLog: require('../models/PaymentAuditLog').schema,
       SellerInvoice: require('../models/SellerInvoice').schema,
       Review: require('../models/Review').schema,
       DeliverySlot: require('../models/DeliverySlot').schema,
