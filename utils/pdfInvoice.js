@@ -2,6 +2,13 @@ const fs = require('fs');
 const path = require('path');
 const PDFDocument = require('pdfkit-table');
 
+let sharp;
+try {
+  sharp = require('sharp');
+} catch (e) {
+  console.warn('sharp not available for image conversion:', e.message);
+}
+
 /**
  * Generate a professional A4 Seller Invoice PDF with embedded tax invoice image
  * @param {Object} options
@@ -271,6 +278,24 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
         doc.strokeColor(borderColor).lineWidth(1).moveTo(36, 76).lineTo(559, 76).stroke();
 
         try {
+          let processedBuffer = imageBuffer;
+
+          // Check if image is WebP (starts with RIFF....WEBP)
+          const isWebP = (
+            (imageMimeType && imageMimeType.toLowerCase().includes('webp')) ||
+            (imageBuffer.length > 12 &&
+             imageBuffer.toString('ascii', 0, 4) === 'RIFF' &&
+             imageBuffer.toString('ascii', 8, 12) === 'WEBP')
+          );
+
+          if (isWebP && sharp) {
+            try {
+              processedBuffer = await sharp(imageBuffer).png().toBuffer();
+            } catch (convErr) {
+              console.warn('Failed to convert WebP to PNG using sharp, attempting direct embed:', convErr.message);
+            }
+          }
+
           // Embed the buffer directly into the PDF with aspect ratio preservation
           const maxImgWidth = 523;
           const maxImgHeight = 680;
@@ -280,7 +305,7 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
           doc.roundedRect(36, imgY, maxImgWidth, maxImgHeight, 8).fillAndStroke('#ffffff', borderColor);
 
           // Center the image within container
-          doc.image(imageBuffer, 46, imgY + 10, {
+          doc.image(processedBuffer, 46, imgY + 10, {
             fit: [maxImgWidth - 20, maxImgHeight - 20],
             align: 'center',
             valign: 'center'

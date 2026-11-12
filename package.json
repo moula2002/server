@@ -26,6 +26,7 @@
     "nodemailer": "^8.0.7",
     "pdfkit": "^0.18.0",
     "pdfkit-table": "^0.2.11",
+    "sharp": "^0.35.5",
     "socket.io": "^4.8.4",
     "xlsx": "^0.18.5"
   }
