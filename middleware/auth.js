@@ -104,7 +104,8 @@ const protect = async (req, res, next) => {
       }
 
       // Check User
-      account = await req.models.User.findById(decoded.id).select('-password');
+      const UserModel = req.models?.User || User;
+      account = UserModel ? await UserModel.findById(decoded.id).select('-password') : null;
       if (account) {
         if (account.tokenVersion !== undefined && decoded.tokenVersion !== account.tokenVersion) {
           return res.status(401).json({ message: 'Session expired, logged in from another device' });
@@ -114,7 +115,8 @@ const protect = async (req, res, next) => {
       }
 
       // Check Seller
-      account = await req.models.Seller.findById(decoded.id).select('-password');
+      const SellerModel = req.models?.Seller || Seller;
+      account = SellerModel ? await SellerModel.findById(decoded.id).select('-password') : null;
       if (account) {
         if (account.tokenVersion !== undefined && decoded.tokenVersion !== account.tokenVersion) {
           return res.status(401).json({ message: 'Session expired, logged in from another device' });
@@ -125,7 +127,8 @@ const protect = async (req, res, next) => {
       }
 
       // Check Driver
-      account = await req.models.Driver.findById(decoded.id).select('-password');
+      const DriverModel = req.models?.Driver || Driver;
+      account = DriverModel ? await DriverModel.findById(decoded.id).select('-password') : null;
       if (account) {
         if (account.tokenVersion !== undefined && decoded.tokenVersion !== account.tokenVersion) {
           return res.status(401).json({ message: 'Session expired, logged in from another device' });
@@ -136,7 +139,8 @@ const protect = async (req, res, next) => {
       }
 
       // Check CashCollector
-      account = await req.models.CashCollector.findById(decoded.id).select('-password');
+      const CashCollectorModel = req.models?.CashCollector || CashCollector;
+      account = CashCollectorModel ? await CashCollectorModel.findById(decoded.id).select('-password') : null;
       if (account) {
         if (account.tokenVersion !== undefined && decoded.tokenVersion !== account.tokenVersion) {
           return res.status(401).json({ message: 'Session expired, logged in from another device' });
@@ -148,6 +152,7 @@ const protect = async (req, res, next) => {
 
       return res.status(401).json({ message: 'Not authorized, account not found' });
     } catch (error) {
+      console.error('[Protect Middleware Error]:', error);
       return res.status(401).json({ message: 'Not authorized, token failed' });
     }
   }
