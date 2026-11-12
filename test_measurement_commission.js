@@ -117,6 +117,56 @@ async function runTests() {
   console.log();
 
   // ========================================================================
+  // TEST C2 – Three 30 KG Bags (Method A: Seller ₹50/KG, Admin ₹20/KG, Qty 3)
+  // ========================================================================
+  console.log('Test C2: Three 30 KG Bags (Method A: ₹50/KG, Admin ₹20/KG, Qty 3)');
+  const testC2 = calculatePricingBreakdown({
+    sellerUnitPrice: 50,
+    priceBasis: 'per_unit',
+    unit: 'BAG',
+    packagingType: 'BAG',
+    measurementBasis: 'KG',
+    measurementUnit: 'KG',
+    commissionUnit: 'KG',
+    unitSize: 30,
+    commissionType: 'flat',
+    commissionValue: 20,
+    quantity: 3,
+    gstPercent: 0
+  });
+  assert(testC2.totalMeasurementQuantity === 90, `Total Weight (30 * 3) is 90 KG (got ${testC2.totalMeasurementQuantity})`);
+  assert(testC2.totalSellerAmount === 4500, `Total Seller Amount (1500 * 3) is ₹4,500 (got ${testC2.totalSellerAmount})`);
+  assert(testC2.totalCommission === 1800, `Total Commission (600 * 3) is ₹1,800 (got ${testC2.totalCommission})`);
+  assert(testC2.subtotal === 6300, `Subtotal Before GST (4500 + 1800) is ₹6,300 (got ${testC2.subtotal})`);
+  assert(testC2.finalCustomerAmount === 6300, `Final Customer Amount is ₹6,300 (got ${testC2.finalCustomerAmount})`);
+  console.log();
+
+  // ========================================================================
+  // TEST C3 – Six 30 KG Bags (Method A: Seller ₹50/KG, Admin ₹20/KG, Qty 6)
+  // ========================================================================
+  console.log('Test C3: Six 30 KG Bags (Method A: ₹50/KG, Admin ₹20/KG, Qty 6)');
+  const testC3 = calculatePricingBreakdown({
+    sellerUnitPrice: 50,
+    priceBasis: 'per_unit',
+    unit: 'BAG',
+    packagingType: 'BAG',
+    measurementBasis: 'KG',
+    measurementUnit: 'KG',
+    commissionUnit: 'KG',
+    unitSize: 30,
+    commissionType: 'flat',
+    commissionValue: 20,
+    quantity: 6,
+    gstPercent: 0
+  });
+  assert(testC3.totalMeasurementQuantity === 180, `Total Weight (30 * 6) is 180 KG (got ${testC3.totalMeasurementQuantity})`);
+  assert(testC3.totalSellerAmount === 9000, `Total Seller Amount (1500 * 6) is ₹9,000 (got ${testC3.totalSellerAmount})`);
+  assert(testC3.totalCommission === 3600, `Total Commission (600 * 6) is ₹3,600 (got ${testC3.totalCommission})`);
+  assert(testC3.subtotal === 12600, `Subtotal Before GST (9000 + 3600) is ₹12,600 (got ${testC3.subtotal})`);
+  assert(testC3.finalCustomerAmount === 12600, `Final Customer Amount is ₹12,600 (got ${testC3.finalCustomerAmount})`);
+  console.log();
+
+  // ========================================================================
   // TEST D – Different Variants (Admin Commission: ₹20/KG)
   // Small Bag (10 KG) -> ₹200 commission
   // Medium Bag (20 KG) -> ₹400 commission
@@ -540,6 +590,56 @@ async function runTests() {
   });
   assert(k4.totalMeasurementQuantity === 50, `1 Custom Unit Total Weight is 50 KG (got ${k4.totalMeasurementQuantity})`);
   assert(k4.totalCommission === 1000, `1 Custom Unit × 50 KG × ₹20 = ₹1,000 (got ${k4.totalCommission})`);
+
+  // ========================================================================
+  // TEST L – Product Pricing Consistency & Variant Synchronization
+  // Case: Seller Base Price ₹2,963/KG, 30 KG BAG, Admin Commission ₹2/KG, GST 0%
+  // Both Pricing Breakdown & Product Summary Card must display ₹88,950
+  // ========================================================================
+  console.log('Test L: Pricing Breakdown & Product Summary Card Exact ₹88,950 Consistency');
+  const testL = calculatePricingBreakdown({
+    sellerUnitPrice: 2963,
+    priceBasis: 'per_unit',
+    packagingType: 'BAG',
+    measurementBasis: 'KG',
+    unitSize: 30,
+    commissionType: 'flat',
+    commissionValue: 2,
+    quantity: 1,
+    gstPercent: 0
+  });
+
+  assert(testL.sellerPricePerBaseUnit === 2963, `Seller Base Price is ₹2,963/KG (got ${testL.sellerPricePerBaseUnit})`);
+  assert(testL.sellerPricePerPackage === 88890, `Seller Price Per Package (2963 * 30) is ₹88,890 (got ${testL.sellerPricePerPackage})`);
+  assert(testL.commissionPerPackage === 60, `Admin Commission Per Package (2 * 30) is ₹60 (got ${testL.commissionPerPackage})`);
+  assert(testL.finalCustomerAmount === 88950, `Customer Final Price (88890 + 60) is ₹88,950 (got ${testL.finalCustomerAmount})`);
+
+  // Verify processProductPricing guarantees variant synchronization
+  const testLProcessed = processProductPricing({
+    name: 'RAS MADURI TOOR DAL 30KG',
+    categoryId: 'cat1',
+    sellerPricePerBaseUnit: 2963,
+    priceBasis: 'per_unit',
+    packagingType: 'BAG',
+    measurementBasis: 'KG',
+    unitSize: 30,
+    b2b: [
+      {
+        packetSize: '30kg',
+        packagingType: 'BAG',
+        measurementBasis: 'KG',
+        unitSize: 30,
+        priceBasis: 'per_package',
+        sellerPrice: 90000 // Old stale value
+      }
+    ]
+  }, [{ categoryId: 'cat1', unit: 'kg', packagingType: 'BAG', measurementBasis: 'KG', commissionType: 'flat', commissionValue: 2, pincode: 'all' }]);
+
+  assert(testLProcessed.sellerPricePerProductUnit === 88890, `Processed root seller price is ₹88,890 (got ${testLProcessed.sellerPricePerProductUnit})`);
+  assert(testLProcessed.customerFinalPricePerProductUnit === 88950, `Processed root customer final price is ₹88,950 (got ${testLProcessed.customerFinalPricePerProductUnit})`);
+  assert(testLProcessed.b2b[0].sellerPrice === 88890, `Processed variant seller price is synchronized to ₹88,890 (got ${testLProcessed.b2b[0].sellerPrice})`);
+  assert(testLProcessed.b2b[0].price === 88950, `Processed variant customer final price is synchronized to ₹88,950 (got ${testLProcessed.b2b[0].price})`);
+  assert(testLProcessed.b2b[0].commissionPerProductUnit === 60, `Processed variant commission is ₹60 (got ${testLProcessed.b2b[0].commissionPerProductUnit})`);
 
   console.log('\n================================================================');
   console.log(`  TEST RESULTS: ${passedTests} / ${totalTests} TESTS PASSED`);
