@@ -696,73 +696,98 @@ router.post('/', protect, async (req, res) => {
         }
       }
 
-      const commRule = productData ? findCategoryCommission(commissions, productData.categoryId, productData.unit, productData.measurementUnit, shippingAddress?.pincode) : null;
-      const commType = commRule?.commissionType || basePriceObj?.commissionType || enrichedProduct?.commissionType || 'flat';
-      const commVal = commRule ? commRule.commissionValue : (basePriceObj?.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
-
-      const targetUnitSize = extractUnitSize(
-        targetSize || enrichedProduct?.unitSize || productData?.unitSize || item.unitSize,
+      const itemPackagingType = rawBasePriceObj?.packagingType || productData?.packagingType || productData?.unit || 'BAG';
+      const itemMeasurementBasis = rawBasePriceObj?.measurementBasis || rawBasePriceObj?.measurementUnit || productData?.measurementBasis || productData?.measurementUnit || 'KG';
+      const itemUnitSize = extractUnitSize(
+        rawBasePriceObj?.unitSize || rawBasePriceObj?.sizeValue || targetSize || productData?.unitSize || item.unitSize,
         1
       );
+      const itemPriceBasis = rawBasePriceObj?.priceBasis || productData?.priceBasis || (rawBasePriceObj?.isPackagePrice ? 'per_package' : 'per_unit');
+      const itemGstPercent = rawBasePriceObj?.gstPercent !== undefined && rawBasePriceObj?.gstPercent !== null ? rawBasePriceObj.gstPercent : (productData?.gstPercent || 0);
+      const itemStock = rawBasePriceObj?.stock !== undefined ? rawBasePriceObj.stock : (productData?.stock || 0);
+      const itemVariantId = (basePriceObj && basePriceObj !== enrichedProduct) ? (basePriceObj._id || null) : null;
+
+      const commRule = productData ? findCategoryCommission(commissions, productData.categoryId, itemPackagingType, itemMeasurementBasis, shippingAddress?.pincode) : null;
+      const commType = commRule?.commissionType || rawBasePriceObj?.commissionType || enrichedProduct?.commissionType || 'flat';
+      const commVal = commRule ? commRule.commissionValue : (rawBasePriceObj?.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
+      const commUnit = commRule?.unit || itemMeasurementBasis;
 
       const breakdown = calculatePricingBreakdown({
         sellerUnitPrice: Number(rawPrice) || 0,
-        unit: productData?.unit || 'unit',
-        measurementUnit: productData?.measurementUnit || null,
+        sellerPrice: Number(rawPrice) || 0,
+        sellerPricePerBaseUnit: rawBasePriceObj?.sellerPricePerBaseUnit,
+        sellerPricePerProductUnit: rawBasePriceObj?.sellerPricePerProductUnit,
+        priceBasis: itemPriceBasis,
+        packagingType: itemPackagingType,
+        measurementBasis: itemMeasurementBasis,
+        unit: itemPackagingType,
+        measurementUnit: itemMeasurementBasis,
+        commissionUnit: commUnit,
         commissionType: commType,
         commissionValue: Number(commVal) || 0,
-        unitSize: targetUnitSize,
-        gstPercent: gstPercent,
+        unitSize: itemUnitSize,
+        gstPercent: itemGstPercent,
         quantity: item.quantity,
-        availableStock: productData ? (productData.stock || 0) : 0,
+        availableStock: itemStock,
         isB2B: targetUserRole === 'b2b'
       });
 
-      calculatedTotal += breakdown.finalCustomerPrice;
-      calculatedTotalWithoutCommissions += (breakdown.totalSellerPrice + breakdown.totalGst);
+      calculatedTotal += breakdown.finalCustomerAmount;
+      calculatedTotalWithoutCommissions += (breakdown.totalSellerAmount + breakdown.totalGst);
       totalGstCollected += breakdown.totalGst;
       totalCommissionCollected += breakdown.totalCommission;
 
       return {
+        // Section 9 Immutable Pricing Snapshot
         productId: pId,
+        variantId: itemVariantId,
         variantSize: targetSize,
         name: name || 'Unknown Product',
         quantity: item.quantity,
         orderedQuantity: item.quantity,
+        packagingType: breakdown.packagingType,
+        measurementBasis: breakdown.measurementBasis,
+        productUnitSize: breakdown.unitSize,
+        unitSize: breakdown.unitSize,
+        sellerPriceBasis: breakdown.sellerPriceBasis,
+        sellerPricePerBaseUnit: breakdown.sellerPricePerBaseUnit,
+        sellerPricePerPackage: breakdown.sellerPricePerPackage,
+        sellerPricePerProductUnit: breakdown.sellerPricePerProductUnit,
+        adminCommissionRate: breakdown.adminCommissionRate,
+        adminCommissionPerBaseUnit: breakdown.adminCommissionPerBaseUnit,
+        commissionMeasurementUnit: breakdown.commissionMeasurementUnit,
+        commissionPerPackage: breakdown.commissionPerPackage,
+        commissionPerProductUnit: breakdown.commissionPerProductUnit,
+        orderedQuantity: item.quantity,
+        totalMeasurementQuantity: breakdown.totalMeasurementQuantity,
+        totalProductWeight: breakdown.totalProductWeight,
+        totalSellerAmount: breakdown.totalSellerAmount,
+        totalSellerPrice: breakdown.totalSellerAmount,
+        totalCommission: breakdown.totalCommission,
+        subtotal: breakdown.subtotal,
+        gstRate: breakdown.gstRate,
+        gstPercent: breakdown.gstPercent,
+        gstAmount: breakdown.totalGst,
+        totalGst: breakdown.totalGst,
+        finalCustomerAmount: breakdown.finalCustomerAmount,
+        finalCustomerPrice: breakdown.finalCustomerAmount,
         price: breakdown.unitCustomerPrice,
         unitCustomerPrice: breakdown.unitCustomerPrice,
-        normalPrice: breakdown.sellerUnitPrice,
-        sellerUnitPrice: breakdown.sellerUnitPrice,
-        sellerPricePerBaseUnit: breakdown.sellerPricePerBaseUnit,
-        sellerPricePerProductUnit: breakdown.sellerPricePerProductUnit,
         customerUnitBasePrice: breakdown.customerUnitBasePrice,
-        adminCommissionPerBaseUnit: breakdown.adminCommissionPerBaseUnit,
-        commissionPerProductUnit: breakdown.commissionPerProductUnit,
+        normalPrice: breakdown.sellerPricePerProductUnit,
+        sellerUnitPrice: breakdown.sellerPricePerProductUnit,
         unitCommission: breakdown.commissionPerProductUnit,
-        totalCommission: breakdown.totalCommission,
-        unitSize: breakdown.unitSize,
-        unit: productData?.unit || 'pcs',
-        measurementUnit: breakdown.productMeasurementUnit || productData?.measurementUnit || null,
-        totalProductWeight: breakdown.totalProductWeight,
         commissionType: breakdown.commissionType,
-        commissionValue: usedCommissionRate !== null ? usedCommissionRate : breakdown.commissionRate,
-        commissionRate: usedCommissionRate !== null ? usedCommissionRate : breakdown.commissionRate,
-        commissionAmount: breakdown.unitCommission,
-        unitCommission: breakdown.unitCommission,
-        totalCommission: breakdown.totalCommission,
-        // Order-time size-based snapshot
-        sellingUnit: prodSellingUnit,
-        unitSize: prodUnitSize,
-        measurementUnit: prodMeasUnit,
-        totalMeasurement: calculatedTotalMeasurement,
-        commissionBasis: usedCommissionBasis,
-        totalSellerPrice: breakdown.totalSellerPrice,
-        finalCustomerPrice: breakdown.finalCustomerPrice,
+        commissionValue: breakdown.adminCommissionRate,
+        commissionRate: breakdown.adminCommissionRate,
+        commissionAmount: breakdown.commissionPerProductUnit,
         availableStock: breakdown.availableStock,
         stockTotalCommission: breakdown.stockTotalCommission,
-        gstPercent: breakdown.gstPercent,
-        gstAmount: breakdown.unitGst,
-        totalGst: breakdown.totalGst,
+        sellingUnit: breakdown.packagingType,
+        unit: breakdown.packagingType,
+        measurementUnit: breakdown.measurementBasis,
+        totalMeasurement: breakdown.totalMeasurementQuantity,
+        commissionBasis: breakdown.commissionMeasurementUnit,
         image: image,
         seller: sellerInfo,
         product: {
