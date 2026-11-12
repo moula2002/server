@@ -688,7 +688,7 @@ router.post('/', protect, async (req, res) => {
         }
       }
 
-      const commRule = productData ? findCategoryCommission(commissions, productData.categoryId, productData.unit, shippingAddress?.pincode) : null;
+      const commRule = productData ? findCategoryCommission(commissions, productData.categoryId, productData.unit, productData.measurementUnit, shippingAddress?.pincode) : null;
       const commType = commRule?.commissionType || basePriceObj?.commissionType || enrichedProduct?.commissionType || 'flat';
       const commVal = commRule ? commRule.commissionValue : (basePriceObj?.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
@@ -699,6 +699,8 @@ router.post('/', protect, async (req, res) => {
 
       const breakdown = calculatePricingBreakdown({
         sellerUnitPrice: Number(rawPrice) || 0,
+        unit: productData?.unit || 'unit',
+        measurementUnit: productData?.measurementUnit || null,
         commissionType: commType,
         commissionValue: Number(commVal) || 0,
         unitSize: targetUnitSize,
@@ -723,8 +725,16 @@ router.post('/', protect, async (req, res) => {
         unitCustomerPrice: breakdown.unitCustomerPrice,
         normalPrice: breakdown.sellerUnitPrice,
         sellerUnitPrice: breakdown.sellerUnitPrice,
+        sellerPricePerBaseUnit: breakdown.sellerPricePerBaseUnit,
+        sellerPricePerProductUnit: breakdown.sellerPricePerProductUnit,
+        customerUnitBasePrice: breakdown.customerUnitBasePrice,
+        adminCommissionPerBaseUnit: breakdown.adminCommissionPerBaseUnit,
+        commissionPerProductUnit: breakdown.commissionPerProductUnit,
+        unitCommission: breakdown.commissionPerProductUnit,
+        totalCommission: breakdown.totalCommission,
         unitSize: breakdown.unitSize,
         unit: productData?.unit || 'pcs',
+        measurementUnit: breakdown.productMeasurementUnit || productData?.measurementUnit || null,
         totalProductWeight: breakdown.totalProductWeight,
         commissionType: breakdown.commissionType,
         commissionValue: usedCommissionRate !== null ? usedCommissionRate : breakdown.commissionRate,
@@ -1874,7 +1884,7 @@ router.post('/admin/create', protect, async (req, res) => {
         }
       }
 
-      const commRule = findCategoryCommission(commissions, productData.categoryId, productData.unit, shippingAddress?.pincode);
+      const commRule = findCategoryCommission(commissions, productData.categoryId, productData.unit, productData.measurementUnit, shippingAddress?.pincode);
       const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
       const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
@@ -1888,6 +1898,8 @@ router.post('/admin/create', protect, async (req, res) => {
 
       const breakdown = calculatePricingBreakdown({
         sellerUnitPrice: Number(rawPrice) || 0,
+        unit: productData?.unit || 'unit',
+        measurementUnit: productData?.measurementUnit || null,
         commissionType: commType,
         commissionValue: Number(commVal) || 0,
         unitSize: targetUnitSize,
@@ -2151,7 +2163,7 @@ router.put('/admin/:id/items', protect, async (req, res) => {
           throw new Error(`Insufficient stock for product "${productData.name}"${targetSizeCheck ? ` (${targetSizeCheck})` : ''}. Available: ${stockInfo.stock}, Requested: ${item.quantity}`);
         }
 
-        const commRule = findCategoryCommission(commissions, productData.categoryId, productData.unit, order.shippingAddress?.pincode);
+        const commRule = findCategoryCommission(commissions, productData.categoryId, productData.unit, productData.measurementUnit, order.shippingAddress?.pincode);
         const commType = commRule?.commissionType || basePriceObj.commissionType || enrichedProduct?.commissionType || 'flat';
         const commVal = commRule ? commRule.commissionValue : (basePriceObj.commissionValue ?? enrichedProduct?.commissionValue ?? 0);
 
@@ -2165,6 +2177,8 @@ router.put('/admin/:id/items', protect, async (req, res) => {
 
         const breakdown = calculatePricingBreakdown({
           sellerUnitPrice: Number(rawPrice) || 0,
+          unit: productData?.unit || 'unit',
+          measurementUnit: productData?.measurementUnit || null,
           commissionType: commType,
           commissionValue: Number(commVal) || 0,
           unitSize: targetUnitSize,

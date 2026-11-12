@@ -161,6 +161,20 @@ async function applyCommissionToAllProducts(req) {
           sellerPrice: updated.sellerPrice,
           sellerUnitPrice: updated.sellerPrice,
           sellerB2bPrice: updated.sellerB2bPrice,
+          sellerPricePerBaseUnit: updated.sellerPricePerBaseUnit,
+          productMeasurementUnit: updated.productMeasurementUnit,
+          measurementUnit: updated.measurementUnit,
+          sellerPricePerProductUnit: updated.sellerPricePerProductUnit,
+          adminCommissionPerBaseUnit: updated.adminCommissionPerBaseUnit,
+          commissionPerProductUnit: updated.commissionPerProductUnit,
+          customerUnitBasePrice: updated.customerUnitBasePrice,
+          gstAmountPerProductUnit: updated.gstAmountPerProductUnit,
+          customerFinalPricePerProductUnit: updated.customerFinalPricePerProductUnit,
+          totalStockWeight: updated.totalStockWeight,
+          totalStockCommission: updated.totalStockCommission,
+          totalSellerStockValue: updated.totalSellerStockValue,
+          totalStockSubtotal: updated.totalStockSubtotal,
+          totalStockValuation: updated.totalStockValuation,
           commissionType: updated.commissionType,
           commissionValue: updated.commissionValue,
           commissionRate: updated.commissionValue,
@@ -706,6 +720,7 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
     const pricingPayload = processProductPricing({
       categoryId,
       unit: cleanUnit,
+      measurementUnit: req.body.measurementUnit || null,
       unitSize: req.body.unitSize !== undefined ? req.body.unitSize : 1,
       sellerPrice: req.body.sellerPrice || req.body.sellerB2bPrice || price,
       sellerB2bPrice: req.body.sellerB2bPrice || req.body.sellerPrice || b2bPrice || price,
@@ -742,6 +757,20 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       sellerPrice: pricingPayload.sellerPrice,
       sellerB2bPrice: pricingPayload.sellerB2bPrice,
       sellerUnitPrice: pricingPayload.sellerUnitPrice,
+      sellerPricePerBaseUnit: pricingPayload.sellerPricePerBaseUnit,
+      productMeasurementUnit: pricingPayload.productMeasurementUnit,
+      measurementUnit: pricingPayload.measurementUnit || req.body.measurementUnit || null,
+      sellerPricePerProductUnit: pricingPayload.sellerPricePerProductUnit,
+      adminCommissionPerBaseUnit: pricingPayload.adminCommissionPerBaseUnit,
+      commissionPerProductUnit: pricingPayload.commissionPerProductUnit,
+      customerUnitBasePrice: pricingPayload.customerUnitBasePrice,
+      gstAmountPerProductUnit: pricingPayload.gstAmountPerProductUnit,
+      customerFinalPricePerProductUnit: pricingPayload.customerFinalPricePerProductUnit,
+      totalStockWeight: pricingPayload.totalStockWeight,
+      totalStockCommission: pricingPayload.totalStockCommission,
+      totalSellerStockValue: pricingPayload.totalSellerStockValue,
+      totalStockSubtotal: pricingPayload.totalStockSubtotal,
+      totalStockValuation: pricingPayload.totalStockValuation,
       commissionType: pricingPayload.commissionType,
       commissionValue: pricingPayload.commissionValue,
       commissionRate: pricingPayload.commissionRate,
@@ -1318,6 +1347,9 @@ router.put('/:id', protect, async (req, res) => {
     if (req.body.unitSize === undefined && existingProd.unitSize) {
       req.body.unitSize = existingProd.unitSize;
     }
+    if (req.body.measurementUnit === undefined && existingProd.measurementUnit) {
+      req.body.measurementUnit = existingProd.measurementUnit;
+    }
     const updatedPayload = processProductPricing(req.body, comms);
     if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
       updatedPayload.subCategoryId = null;
@@ -1327,6 +1359,9 @@ router.put('/:id', protect, async (req, res) => {
     }
     if (req.body.unit) {
       updatedPayload.unit = req.body.unit;
+    }
+    if (req.body.measurementUnit !== undefined) {
+      updatedPayload.measurementUnit = req.body.measurementUnit;
     }
     if (req.body.unitSize !== undefined) {
       updatedPayload.unitSize = req.body.unitSize;

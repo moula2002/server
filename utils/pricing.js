@@ -82,7 +82,7 @@ function convertMeasurement(amount, fromUnit, toUnit) {
   if (f === 'ltr' && t === 'ml') return num * 1000;
   if (f === 'ml' && t === 'ltr') return num / 1000;
 
-  // Incompatible (e.g. kg to ltr or custom units)
+  // Incompatible (e.g. kg to ltr or unmapped custom units)
   return null;
 }
 
@@ -97,31 +97,118 @@ function getUnitConversionFactor(fromUnit, toUnit) {
   return converted !== null ? converted : 1;
 }
 
+const BASE_MEASUREMENT_UNITS = ['kg', 'g', 'ton', 'ltr', 'ml', 'pcs'];
+const PACKAGING_UNITS = ['bag', 'tin', 'box', 'can', 'drum', 'bottle', 'jar', 'bunch', 'custom'];
+
+/**
+ * Resolve product packaging and measurement basis.
+ * E.g., for 1 Bag of Rice (30 KG):
+ * packagingUnit = 'bag', measurementUnit = 'kg', unitSize = 30
+ */
+function resolveMeasurementBasis(unit, measurementUnit, unitSizeStr) {
+  const normUnit = normalizeUnit(unit);
+  let normMeas = normalizeUnit(measurementUnit);
+
+  if (!normMeas) {
+    if (BASE_MEASUREMENT_UNITS.includes(normUnit)) {
+      normMeas = normUnit;
+    } else {
+      const match = String(unitSizeStr || '').match(/[0-9.]*\s*(kg|g|ltr|pcs|gm|ltrs|kgs|ton|ml)/i);
+      if (match && match[1]) {
+        normMeas = normalizeUnit(match[1]);
+      }
+    }
+  }
+
+  const isPackaging = PACKAGING_UNITS.includes(normUnit) || !BASE_MEASUREMENT_UNITS.includes(normUnit);
+
+  return {
+    packagingUnit: normUnit || 'unit',
+    measurementUnit: normMeas || (isPackaging ? null : normUnit),
+    isPackagingUnit: isPackaging
+  };
+}
+
+/**
+ * Validates compatibility between product measurement/packaging unit and commission rule unit.
+ * Implements Section 6 custom unit handling.
+ */
+function checkCommissionCompatibility(productBasis, commissionRuleOrUnit) {
+  if (!commissionRuleOrUnit) return { isCompatible: true, conversionFactor: 1 };
+  
+  const commUnit = typeof commissionRuleOrUnit === 'object' 
+    ? normalizeUnit(commissionRuleOrUnit.unit) 
+    : normalizeUnit(commissionRuleOrUnit);
+
+  const commType = typeof commissionRuleOrUnit === 'object' ? commissionRuleOrUnit.commissionType : 'flat';
+  if (commType === 'percentage') {
+    return { isCompatible: true, conversionFactor: 1, matchedOn: 'percentage' };
+  }
+
+  if (!commUnit) return { isCompatible: true, conversionFactor: 1 };
+
+  const { packagingUnit, measurementUnit, isPackagingUnit } = productBasis;
+
+  // 1. Direct unit match with packaging unit (e.g. Rule is Per Tin, product packaging is Tin)
+  if (commUnit === packagingUnit) {
+    return { isCompatible: true, conversionFactor: 1, matchedOn: 'packaging' };
+  }
+
+  // 2. Direct unit match with measurement basis (e.g. Rule is Per KG, product measurement basis is KG)
+  if (measurementUnit && commUnit === measurementUnit) {
+    return { isCompatible: true, conversionFactor: 1, matchedOn: 'measurement' };
+  }
+
+  // 3. Compatible measurement unit conversion (e.g. Rule is Per Ton, product measurement basis is KG)
+  if (measurementUnit) {
+    const factor = convertMeasurement(1, measurementUnit, commUnit);
+    if (factor !== null) {
+      return { isCompatible: true, conversionFactor: factor, matchedOn: 'conversion' };
+    }
+  }
+
+  // 4. Missing measurement basis for packaging / custom unit (e.g. Tin without KG or LTR)
+  if (isPackagingUnit && !measurementUnit) {
+    return {
+      isCompatible: false,
+      conversionFactor: 0,
+      validationMessage: `Measurement basis is missing for '${packagingUnit}'. Please specify product measurement unit (e.g. KG or Litre) to calculate commission.`
+    };
+  }
+
+  // 5. Incompatible measurement units (e.g. Product in KG vs Commission in Litre)
+  return {
+    isCompatible: false,
+    conversionFactor: 0,
+    validationMessage: `Incompatible measurement units: product is in '${measurementUnit || packagingUnit}', but category commission is configured in '${commUnit}'.`
+  };
+}
+
 /**
  * Finds the applicable commission rule from category commissions array.
  * Priority:
- * 1. Category ID + Matching Unit + Matching Pincode
- * 2. Category ID + Matching Unit + Pincode 'All'
- * 3. Category ID + Matching Unit (any pincode)
- * 4. Category ID + Matching Pincode
- * 5. Category ID + Pincode 'All'
- * 6. Category ID (fallback for any unit / pincode)
+ * 1. Category ID + Matching Packaging Unit + Matching Pincode
+ * 2. Category ID + Matching Measurement Unit + Matching Pincode
+ * 3. Category ID + Matching Unit + Pincode 'All'
+ * 4. Category ID + Matching Measurement Unit + Pincode 'All'
+ * 5. Category ID + Compatible Unit Conversion (e.g. ton <-> kg)
+ * 6. Category ID Fallback
  */
-function findCategoryCommission(commissions, categoryId, unit, pincode = null) {
+function findCategoryCommission(commissions, categoryId, unit, measurementUnit = null, pincode = null) {
   if (!commissions || !Array.isArray(commissions) || commissions.length === 0) return null;
   const targetCatId = getCatIdStr(categoryId);
   if (!targetCatId) return null;
 
   const targetUnit = normalizeUnit(unit);
+  const targetMeasUnit = normalizeUnit(measurementUnit);
   const targetPincode = (pincode || '').toString().trim().toLowerCase();
 
   const catComms = commissions.filter(c => getCatIdStr(c.categoryId) === targetCatId);
   if (catComms.length === 0) return null;
 
-  // Extract possible unit from string (e.g. "20kg", "30kgs") if targetUnit is empty or "pcs"
   let extractedUnit = targetUnit;
-  if (!extractedUnit || extractedUnit === 'pcs' || extractedUnit === 'bag') {
-    const match = (unit || '').toString().match(/[0-9.]*\s*(kg|g|ltr|pcs|gm|ltrs|kgs|ton|tin|bag)/i);
+  if (!extractedUnit || extractedUnit === 'pcs' || extractedUnit === 'bag' || extractedUnit === 'tin') {
+    const match = (unit || '').toString().match(/[0-9.]*\s*(kg|g|ltr|pcs|gm|ltrs|kgs|ton|tin|bag|ml)/i);
     if (match && match[1]) {
       extractedUnit = normalizeUnit(match[1]);
     }
@@ -135,15 +222,24 @@ function findCategoryCommission(commissions, categoryId, unit, pincode = null) {
     const cPin = (c.pincode || 'all').toString().trim().toLowerCase();
 
     const isExactUnit = targetUnit && cUnit === targetUnit;
+    const isMeasMatch = targetMeasUnit && cUnit === targetMeasUnit;
     const isExtractedUnit = extractedUnit && cUnit === extractedUnit;
-    const isUnitMatch = isExactUnit || isExtractedUnit;
+    const isConvertible = (targetMeasUnit || extractedUnit) && convertMeasurement(1, (targetMeasUnit || extractedUnit), cUnit) !== null;
+
+    const isUnitMatch = isExactUnit || isMeasMatch || isExtractedUnit || isConvertible;
 
     const isPinMatch = targetPincode && targetPincode !== 'all' && cPin === targetPincode;
     const isPinAll = !c.pincode || cPin === 'all';
 
     let score = 0;
-    if (isUnitMatch && isPinMatch) score = 100;
-    else if (isUnitMatch && isPinAll) score = 80;
+    if (isExactUnit && isPinMatch) score = 120;
+    else if (isExactUnit && isPinAll) score = 100;
+    else if (isMeasMatch && isPinMatch) score = 95;
+    else if (isMeasMatch && isPinAll) score = 90;
+    else if (isExtractedUnit && isPinMatch) score = 85;
+    else if (isExtractedUnit && isPinAll) score = 80;
+    else if (isConvertible && isPinMatch) score = 75;
+    else if (isConvertible && isPinAll) score = 70;
     else if (isUnitMatch) score = 60;
     else if (isPinMatch) score = 40;
     else if (isPinAll) score = 20;
@@ -160,26 +256,74 @@ function findCategoryCommission(commissions, categoryId, unit, pincode = null) {
 
 /**
  * Calculate customer price per unit given base seller price, commission type, commission value, and unit size.
- * Formula:
+ * Formula (Sections 2, 3, 4, 6):
  * - Step 1: Seller Price Per Product Unit = Seller Price Per Base Unit * Product Unit Size (e.g. 50 * 30 = ₹1,500)
- * - Step 2: Commission Per Product Unit = Admin Commission Per Base Unit * Product Unit Size (e.g. 2 * 30 = ₹60)
- * - Step 3: Customer Unit Base Price = Seller Price Per Product Unit + Commission Per Product Unit (1500 + 60 = ₹1,560)
+ * - Step 2: Commission Per Product Unit = Admin Commission Rate * Product Unit Size * ConversionFactor (e.g. 20 * 30 = ₹600)
+ * - Step 3: Customer Unit Base Price = Seller Price Per Product Unit + Commission Per Product Unit (1500 + 600 = ₹2,100)
  * - GST Amount Per Product Unit = Customer Unit Base Price * (GST% / 100)
  * - Customer Final Price Per Product Unit = Customer Unit Base Price + GST Amount
  */
-function calculateCustomerPrice(sellerPricePerBaseUnit, commissionType, commissionValue, unitSize = 1, gstPercent = 0, isGstInclusive = false) {
-  const basePrice = typeof sellerPricePerBaseUnit === 'number' ? sellerPricePerBaseUnit : (parseFloat(sellerPricePerBaseUnit) || 0);
+function calculateCustomerPrice(
+  arg1,
+  commissionType = 'flat',
+  commissionValue = 0,
+  unitSize = 1,
+  gstPercent = 0,
+  isGstInclusive = false,
+  extraOpts = {}
+) {
+  let basePrice = 0;
+  let cType = commissionType;
+  let cVal = commissionValue;
+  let uSize = unitSize;
+  let gstRate = gstPercent;
+  let isInclusive = isGstInclusive;
+  let unit = 'unit';
+  let measurementUnit = null;
+  let commissionRuleOrUnit = null;
+
+  if (typeof arg1 === 'object' && arg1 !== null) {
+    basePrice = arg1.sellerPricePerBaseUnit !== undefined ? arg1.sellerPricePerBaseUnit : (arg1.sellerPrice !== undefined ? arg1.sellerPrice : 0);
+    cType = arg1.commissionType || 'flat';
+    cVal = arg1.commissionValue !== undefined ? arg1.commissionValue : (arg1.commissionRate !== undefined ? arg1.commissionRate : 0);
+    uSize = arg1.unitSize !== undefined ? arg1.unitSize : 1;
+    gstRate = arg1.gstPercent !== undefined ? arg1.gstPercent : 0;
+    isInclusive = Boolean(arg1.isGstInclusive);
+    unit = arg1.unit || 'unit';
+    measurementUnit = arg1.measurementUnit || null;
+    commissionRuleOrUnit = arg1.commissionRule || arg1.commissionUnit || null;
+  } else {
+    basePrice = arg1;
+    unit = extraOpts.unit || 'unit';
+    measurementUnit = extraOpts.measurementUnit || null;
+    commissionRuleOrUnit = extraOpts.commissionRule || extraOpts.commissionUnit || null;
+  }
+
+  basePrice = typeof basePrice === 'number' ? basePrice : (parseFloat(basePrice) || 0);
+  uSize = extractUnitSize(uSize, 1);
+  cVal = typeof cVal === 'number' ? cVal : (parseFloat(cVal) || 0);
+  cType = cType === 'percentage' ? 'percentage' : 'flat';
+  gstRate = typeof gstRate === 'number' ? gstRate : (parseFloat(gstRate) || 0);
+
+  const productBasis = resolveMeasurementBasis(unit, measurementUnit, uSize);
+  const compatibility = checkCommissionCompatibility(productBasis, commissionRuleOrUnit);
+
   if (basePrice <= 0) {
     return {
       sellerPricePerBaseUnit: 0,
-      unitSize: 1,
+      productMeasurementUnit: productBasis.measurementUnit || productBasis.packagingUnit,
+      measurementUnit: productBasis.measurementUnit || productBasis.packagingUnit,
+      unit: productBasis.packagingUnit,
+      unitSize: uSize,
       sellerPricePerProductUnit: 0,
-      adminCommissionPerBaseUnit: 0,
+      adminCommissionPerBaseUnit: cVal,
       commissionPerProductUnit: 0,
       customerUnitBasePrice: 0,
-      gstPercent: 0,
+      gstPercent: gstRate,
       gstAmountPerProductUnit: 0,
       customerFinalPricePerProductUnit: 0,
+      isCompatible: compatibility.isCompatible,
+      validationMessage: compatibility.validationMessage || null,
       customerPrice: 0,
       sellerPrice: 0,
       commissionAmount: 0,
@@ -187,27 +331,23 @@ function calculateCustomerPrice(sellerPricePerBaseUnit, commissionType, commissi
     };
   }
 
-  const uSize = extractUnitSize(unitSize, 1);
   const sPricePerProductUnit = round2(basePrice * uSize);
-
-  const cVal = typeof commissionValue === 'number' ? commissionValue : (parseFloat(commissionValue) || 0);
-  const cType = commissionType === 'percentage' ? 'percentage' : 'flat';
 
   let commissionPerProductUnit = 0;
   if (cType === 'flat') {
-    commissionPerProductUnit = round2(cVal * uSize);
+    const factor = compatibility.isCompatible ? (compatibility.conversionFactor !== undefined ? compatibility.conversionFactor : 1) : 1;
+    commissionPerProductUnit = round2(cVal * factor * uSize);
   } else {
     commissionPerProductUnit = round2((sPricePerProductUnit * cVal) / 100);
   }
 
   const customerUnitBasePrice = round2(sPricePerProductUnit + commissionPerProductUnit);
 
-  const gstRate = typeof gstPercent === 'number' ? gstPercent : (parseFloat(gstPercent) || 0);
   let gstAmountPerProductUnit = 0;
   let customerFinalPricePerProductUnit = customerUnitBasePrice;
 
   if (gstRate > 0) {
-    if (isGstInclusive) {
+    if (isInclusive) {
       const baseBeforeTax = customerUnitBasePrice / (1 + gstRate / 100);
       gstAmountPerProductUnit = round2(customerUnitBasePrice - baseBeforeTax);
       customerFinalPricePerProductUnit = customerUnitBasePrice;
@@ -218,7 +358,11 @@ function calculateCustomerPrice(sellerPricePerBaseUnit, commissionType, commissi
   }
 
   return {
+    // 10 Breakdown Items (Section 5)
     sellerPricePerBaseUnit: basePrice,
+    productMeasurementUnit: productBasis.measurementUnit || productBasis.packagingUnit,
+    measurementUnit: productBasis.measurementUnit || productBasis.packagingUnit,
+    unit: productBasis.packagingUnit,
     unitSize: uSize,
     sellerPricePerProductUnit: sPricePerProductUnit,
     adminCommissionPerBaseUnit: cVal,
@@ -227,6 +371,10 @@ function calculateCustomerPrice(sellerPricePerBaseUnit, commissionType, commissi
     gstPercent: gstRate,
     gstAmountPerProductUnit,
     customerFinalPricePerProductUnit,
+
+    // Validation & Custom Unit status (Section 6)
+    isCompatible: compatibility.isCompatible,
+    validationMessage: compatibility.validationMessage || null,
 
     // Aliases for compatibility
     sellerPrice: sPricePerProductUnit,
@@ -244,9 +392,10 @@ function calculateCustomerPrice(sellerPricePerBaseUnit, commissionType, commissi
 function processProductPricing(payload, commissions = []) {
   const categoryId = payload.categoryId;
   const unit = payload.unit || 'pcs';
+  const measurementUnit = payload.measurementUnit || null;
   const unitSize = extractUnitSize(payload.unitSize, 1);
 
-  const adminRule = findCategoryCommission(commissions, categoryId, unit);
+  const adminRule = findCategoryCommission(commissions, categoryId, unit, measurementUnit);
 
   let commissionType = 'flat';
   let commissionValue = 0;
@@ -271,8 +420,9 @@ function processProductPricing(payload, commissions = []) {
         ? parseFloat(payload.sellerB2bPrice) || 0
         : (parseFloat(payload.price) || parseFloat(payload.b2bPrice) || 0));
 
-  const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize);
-  const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize);
+  const extraOpts = { unit, measurementUnit, commissionRule: adminRule };
+  const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
+  const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
 
   // Process B2C variants
   const processedB2c = (payload.b2c || []).map(v => {
@@ -280,7 +430,7 @@ function processProductPricing(payload, commissions = []) {
       ? parseFloat(v.sellerPrice) || 0
       : (parseFloat(v.price) || 0);
     const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
+    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
     return {
       ...v,
       unitSize: vUnitSize,
@@ -301,7 +451,7 @@ function processProductPricing(payload, commissions = []) {
       ? parseFloat(v.sellerPrice) || 0
       : (parseFloat(v.price) || 0);
     const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
+    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
 
     let processedTiers = v.priceTiers;
     if (Array.isArray(v.priceTiers)) {
@@ -309,7 +459,7 @@ function processProductPricing(payload, commissions = []) {
         const tSellerPrice = tier.sellerPrice !== undefined && tier.sellerPrice !== '' && tier.sellerPrice !== null
           ? parseFloat(tier.sellerPrice) || 0
           : (parseFloat(tier.price) || 0);
-        const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize);
+        const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
         return {
           ...tier,
           sellerPrice: tCalc.sellerPricePerProductUnit,
@@ -355,8 +505,8 @@ function processProductPricing(payload, commissions = []) {
   const gstRate = typeof payload.gstPercent === 'number' ? payload.gstPercent : (parseFloat(payload.gstPercent) || 0);
   const isGstInclusive = Boolean(payload.isGstInclusive);
 
-  const primaryPricing = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive);
-  const primaryB2bPricing = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive);
+  const primaryPricing = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive, extraOpts);
+  const primaryB2bPricing = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive, extraOpts);
 
   const finalB2bPrice = (customerB2bPrice === 0 && processedB2b.length > 0) ? processedB2b[0].price : (customerB2bPrice || customerPrice);
   const finalPrice = (customerPrice === 0 && processedB2c.length > 0) ? processedB2c[0].price : (customerPrice || customerB2bPrice || finalB2bPrice);
@@ -371,8 +521,11 @@ function processProductPricing(payload, commissions = []) {
 
   return {
     ...payload,
-    // 9-Step Breakdown Fields (Section 5)
+    // 10-Step Breakdown Fields (Section 5)
     sellerPricePerBaseUnit: primaryPricing.sellerPricePerBaseUnit,
+    productMeasurementUnit: primaryPricing.productMeasurementUnit,
+    measurementUnit: primaryPricing.measurementUnit,
+    unit: primaryPricing.unit,
     unitSize,
     sellerPricePerProductUnit: primaryPricing.sellerPricePerProductUnit,
     adminCommissionPerBaseUnit: primaryPricing.adminCommissionPerBaseUnit,
@@ -381,6 +534,8 @@ function processProductPricing(payload, commissions = []) {
     gstPercent: gstRate,
     gstAmountPerProductUnit: primaryPricing.gstAmountPerProductUnit,
     customerFinalPricePerProductUnit: primaryPricing.customerFinalPricePerProductUnit,
+    isCompatible: primaryPricing.isCompatible,
+    validationMessage: primaryPricing.validationMessage,
 
     // Separate Inventory Valuation (Section 6)
     availableStock,
@@ -424,8 +579,10 @@ function processProductPricing(payload, commissions = []) {
 function applyCommission(product, commissions = [], pincode = null) {
   if (!product) return product;
 
+  const unit = product.unit || 'pcs';
+  const measurementUnit = product.measurementUnit || null;
   const unitSize = extractUnitSize(product.unitSize, 1);
-  const adminRule = findCategoryCommission(commissions, product.categoryId, product.unit, pincode);
+  const adminRule = findCategoryCommission(commissions, product.categoryId, unit, measurementUnit, pincode);
 
   let commissionType = 'flat';
   let commissionValue = 0;
@@ -450,13 +607,14 @@ function applyCommission(product, commissions = [], pincode = null) {
         ? product.sellerB2bPrice
         : (product.price || product.b2bPrice || 0));
 
-  const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize);
-  const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize);
+  const extraOpts = { unit, measurementUnit, commissionRule: adminRule };
+  const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
+  const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
 
   const newB2c = (product.b2c || []).map(v => {
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
     const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
+    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
     return {
       ...v,
       unitSize: vUnitSize,
@@ -474,13 +632,13 @@ function applyCommission(product, commissions = [], pincode = null) {
   const newB2b = (product.b2b || []).map(v => {
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
     const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
+    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
 
     let newTiers = v.priceTiers;
     if (Array.isArray(v.priceTiers)) {
       newTiers = v.priceTiers.map(t => {
         const tSellerPrice = t.sellerPrice !== undefined && t.sellerPrice !== null ? t.sellerPrice : (t.price || 0);
-        const { customerPrice: tCustomerPrice, sellerPricePerProductUnit: tSellerPricePerProductUnit, sellerPricePerBaseUnit: tSellerPricePerBaseUnit } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize);
+        const { customerPrice: tCustomerPrice, sellerPricePerProductUnit: tSellerPricePerProductUnit, sellerPricePerBaseUnit: tSellerPricePerBaseUnit } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
         return {
           ...t,
           sellerPrice: tSellerPricePerProductUnit,
@@ -510,7 +668,7 @@ function applyCommission(product, commissions = [], pincode = null) {
   if (Array.isArray(product.priceTiers)) {
     newPriceTiers = product.priceTiers.map(t => {
       const tSellerPrice = t.sellerPrice !== undefined && t.sellerPrice !== null ? t.sellerPrice : (t.price || 0);
-      const { customerPrice: tCustomerPrice } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, unitSize);
+      const { customerPrice: tCustomerPrice } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
       return {
         ...t,
         sellerPrice: tSellerPrice,
@@ -526,8 +684,8 @@ function applyCommission(product, commissions = [], pincode = null) {
   const gstRate = typeof product.gstPercent === 'number' ? product.gstPercent : (parseFloat(product.gstPercent) || 0);
   const isGstInclusive = Boolean(product.isGstInclusive);
 
-  const primaryPricing = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive);
-  const primaryB2bPricing = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive);
+  const primaryPricing = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive, extraOpts);
+  const primaryB2bPricing = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive, extraOpts);
 
   // New Separate Inventory Valuation (Section 6)
   const totalStockWeight = round2(unitSize * Math.max(0, availableStock));
@@ -539,8 +697,11 @@ function applyCommission(product, commissions = [], pincode = null) {
 
   return {
     ...product,
-    // 9-Step Breakdown Fields (Section 5)
+    // 10-Step Breakdown Fields (Section 5)
     sellerPricePerBaseUnit: primaryPricing.sellerPricePerBaseUnit,
+    productMeasurementUnit: primaryPricing.productMeasurementUnit,
+    measurementUnit: primaryPricing.measurementUnit,
+    unit: primaryPricing.unit,
     unitSize,
     sellerPricePerProductUnit: primaryPricing.sellerPricePerProductUnit,
     adminCommissionPerBaseUnit: primaryPricing.adminCommissionPerBaseUnit,
@@ -549,6 +710,8 @@ function applyCommission(product, commissions = [], pincode = null) {
     gstPercent: gstRate,
     gstAmountPerProductUnit: primaryPricing.gstAmountPerProductUnit,
     customerFinalPricePerProductUnit: primaryPricing.customerFinalPricePerProductUnit,
+    isCompatible: primaryPricing.isCompatible,
+    validationMessage: primaryPricing.validationMessage,
 
     // Separate Inventory Valuation (Section 6)
     availableStock,
@@ -587,30 +750,24 @@ function applyCommission(product, commissions = [], pincode = null) {
 
 /**
  * Exact pricing breakdown calculation based on selected quantity, unit size, and commission rules.
- * Implements the exact 8-Step Formula from Section 3 & 4:
+ * Implements the exact centralized formula from Section 2, 3, 4, 5, 6:
  *
  * Step 1 – Seller Price Per Product Unit:
  *   Seller Price Per Bag = Seller Price Per Base Unit * Product Unit Size (e.g. 50 * 30 = ₹1,500)
  * Step 2 – Commission Per Product Unit:
- *   Commission Per Bag = Admin Commission Per Base Unit * Product Unit Size (e.g. 2 * 30 = ₹60)
+ *   Commission Per Bag = Admin Commission Rate * Product Unit Size * ConversionFactor (e.g. 20 * 30 = ₹600)
  * Step 3 – Customer Unit Base Price:
- *   Customer Unit Base Price = Seller Price Per Bag + Commission Per Bag (1500 + 60 = ₹1,560)
+ *   Customer Unit Base Price = Seller Price Per Bag + Commission Per Bag (1500 + 600 = ₹2,100)
  * Step 4 – Total Seller Amount:
  *   Total Seller Amount = Seller Price Per Bag * Ordered Quantity (1500 * 2 = ₹3,000)
  * Step 5 – Total Commission:
- *   Total Commission = Commission Per Bag * Ordered Quantity (60 * 2 = ₹120)
+ *   Total Commission = Commission Per Bag * Ordered Quantity (600 * 2 = ₹1,200)
  * Step 6 – Subtotal:
- *   Subtotal = Total Seller Amount + Total Commission (3000 + 120 = ₹3,120)
+ *   Subtotal = Total Seller Amount + Total Commission (3000 + 1200 = ₹4,200)
  * Step 7 – GST:
- *   GST = Subtotal * (GST Rate / 100) (3120 * 18% = ₹561.60)
+ *   GST = Subtotal * (GST Rate / 100)
  * Step 8 – Final Customer Amount:
- *   Final Customer Amount = Subtotal + GST (3120 + 561.60 = ₹3,681.60)
- *
- * Total Stock Commission & Valuation (Calculated separately for available stock):
- *   Total Stock Weight = Available Stock * Unit Size (e.g. 60 * 30 = 1,800 KG)
- *   Total Stock Commission = 1,800 * Commission Per Base Unit = ₹3,600
- *   Total Seller Stock Value = 60 * 1,500 = ₹90,000
- *   Total Stock Valuation = ₹93,600 (+ GST)
+ *   Final Customer Amount = Subtotal + GST
  */
 function calculatePricingBreakdown({
   sellerUnitPrice = 0,
@@ -619,6 +776,9 @@ function calculatePricingBreakdown({
   commissionValue = 0,
   commissionRate = undefined,
   commissionBasisRate = undefined,
+  unit = 'unit',
+  measurementUnit = null,
+  commissionUnit = null,
   unitSize = 1,
   gstPercent = 0,
   quantity = 1,
@@ -639,10 +799,13 @@ function calculatePricingBreakdown({
     baseSellerPrice = parseFloat(sellerUnitPrice) || 0;
   }
 
+  const productBasis = resolveMeasurementBasis(unit, measurementUnit, uSize);
+  const compatibility = checkCommissionCompatibility(productBasis, commissionUnit || unit);
+
   // Step 1: Seller Price Per Product Unit (e.g. 50 * 30 = 1500)
   const sellerPricePerProductUnit = round2(baseSellerPrice * uSize);
 
-  // Step 2: Commission Per Product Unit (e.g. 2 * 30 = 60)
+  // Step 2: Commission Per Product Unit (e.g. 20 * 30 = 600)
   const rawCommVal = commissionRate !== undefined ? commissionRate : commissionValue;
   const cVal = typeof rawCommVal === 'number' ? rawCommVal : (parseFloat(rawCommVal) || 0);
   const cType = commissionType === 'percentage' ? 'percentage' : 'flat';
@@ -651,21 +814,22 @@ function calculatePricingBreakdown({
   if (commissionBasisRate !== undefined && commissionBasisRate !== null) {
     commissionPerProductUnit = round2(Number(commissionBasisRate) || 0);
   } else if (cType === 'flat') {
-    commissionPerProductUnit = round2(cVal * uSize);
+    const factor = compatibility.isCompatible ? (compatibility.conversionFactor !== undefined ? compatibility.conversionFactor : 1) : 1;
+    commissionPerProductUnit = round2(cVal * factor * uSize);
   } else {
     commissionPerProductUnit = round2((sellerPricePerProductUnit * cVal) / 100);
   }
 
-  // Step 3: Customer Unit Base Price (1500 + 60 = 1560)
+  // Step 3: Customer Unit Base Price (1500 + 600 = 2100)
   const customerUnitBasePrice = round2(sellerPricePerProductUnit + commissionPerProductUnit);
 
   // Step 4: Total Seller Amount (1500 * 2 = 3000)
   const totalSellerAmount = round2(sellerPricePerProductUnit * qty);
 
-  // Step 5: Total Commission (60 * 2 = 120)
+  // Step 5: Total Commission (600 * 2 = 1200)
   const totalCommission = round2(commissionPerProductUnit * qty);
 
-  // Step 6: Subtotal (3000 + 120 = 3120)
+  // Step 6: Subtotal (3000 + 1200 = 4200)
   const subtotal = round2(totalSellerAmount + totalCommission);
 
   // Step 7: GST
@@ -699,8 +863,11 @@ function calculatePricingBreakdown({
   const totalStockValuation = isGstInclusive ? totalStockSubtotal : round2(totalStockSubtotal + totalStockGst);
 
   return {
-    // 9-step Product Breakdown items (Section 5)
+    // 10-step Product Breakdown items (Section 5)
     sellerPricePerBaseUnit: baseSellerPrice,
+    productMeasurementUnit: productBasis.measurementUnit || productBasis.packagingUnit,
+    measurementUnit: productBasis.measurementUnit || productBasis.packagingUnit,
+    unit: productBasis.packagingUnit,
     unitSize: uSize,
     sellerPricePerProductUnit,
     adminCommissionPerBaseUnit: cVal,
@@ -710,7 +877,11 @@ function calculatePricingBreakdown({
     gstAmountPerProductUnit: unitGst,
     customerFinalPricePerProductUnit: unitFinalCustomerPrice,
 
-    // Ordered Quantity Totals (Section 3 & 4)
+    // Custom unit validation status (Section 6)
+    isCompatible: compatibility.isCompatible,
+    validationMessage: compatibility.validationMessage || null,
+
+    // Ordered Quantity Totals (Section 2, 3, 4, 8)
     orderedQuantity: qty,
     quantity: qty,
     totalProductWeight,
@@ -754,6 +925,11 @@ module.exports = {
   normalizeUnit,
   extractUnitSize,
   convertMeasurement,
+  getUnitConversionFactor,
+  resolveMeasurementBasis,
+  checkCommissionCompatibility,
+  BASE_MEASUREMENT_UNITS,
+  PACKAGING_UNITS,
   calculatePricingBreakdown,
   findCategoryCommission,
   calculateCustomerPrice,
