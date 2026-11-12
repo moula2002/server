@@ -320,3 +320,4 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
 };
 
 module.exports = { generateSellerInvoicePDF };
+
