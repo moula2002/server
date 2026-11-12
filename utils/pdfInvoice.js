@@ -32,15 +32,18 @@ const prepareImageForPDF = async (buffer, mimeType) => {
 };
 
 /**
- * Generate a professional Seller Invoice PDF with embedded tax invoice images.
- * Keeps single-page layout when 1 image is attached (or no image).
- * When multiple images (or larger images) are present, cleanly uses additional pages.
+ * Generate a professional Seller Invoice PDF with sequential images on exact A4 pages:
+ * - 1 image -> exactly 1 page
+ * - 3 images -> exactly 3 pages
+ * - 5 images -> exactly 5 pages
+ * - Each image occupies its own properly sized page in exact sequential order (Image 1 -> Page 1, Image 2 -> Page 2...).
+ * - Uses object-fit contain logic without stretching, distortion, or unwanted empty pages.
  *
  * @param {Object} options
  * @param {Object} options.invoice - Invoice document/object
  * @param {Object} options.seller - Seller object
  * @param {Array} options.orders - Array of delivered orders in range
- * @param {Buffer|null} options.imageBuffer - Primary image buffer (legacy/fallback)
+ * @param {Buffer|null} options.imageBuffer - Primary image buffer (fallback)
  * @param {string|null} options.imageMimeType - MIME type of the uploaded image
  * @param {Array} options.images - Array of { data: Buffer, mimeType: String, filename: String }
  * @returns {Promise<Buffer>}
@@ -55,7 +58,7 @@ const generateSellerInvoicePDF = async ({
 }) => {
   return new Promise(async (resolve, reject) => {
     try {
-      // Consolidate images: if images array is provided, use it; else fallback to single imageBuffer
+      // 1. Consolidate and preserve exact upload order of images
       const imageList = [];
       if (Array.isArray(images) && images.length > 0) {
         images.forEach(img => {
@@ -76,7 +79,7 @@ const generateSellerInvoicePDF = async ({
         });
       }
 
-      // Pre-process all images (convert WebP if needed)
+      // 2. Pre-process images (WebP to PNG conversion if needed)
       const processedImages = [];
       for (const item of imageList) {
         try {
@@ -92,6 +95,10 @@ const generateSellerInvoicePDF = async ({
         }
       }
 
+      // Total pages = max(1, processedImages.length)
+      const totalPages = Math.max(1, processedImages.length);
+
+      // Create PDFKit document with bottom margin 0 to eliminate auto-paging overflow
       const doc = new PDFDocument({
         margin: 24,
         size: 'A4',
@@ -117,7 +124,7 @@ const generateSellerInvoicePDF = async ({
         day: '2-digit', month: 'short', year: 'numeric'
       });
 
-      // Color Palette
+      // Colors
       const primaryColor = '#1e3a8a';   // Deep navy blue
       const secondaryColor = '#0f172a'; // Slate dark
       const mutedColor = '#64748b';     // Muted grey
@@ -128,13 +135,16 @@ const generateSellerInvoicePDF = async ({
       const PAGE_LEFT = 24;
       const PAGE_RIGHT = 571;
       const CONTENT_WIDTH = PAGE_RIGHT - PAGE_LEFT; // 547pt
+      const FOOTER_LINE_Y = 800;
+      const FOOTER_TEXT_Y = 806;
 
       // ==========================================
-      // 1. HEADER SECTION (Logo & Title)
+      // PAGE 1: INVOICE DETAILS + IMAGE 1 (or placeholder)
       // ==========================================
+
+      // 1. Header
       const logoPath = path.join(__dirname, '../logo.png');
       const hasLogo = fs.existsSync(logoPath);
-
       if (hasLogo) {
         try {
           doc.image(logoPath, PAGE_LEFT, 24, { fit: [100, 36] });
@@ -145,20 +155,14 @@ const generateSellerInvoicePDF = async ({
         doc.fontSize(18).font('Helvetica-Bold').fillColor(primaryColor).text('ZUDO', PAGE_LEFT, 24, { lineBreak: false });
       }
 
-      // Title & metadata on right
       doc.fontSize(18).font('Helvetica-Bold').fillColor(primaryColor).text('SELLER INVOICE', 300, 20, { align: 'right', width: 271, lineBreak: false });
       doc.fontSize(10).font('Helvetica-Bold').fillColor(secondaryColor).text(`INVOICE #${invoiceNumStr}`, 300, 42, { align: 'right', width: 271, lineBreak: false });
       doc.fontSize(8).font('Helvetica').fillColor(mutedColor).text(`Generated: ${generatedDateStr}`, 300, 56, { align: 'right', width: 271, lineBreak: false });
 
-      // Separator line
       doc.strokeColor(borderColor).lineWidth(1).moveTo(PAGE_LEFT, 72).lineTo(PAGE_RIGHT, 72).stroke();
 
-      // ==========================================
-      // 2. COMPANY & SELLER DETAILS (2 COLUMNS)
-      // ==========================================
+      // 2. Company & Seller Details
       const infoY = 78;
-      
-      // LEFT COLUMN: Platform Info
       doc.fontSize(8).font('Helvetica-Bold').fillColor(primaryColor).text('FROM (PLATFORM):', PAGE_LEFT, infoY, { lineBreak: false });
       doc.font('Helvetica-Bold').fontSize(9).fillColor(secondaryColor).text('SNB TRADING.CO (ZUDO PLATFORM)', PAGE_LEFT, infoY + 11, { lineBreak: false });
       doc.font('Helvetica').fontSize(7.5).fillColor(mutedColor);
@@ -166,7 +170,6 @@ const generateSellerInvoicePDF = async ({
       doc.font('Helvetica-Bold').fillColor(secondaryColor).text('GSTIN: ', PAGE_LEFT, infoY + 32, { continued: true, lineBreak: false });
       doc.font('Helvetica').fillColor(mutedColor).text('29BQHPG3242G1ZYNO', { lineBreak: false });
 
-      // RIGHT COLUMN: Seller Info
       const col2Left = 320;
       doc.fontSize(8).font('Helvetica-Bold').fillColor(primaryColor).text('BILL TO (SELLER):', col2Left, infoY, { lineBreak: false });
       doc.font('Helvetica-Bold').fontSize(9).fillColor(secondaryColor).text(sellerBusiness, col2Left, infoY + 11, { width: 251, lineBreak: false });
@@ -185,9 +188,7 @@ const generateSellerInvoicePDF = async ({
       }
       doc.text(sellerSubStr, col2Left, infoY + 32, { width: 251, lineBreak: false });
 
-      // ==========================================
-      // 3. INVOICE META STRIP
-      // ==========================================
+      // 3. Invoice Meta Strip
       const metaBoxY = 126;
       const metaBoxHeight = 30;
       doc.roundedRect(PAGE_LEFT, metaBoxY, CONTENT_WIDTH, metaBoxHeight, 4).fillAndStroke(lightBg, borderColor);
@@ -208,9 +209,7 @@ const generateSellerInvoicePDF = async ({
         ).text(item.val, xPos, metaBoxY + 16, { lineBreak: false });
       });
 
-      // ==========================================
-      // 4. ORDER BREAKDOWN & COMMISSION TABLE
-      // ==========================================
+      // 4. Order Breakdown Table
       const tableStartY = 163;
       doc.y = tableStartY;
       doc.font('Helvetica-Bold').fontSize(9.5).fillColor(secondaryColor).text('Order Breakdown & Commission Details', PAGE_LEFT, tableStartY, { lineBreak: false });
@@ -223,7 +222,6 @@ const generateSellerInvoicePDF = async ({
         const orderDateStr = new Date(order.createdAt || Date.now()).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
         const customerName = order.userId?.name || 'Customer';
 
-        // Filter seller's specific items
         const sellerItems = (order.items || []).filter(item => {
           const mSellerId = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerIdStr;
           const mProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerIdStr;
@@ -269,7 +267,7 @@ const generateSellerInvoicePDF = async ({
         tableRows.push(['1', `#${invoiceNumStr}`, startDateStr, 'Bulk Delivery', 'Delivered Batch Items', `Rs. ${Number(invoice.totalAmount || 0).toFixed(2)}`, `Rs. ${Number(invoice.netAmount || invoice.totalAmount || 0).toFixed(2)}`]);
       }
 
-      // Keep max rows bounded so table doesn't crowd page 1
+      // Bound rows to 5 so summary and image fit perfectly on page 1
       const maxDisplayRows = 5;
       let displayRows = tableRows;
       let extraOrdersCount = 0;
@@ -315,26 +313,22 @@ const generateSellerInvoicePDF = async ({
         doc.y += 10;
       }
 
-      // ==========================================
-      // 5. PAYMENT SUMMARY & TERMS (SIDE-BY-SIDE)
-      // ==========================================
+      // 5. Payment Summary & Terms (Side-by-Side)
       const summaryY = Math.max(doc.y + 8, 255);
-      const summaryCardHeight = 58;
+      const summaryCardHeight = 56;
 
-      // Left Box: Terms & Conditions
       const termsWidth = 270;
       doc.roundedRect(PAGE_LEFT, summaryY, termsWidth, summaryCardHeight, 4).fillAndStroke(lightBg, borderColor);
-      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(secondaryColor).text('Terms & Conditions:', PAGE_LEFT + 8, summaryY + 7, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(secondaryColor).text('Terms & Conditions:', PAGE_LEFT + 8, summaryY + 6, { lineBreak: false });
       doc.font('Helvetica').fontSize(6.5).fillColor(mutedColor).text(
         '1. Reflects verified deliveries and agreed wholesale seller payout.\n' +
         '2. Payments cleared sequentially per platform settlement schedule.\n' +
         '3. For tax & invoice discrepancies, email support@snbtradingco.in.',
         PAGE_LEFT + 8,
-        summaryY + 18,
-        { width: termsWidth - 16, lineGap: 2, lineBreak: false }
+        summaryY + 17,
+        { width: termsWidth - 16, lineGap: 1.5, lineBreak: false }
       );
 
-      // Right Box: Payment Summary Totals
       const sumWidth = 265;
       const sumX = PAGE_RIGHT - sumWidth;
       doc.roundedRect(sumX, summaryY, sumWidth, summaryCardHeight, 4).fillAndStroke(lightBg, borderColor);
@@ -342,94 +336,35 @@ const generateSellerInvoicePDF = async ({
       const totAmount = Number(invoice.totalAmount || 0);
       const totNet = Number(invoice.netAmount || totAmount);
 
-      doc.font('Helvetica').fontSize(7.5).fillColor(mutedColor).text('Total Order Amount:', sumX + 8, summaryY + 10, { lineBreak: false });
-      doc.font('Helvetica-Bold').fontSize(8).fillColor(secondaryColor).text(`Rs. ${totAmount.toFixed(2)}`, sumX + 130, summaryY + 10, { align: 'right', width: sumWidth - 140, lineBreak: false });
+      doc.font('Helvetica').fontSize(7.5).fillColor(mutedColor).text('Total Order Amount:', sumX + 8, summaryY + 8, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(secondaryColor).text(`Rs. ${totAmount.toFixed(2)}`, sumX + 130, summaryY + 8, { align: 'right', width: sumWidth - 140, lineBreak: false });
 
-      doc.strokeColor(borderColor).lineWidth(0.6).moveTo(sumX + 8, summaryY + 26).lineTo(sumX + sumWidth - 8, summaryY + 26).stroke();
+      doc.strokeColor(borderColor).lineWidth(0.6).moveTo(sumX + 8, summaryY + 24).lineTo(sumX + sumWidth - 8, summaryY + 24).stroke();
 
-      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(successColor).text('Net Payout to Seller:', sumX + 8, summaryY + 35, { lineBreak: false });
-      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(successColor).text(`Rs. ${totNet.toFixed(2)}`, sumX + 110, summaryY + 34, { align: 'right', width: sumWidth - 120, lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(successColor).text('Net Payout to Seller:', sumX + 8, summaryY + 33, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(successColor).text(`Rs. ${totNet.toFixed(2)}`, sumX + 110, summaryY + 32, { align: 'right', width: sumWidth - 120, lineBreak: false });
 
-      // ==========================================
-      // 6. SELLER UPLOADED TAX INVOICE IMAGES
-      // ==========================================
-      const footerY = 818;
-      const imageCount = processedImages.length;
+      // 6. Page 1 Image Section (Image 1)
+      const imageSectionTop = summaryY + summaryCardHeight + 8;
+      const availableImageAreaHeight = FOOTER_LINE_Y - imageSectionTop - 24;
 
-      if (imageCount <= 1) {
-        // Single page layout: Place image 1 (or placeholder) neatly on page 1
-        const imageSectionTop = summaryY + summaryCardHeight + 8;
-        const availableImageAreaHeight = footerY - imageSectionTop - 20;
+      const page1Label = processedImages.length > 1
+        ? `Seller Uploaded Tax Invoice Copy (1 of ${totalPages})`
+        : 'Seller Uploaded Tax Invoice Copy';
 
-        doc.font('Helvetica-Bold').fontSize(8.5).fillColor(primaryColor).text(
-          'Seller Uploaded Tax Invoice Copy',
-          PAGE_LEFT,
-          imageSectionTop,
-          { lineBreak: false }
-        );
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(primaryColor).text(
+        page1Label,
+        PAGE_LEFT,
+        imageSectionTop,
+        { lineBreak: false }
+      );
 
-        const imgBoxY = imageSectionTop + 14;
-        const imgBoxHeight = Math.max(availableImageAreaHeight, 180);
+      const imgBoxY = imageSectionTop + 14;
+      const imgBoxHeight = Math.max(availableImageAreaHeight, 180);
 
-        doc.roundedRect(PAGE_LEFT, imgBoxY, CONTENT_WIDTH, imgBoxHeight, 4).fillAndStroke('#ffffff', borderColor);
+      doc.roundedRect(PAGE_LEFT, imgBoxY, CONTENT_WIDTH, imgBoxHeight, 4).fillAndStroke('#ffffff', borderColor);
 
-        if (imageCount === 1) {
-          try {
-            doc.image(processedImages[0].buffer, PAGE_LEFT + 6, imgBoxY + 6, {
-              fit: [CONTENT_WIDTH - 12, imgBoxHeight - 12],
-              align: 'center',
-              valign: 'center'
-            });
-          } catch (imgErr) {
-            console.error('Error embedding image in PDF:', imgErr.message);
-            doc.font('Helvetica-Oblique').fontSize(8).fillColor('#ef4444').text(
-              `Unable to render the uploaded invoice image: ${imgErr.message}`,
-              PAGE_LEFT + 12,
-              imgBoxY + 20,
-              { lineBreak: false }
-            );
-          }
-        } else {
-          doc.font('Helvetica-Oblique').fontSize(8).fillColor(mutedColor).text(
-            'No external tax invoice image was attached to this settlement.',
-            PAGE_LEFT,
-            imgBoxY + (imgBoxHeight / 2) - 5,
-            { align: 'center', width: CONTENT_WIDTH, lineBreak: false }
-          );
-        }
-
-        // Page 1 Footer
-        doc.strokeColor(borderColor).lineWidth(0.5).moveTo(PAGE_LEFT, footerY).lineTo(PAGE_RIGHT, footerY).stroke();
-        doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
-          `SNB TRADING.CO (ZUDO PLATFORM)  •  Invoice #${invoiceNumStr}  •  Settlement Verification`,
-          PAGE_LEFT,
-          footerY + 6,
-          { lineBreak: false }
-        );
-        doc.text(
-          'Page 1 of 1',
-          300,
-          footerY + 6,
-          { align: 'right', width: 271, lineBreak: false }
-        );
-      } else {
-        // Multi-image scenario (2-5 images):
-        // Image 1 sits on Page 1 (with indicator of more images on subsequent pages)
-        const imageSectionTop = summaryY + summaryCardHeight + 8;
-        const availableImageAreaHeight = footerY - imageSectionTop - 20;
-
-        doc.font('Helvetica-Bold').fontSize(8.5).fillColor(primaryColor).text(
-          `Seller Uploaded Tax Invoice Copy (1 of ${imageCount})`,
-          PAGE_LEFT,
-          imageSectionTop,
-          { lineBreak: false }
-        );
-
-        const imgBoxY = imageSectionTop + 14;
-        const imgBoxHeight = Math.max(availableImageAreaHeight, 180);
-
-        doc.roundedRect(PAGE_LEFT, imgBoxY, CONTENT_WIDTH, imgBoxHeight, 4).fillAndStroke('#ffffff', borderColor);
-
+      if (processedImages.length > 0) {
         try {
           doc.image(processedImages[0].buffer, PAGE_LEFT + 6, imgBoxY + 6, {
             fit: [CONTENT_WIDTH - 12, imgBoxHeight - 12],
@@ -444,77 +379,84 @@ const generateSellerInvoicePDF = async ({
             { lineBreak: false }
           );
         }
+      } else {
+        doc.font('Helvetica-Oblique').fontSize(8).fillColor(mutedColor).text(
+          'No external tax invoice image was attached to this settlement.',
+          PAGE_LEFT,
+          imgBoxY + (imgBoxHeight / 2) - 5,
+          { align: 'center', width: CONTENT_WIDTH, lineBreak: false }
+        );
+      }
 
-        // Page 1 Footer
-        const totalPages = imageCount; // 1 page for invoice summary + image 1, then (imageCount - 1) pages for remaining images
-        doc.strokeColor(borderColor).lineWidth(0.5).moveTo(PAGE_LEFT, footerY).lineTo(PAGE_RIGHT, footerY).stroke();
+      // Page 1 Footer (Carefully positioned to stay within margins)
+      doc.strokeColor(borderColor).lineWidth(0.5).moveTo(PAGE_LEFT, FOOTER_LINE_Y).lineTo(PAGE_RIGHT, FOOTER_LINE_Y).stroke();
+      doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
+        `SNB TRADING.CO (ZUDO PLATFORM)  •  Invoice #${invoiceNumStr}  •  Settlement Verification`,
+        PAGE_LEFT,
+        FOOTER_TEXT_Y,
+        { lineBreak: false }
+      );
+      doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
+        `Page 1 of ${totalPages}`,
+        300,
+        FOOTER_TEXT_Y,
+        { align: 'right', width: 271, lineBreak: false }
+      );
+
+      // ==========================================
+      // SUBSEQUENT PAGES: IMAGES 2..N (Exact 1 page per image)
+      // ==========================================
+      for (let idx = 1; idx < processedImages.length; idx++) {
+        doc.addPage({ margin: 24, size: 'A4' });
+        const currPage = idx + 1;
+
+        // Header Strip on Image Page
+        doc.fontSize(12).font('Helvetica-Bold').fillColor(primaryColor).text('SELLER INVOICE - ATTACHED DOCUMENT', PAGE_LEFT, 24, { lineBreak: false });
+        doc.fontSize(9).font('Helvetica-Bold').fillColor(secondaryColor).text(`INVOICE #${invoiceNumStr}  •  Image ${currPage} of ${totalPages}`, 300, 26, { align: 'right', width: 271, lineBreak: false });
+        doc.strokeColor(borderColor).lineWidth(1).moveTo(PAGE_LEFT, 46).lineTo(PAGE_RIGHT, 46).stroke();
+
+        const imgMetaTitle = processedImages[idx].filename || `Supporting Document ${currPage}`;
+        doc.fontSize(9).font('Helvetica-Bold').fillColor(secondaryColor).text(
+          `Document #${currPage}: ${imgMetaTitle}`,
+          PAGE_LEFT,
+          56,
+          { lineBreak: false }
+        );
+
+        // Full Page Image Container (Calculated precisely to avoid pushing past bottom margin)
+        const fullImgY = 72;
+        const fullImgHeight = FOOTER_LINE_Y - fullImgY - 10;
+        doc.roundedRect(PAGE_LEFT, fullImgY, CONTENT_WIDTH, fullImgHeight, 4).fillAndStroke('#ffffff', borderColor);
+
+        try {
+          doc.image(processedImages[idx].buffer, PAGE_LEFT + 6, fullImgY + 6, {
+            fit: [CONTENT_WIDTH - 12, fullImgHeight - 12],
+            align: 'center',
+            valign: 'center'
+          });
+        } catch (imgErr) {
+          doc.font('Helvetica-Oblique').fontSize(8).fillColor('#ef4444').text(
+            `Unable to render image ${currPage}: ${imgErr.message}`,
+            PAGE_LEFT + 12,
+            fullImgY + 20,
+            { lineBreak: false }
+          );
+        }
+
+        // Page Footer
+        doc.strokeColor(borderColor).lineWidth(0.5).moveTo(PAGE_LEFT, FOOTER_LINE_Y).lineTo(PAGE_RIGHT, FOOTER_LINE_Y).stroke();
         doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
           `SNB TRADING.CO (ZUDO PLATFORM)  •  Invoice #${invoiceNumStr}  •  Settlement Verification`,
           PAGE_LEFT,
-          footerY + 6,
+          FOOTER_TEXT_Y,
           { lineBreak: false }
         );
-        doc.text(
-          `Page 1 of ${totalPages}`,
+        doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
+          `Page ${currPage} of ${totalPages}`,
           300,
-          footerY + 6,
+          FOOTER_TEXT_Y,
           { align: 'right', width: 271, lineBreak: false }
         );
-
-        // Additional Pages: One page per remaining image to ensure maximum legibility and never shrink excessively
-        for (let idx = 1; idx < imageCount; idx++) {
-          doc.addPage({ margin: 24, size: 'A4' });
-          const currPage = idx + 1;
-
-          // Header strip on image pages
-          doc.fontSize(12).font('Helvetica-Bold').fillColor(primaryColor).text('SELLER INVOICE - ATTACHED DOCUMENT', PAGE_LEFT, 24, { lineBreak: false });
-          doc.fontSize(9).font('Helvetica-Bold').fillColor(secondaryColor).text(`INVOICE #${invoiceNumStr}  •  Image ${currPage} of ${totalPages}`, 300, 26, { align: 'right', width: 271, lineBreak: false });
-          doc.strokeColor(borderColor).lineWidth(1).moveTo(PAGE_LEFT, 46).lineTo(PAGE_RIGHT, 46).stroke();
-
-          // Document title / filename label
-          const imgMetaTitle = processedImages[idx].filename || `Supporting Document ${idx + 1}`;
-          doc.fontSize(9).font('Helvetica-Bold').fillColor(secondaryColor).text(
-            `Document #${currPage}: ${imgMetaTitle}`,
-            PAGE_LEFT,
-            56,
-            { lineBreak: false }
-          );
-
-          // Full page image area
-          const fullImgY = 72;
-          const fullImgHeight = footerY - fullImgY - 14; // ~730pt height
-          doc.roundedRect(PAGE_LEFT, fullImgY, CONTENT_WIDTH, fullImgHeight, 4).fillAndStroke('#ffffff', borderColor);
-
-          try {
-            doc.image(processedImages[idx].buffer, PAGE_LEFT + 6, fullImgY + 6, {
-              fit: [CONTENT_WIDTH - 12, fullImgHeight - 12],
-              align: 'center',
-              valign: 'center'
-            });
-          } catch (imgErr) {
-            doc.font('Helvetica-Oblique').fontSize(8).fillColor('#ef4444').text(
-              `Unable to render image ${currPage}: ${imgErr.message}`,
-              PAGE_LEFT + 12,
-              fullImgY + 20,
-              { lineBreak: false }
-            );
-          }
-
-          // Page Footer
-          doc.strokeColor(borderColor).lineWidth(0.5).moveTo(PAGE_LEFT, footerY).lineTo(PAGE_RIGHT, footerY).stroke();
-          doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
-            `SNB TRADING.CO (ZUDO PLATFORM)  •  Invoice #${invoiceNumStr}  •  Settlement Verification`,
-            PAGE_LEFT,
-            footerY + 6,
-            { lineBreak: false }
-          );
-          doc.text(
-            `Page ${currPage} of ${totalPages}`,
-            300,
-            footerY + 6,
-            { align: 'right', width: 271, lineBreak: false }
-          );
-        }
       }
 
       doc.end();
