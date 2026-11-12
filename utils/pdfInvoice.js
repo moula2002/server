@@ -89,10 +89,9 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
       }
 
       // Title & metadata on right
-      doc.fontSize(18).font('Helvetica-Bold').fillColor(primaryColor).text('SELLER INVOICE', 300, 24, { align: 'right', width: 271, lineBreak: false });
-      doc.fontSize(9).font('Helvetica-Bold').fillColor(mutedColor).text('INVOICE #: ', 300, 46, { align: 'right', width: 271, continued: true, lineBreak: false });
-      doc.font('Helvetica-Bold').fillColor(secondaryColor).text(`${invoiceNumStr}`, { lineBreak: false });
-      doc.fontSize(8).font('Helvetica').fillColor(mutedColor).text(`Generated: ${generatedDateStr}`, 300, 58, { align: 'right', width: 271, lineBreak: false });
+      doc.fontSize(18).font('Helvetica-Bold').fillColor(primaryColor).text('SELLER INVOICE', 300, 20, { align: 'right', width: 271, lineBreak: false });
+      doc.fontSize(10).font('Helvetica-Bold').fillColor(secondaryColor).text(`INVOICE #${invoiceNumStr}`, 300, 42, { align: 'right', width: 271, lineBreak: false });
+      doc.fontSize(8).font('Helvetica').fillColor(mutedColor).text(`Generated: ${generatedDateStr}`, 300, 56, { align: 'right', width: 271, lineBreak: false });
 
       // Separator line
       doc.strokeColor(borderColor).lineWidth(1).moveTo(PAGE_LEFT, 72).lineTo(PAGE_RIGHT, 72).stroke();
@@ -202,16 +201,15 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
           String(serialNo++),
           `#${orderIdShort}`,
           orderDateStr,
-          customerName.length > 15 ? customerName.substring(0, 14) + '…' : customerName,
-          productDesc.length > 32 ? productDesc.substring(0, 30) + '…' : (productDesc || 'Order Items'),
+          customerName.length > 18 ? customerName.substring(0, 17) + '…' : customerName,
+          productDesc.length > 38 ? productDesc.substring(0, 36) + '…' : (productDesc || 'Order Items'),
           `Rs. ${orderTotalSellerAmount.toFixed(2)}`,
-          `Rs. ${orderTotalCommission.toFixed(2)}`,
           `Rs. ${netPayout.toFixed(2)}`
         ]);
       });
 
       if (tableRows.length === 0) {
-        tableRows.push(['1', `#${invoiceNumStr}`, startDateStr, 'Bulk Delivery', 'Delivered Batch Items', `Rs. ${Number(invoice.totalAmount || 0).toFixed(2)}`, `Rs. ${Number(invoice.totalCommission || 0).toFixed(2)}`, `Rs. ${Number(invoice.netAmount || invoice.totalAmount || 0).toFixed(2)}`]);
+        tableRows.push(['1', `#${invoiceNumStr}`, startDateStr, 'Bulk Delivery', 'Delivered Batch Items', `Rs. ${Number(invoice.totalAmount || 0).toFixed(2)}`, `Rs. ${Number(invoice.netAmount || invoice.totalAmount || 0).toFixed(2)}`]);
       }
 
       // Keep max rows bounded so table doesn't crowd out the image on single A4 page
@@ -231,7 +229,6 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
           "Customer",
           "Product Details",
           "Order Amount",
-          "Commission",
           "Net Payout"
         ],
         rows: displayRows
@@ -248,7 +245,7 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
         padding: [3, 4],
         prepareHeader: () => doc.font("Helvetica-Bold").fontSize(7).fillColor(secondaryColor),
         prepareRow: () => doc.font("Helvetica").fontSize(7).fillColor('#334155'),
-        columnsSize: [26, 52, 50, 80, 163, 60, 58, 58]
+        columnsSize: [30, 60, 55, 95, 177, 65, 65]
       });
 
       if (extraOrdersCount > 0) {
@@ -265,7 +262,7 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
       // 5. PAYMENT SUMMARY & TERMS (SIDE-BY-SIDE)
       // ==========================================
       const summaryY = Math.max(doc.y + 8, 255);
-      const summaryCardHeight = 68;
+      const summaryCardHeight = 58;
 
       // Left Box: Terms & Conditions
       const termsWidth = 270;
@@ -276,7 +273,7 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
         '2. Payments cleared sequentially per platform settlement schedule.\n' +
         '3. For tax & invoice discrepancies, email support@snbtradingco.in.',
         PAGE_LEFT + 8,
-        summaryY + 20,
+        summaryY + 18,
         { width: termsWidth - 16, lineGap: 2, lineBreak: false }
       );
 
@@ -286,19 +283,15 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
       doc.roundedRect(sumX, summaryY, sumWidth, summaryCardHeight, 4).fillAndStroke(lightBg, borderColor);
 
       const totAmount = Number(invoice.totalAmount || 0);
-      const totCommission = Number(invoice.totalCommission || 0);
       const totNet = Number(invoice.netAmount || totAmount);
 
-      doc.font('Helvetica').fontSize(7.5).fillColor(mutedColor).text('Total Order Amount:', sumX + 8, summaryY + 8, { lineBreak: false });
-      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(secondaryColor).text(`Rs. ${totAmount.toFixed(2)}`, sumX + 130, summaryY + 8, { align: 'right', width: sumWidth - 140, lineBreak: false });
+      doc.font('Helvetica').fontSize(7.5).fillColor(mutedColor).text('Total Order Amount:', sumX + 8, summaryY + 10, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(secondaryColor).text(`Rs. ${totAmount.toFixed(2)}`, sumX + 130, summaryY + 10, { align: 'right', width: sumWidth - 140, lineBreak: false });
 
-      doc.font('Helvetica').fontSize(7.5).fillColor(mutedColor).text('Total Platform Commission:', sumX + 8, summaryY + 22, { lineBreak: false });
-      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(secondaryColor).text(`Rs. ${totCommission.toFixed(2)}`, sumX + 130, summaryY + 22, { align: 'right', width: sumWidth - 140, lineBreak: false });
+      doc.strokeColor(borderColor).lineWidth(0.6).moveTo(sumX + 8, summaryY + 26).lineTo(sumX + sumWidth - 8, summaryY + 26).stroke();
 
-      doc.strokeColor(borderColor).lineWidth(0.6).moveTo(sumX + 8, summaryY + 36).lineTo(sumX + sumWidth - 8, summaryY + 36).stroke();
-
-      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(successColor).text('Net Payout to Seller:', sumX + 8, summaryY + 44, { lineBreak: false });
-      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(successColor).text(`Rs. ${totNet.toFixed(2)}`, sumX + 110, summaryY + 43, { align: 'right', width: sumWidth - 120, lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(successColor).text('Net Payout to Seller:', sumX + 8, summaryY + 35, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(successColor).text(`Rs. ${totNet.toFixed(2)}`, sumX + 110, summaryY + 34, { align: 'right', width: sumWidth - 120, lineBreak: false });
 
       // ==========================================
       // 6. SELLER UPLOADED TAX INVOICE IMAGE
