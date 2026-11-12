@@ -48,6 +48,8 @@ const productSchema = new mongoose.Schema({
   totalStockSubtotal: { type: Number, default: 0 },
   totalStockValuation: { type: Number, default: 0 },
   customUnits: [{ type: String }],
+  customPackagingUnits: [{ type: String }],
+  customMeasurementUnits: [{ type: String }],
   imageUrl: { type: String },
   sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
   sellerName: { type: String, default: 'Zudo Official' },

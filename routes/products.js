@@ -416,7 +416,7 @@ router.get('/', async (req, res) => {
 });
 
 // @route   GET /api/products/custom-units
-// @desc    Get all custom units (main and variant) for the authenticated seller
+// @desc    Get all custom packaging and measurement units for the authenticated seller
 router.get('/custom-units', async (req, res) => {
   try {
     const { Product, Seller } = getModels(req);
@@ -437,48 +437,82 @@ router.get('/custom-units', async (req, res) => {
       sellerId = req.query.sellerId;
     }
 
-    let sellerMainCustom = [];
-    let sellerVariantCustom = [];
+    let sellerPackagingCustom = [];
+    let sellerMeasurementCustom = [];
 
     // 1. Fetch from Seller profile if available
     if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
       try {
-        const sellerDoc = await Seller.findById(sellerId).select('customUnits customVariantUnits').lean();
+        const sellerDoc = await Seller.findById(sellerId).select('customUnits customPackagingUnits customMeasurementUnits customVariantUnits').lean();
         if (sellerDoc) {
+          if (Array.isArray(sellerDoc.customPackagingUnits)) {
+            sellerPackagingCustom.push(...sellerDoc.customPackagingUnits);
+          }
           if (Array.isArray(sellerDoc.customUnits)) {
-            sellerMainCustom.push(...sellerDoc.customUnits);
+            sellerPackagingCustom.push(...sellerDoc.customUnits);
+          }
+          if (Array.isArray(sellerDoc.customMeasurementUnits)) {
+            sellerMeasurementCustom.push(...sellerDoc.customMeasurementUnits);
           }
           if (Array.isArray(sellerDoc.customVariantUnits)) {
-            sellerVariantCustom.push(...sellerDoc.customVariantUnits);
+            sellerMeasurementCustom.push(...sellerDoc.customVariantUnits);
           }
         }
       } catch (e) {}
     }
 
-    // 2. Fetch distinct custom units from products belonging to this seller (or all visible products if seller not identified)
+    // 2. Fetch distinct custom units from products belonging to this seller
     const productFilter = sellerId && mongoose.Types.ObjectId.isValid(sellerId) ? { sellerId } : {};
     try {
-      const prods = await Product.find(productFilter).select('unit customUnits b2b').lean();
+      const prods = await Product.find(productFilter).select('unit packagingType measurementBasis measurementUnit customUnits customPackagingUnits customMeasurementUnits b2b').lean();
+
+      const BUILTIN_PKG = new Set(['BAG', 'BOX', 'TIN', 'BOTTLE', 'PACK', 'PIECE', 'bag', 'box', 'tin', 'bottle', 'pack', 'piece']);
+      const BUILTIN_MEAS = new Set(['KG', 'G', 'TON', 'LTR', 'ML', 'PCS', 'kg', 'g', 'ton', 'ltr', 'ml', 'pcs', 'gram', 'litre', 'millilitre', 'piece']);
 
       for (const p of prods) {
-        if (p.unit && p.unit !== 'BOX' && p.unit !== 'BAG') {
-          const upperU = String(p.unit).trim().toUpperCase();
-          if (upperU !== 'KG' && upperU !== 'PCS') {
-            sellerMainCustom.push(upperU);
-          }
+        // Packaging from product fields
+        const pPkg = String(p.packagingType || p.unit || '').trim().toUpperCase();
+        if (pPkg && !BUILTIN_PKG.has(pPkg) && !BUILTIN_MEAS.has(pPkg)) {
+          sellerPackagingCustom.push(pPkg);
+        }
+        if (Array.isArray(p.customPackagingUnits)) {
+          sellerPackagingCustom.push(...p.customPackagingUnits.map(u => String(u || '').trim().toUpperCase()));
         }
         if (Array.isArray(p.customUnits)) {
-          sellerMainCustom.push(...p.customUnits.map(u => String(u || '').trim().toUpperCase()));
+          sellerPackagingCustom.push(...p.customUnits.map(u => String(u || '').trim().toUpperCase()));
         }
+
+        // Measurement from product fields
+        const pMeas = String(p.measurementBasis || p.measurementUnit || '').trim().toUpperCase();
+        if (pMeas && !BUILTIN_MEAS.has(pMeas)) {
+          sellerMeasurementCustom.push(pMeas);
+        }
+        if (Array.isArray(p.customMeasurementUnits)) {
+          sellerMeasurementCustom.push(...p.customMeasurementUnits.map(u => String(u || '').trim().toUpperCase()));
+        }
+
+        // Inspect variants
         if (Array.isArray(p.b2b)) {
-          const DEFAULT_VARIANTS = ['pcs', 'g', 'kg', 'ltr', 'ml', 'bag'];
           for (const v of p.b2b) {
-            if (v && v.packetSize) {
-              const valMatch = String(v.packetSize).match(/^[\d\.]+/);
-              const val = valMatch ? valMatch[0] : '';
-              const unit = String(v.packetSize).slice(val.length).trim();
-              if (unit && !DEFAULT_VARIANTS.includes(unit.toLowerCase())) {
-                sellerVariantCustom.push(unit.toUpperCase());
+            if (v) {
+              if (v.packagingType) {
+                const vp = String(v.packagingType).trim().toUpperCase();
+                if (vp && !BUILTIN_PKG.has(vp) && !BUILTIN_MEAS.has(vp)) {
+                  sellerPackagingCustom.push(vp);
+                }
+              }
+              if (v.packetSizeUnit) {
+                const vm = String(v.packetSizeUnit).trim().toUpperCase();
+                if (vm && !BUILTIN_MEAS.has(vm)) {
+                  sellerMeasurementCustom.push(vm);
+                }
+              } else if (v.packetSize) {
+                const valMatch = String(v.packetSize).match(/^[\d\.]+/);
+                const val = valMatch ? valMatch[0] : '';
+                const unit = String(v.packetSize).slice(val.length).trim().toUpperCase();
+                if (unit && !BUILTIN_MEAS.has(unit)) {
+                  sellerMeasurementCustom.push(unit);
+                }
               }
             }
           }
@@ -486,15 +520,19 @@ router.get('/custom-units', async (req, res) => {
       }
     } catch (e) {}
 
-    const cleanMain = Array.from(new Set(sellerMainCustom))
-      .filter(u => u && u !== 'BOX' && u !== 'BAG' && u !== 'KG' && u !== 'PCS');
-    const DEFAULT_VARIANTS_SET = new Set(['PCS', 'G', 'KG', 'LTR', 'ML', 'BAG', 'pcs', 'g', 'kg', 'ltr', 'ml', 'bag']);
-    const cleanVariant = Array.from(new Set(sellerVariantCustom))
-      .filter(u => u && !DEFAULT_VARIANTS_SET.has(u) && !DEFAULT_VARIANTS_SET.has(u.toLowerCase()));
+    const BUILTIN_PKG_SET = new Set(['BAG', 'BOX', 'TIN', 'BOTTLE', 'PACK', 'PIECE', 'KG', 'PCS']);
+    const cleanPackaging = Array.from(new Set(sellerPackagingCustom))
+      .filter(u => u && !BUILTIN_PKG_SET.has(u));
+
+    const BUILTIN_MEAS_SET = new Set(['KG', 'G', 'TON', 'LTR', 'ML', 'PCS', 'GRAM', 'LITRE', 'MILLILITRE', 'PIECE']);
+    const cleanMeasurement = Array.from(new Set(sellerMeasurementCustom))
+      .filter(u => u && !BUILTIN_MEAS_SET.has(u));
 
     res.json({
-      mainUnits: cleanMain,
-      variantUnits: cleanVariant
+      mainUnits: cleanPackaging,         // Backward-compatible for packaging
+      packagingUnits: cleanPackaging,    // Explicit packaging
+      measurementUnits: cleanMeasurement,// Explicit measurement
+      variantUnits: cleanMeasurement     // Backward-compatible alias
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -502,7 +540,7 @@ router.get('/custom-units', async (req, res) => {
 });
 
 // @route   POST /api/products/custom-units
-// @desc    Add a new custom unit (main or variant) and save dynamically
+// @desc    Add a new custom unit (packaging or measurement)
 router.post('/custom-units', async (req, res) => {
   try {
     const { unit, type } = req.body;
@@ -511,14 +549,19 @@ router.post('/custom-units', async (req, res) => {
     }
     const cleanUnit = unit.trim().toUpperCase();
 
+    // Determine category: 'packaging' or 'measurement'
+    const isMeasurement = type === 'measurement' || type === 'variant';
+    const isPackaging = !isMeasurement;
+
     // Validate against built-in units
-    const isVariant = type === 'variant';
-    if (!isVariant && (cleanUnit === 'BOX' || cleanUnit === 'BAG')) {
-      return res.status(400).json({ message: `"${cleanUnit}" is already a default unit` });
+    const DEFAULT_PACKAGING = ['BAG', 'BOX', 'TIN', 'BOTTLE', 'PACK', 'PIECE'];
+    if (isPackaging && DEFAULT_PACKAGING.includes(cleanUnit)) {
+      return res.status(400).json({ message: `"${cleanUnit}" is already a default packaging type` });
     }
-    const DEFAULT_VARIANTS = ['PCS', 'G', 'KG', 'LTR', 'ML', 'BAG'];
-    if (isVariant && DEFAULT_VARIANTS.includes(cleanUnit)) {
-      return res.status(400).json({ message: `"${cleanUnit}" is already a default variant unit` });
+
+    const DEFAULT_MEASUREMENTS = ['KG', 'G', 'TON', 'LTR', 'ML', 'PCS', 'GRAM', 'LITRE', 'MILLILITRE', 'PIECE'];
+    if (isMeasurement && DEFAULT_MEASUREMENTS.includes(cleanUnit)) {
+      return res.status(400).json({ message: `"${cleanUnit}" is already a default measurement unit` });
     }
 
     const { Seller } = getModels(req);
@@ -541,7 +584,9 @@ router.post('/custom-units', async (req, res) => {
     // Persist to Seller document if identified
     if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
       try {
-        const updateField = isVariant ? { customVariantUnits: cleanUnit } : { customUnits: cleanUnit };
+        const updateField = isMeasurement
+          ? { customMeasurementUnits: cleanUnit, customVariantUnits: cleanUnit }
+          : { customPackagingUnits: cleanUnit, customUnits: cleanUnit };
         await Seller.findByIdAndUpdate(sellerId, { $addToSet: updateField });
       } catch (e) {
         console.error('Failed to persist custom unit to seller profile:', e.message);
@@ -550,9 +595,9 @@ router.post('/custom-units', async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: `Custom unit "${cleanUnit}" added successfully`,
+      message: `Custom ${isMeasurement ? 'measurement unit' : 'packaging type'} "${cleanUnit}" added successfully`,
       unit: cleanUnit,
-      type: isVariant ? 'variant' : 'main'
+      type: isMeasurement ? 'measurement' : 'packaging'
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -560,7 +605,7 @@ router.post('/custom-units', async (req, res) => {
 });
 
 // @route   DELETE /api/products/custom-units
-// @desc    Delete a custom unit (main or variant) after verifying it is not in use
+// @desc    Delete a custom unit (packaging or measurement) after verifying it is not in use
 router.delete('/custom-units', async (req, res) => {
   try {
     const { unit, type } = req.body;
@@ -570,12 +615,13 @@ router.delete('/custom-units', async (req, res) => {
     const cleanUnit = unit.trim().toUpperCase();
 
     // Guard against deleting permanent defaults
-    if (cleanUnit === 'BOX' || cleanUnit === 'BAG') {
-      return res.status(400).json({ message: `Cannot delete permanent default unit "${cleanUnit}"` });
+    const DEFAULT_PACKAGING = ['BAG', 'BOX', 'TIN', 'BOTTLE', 'PACK', 'PIECE'];
+    if (DEFAULT_PACKAGING.includes(cleanUnit)) {
+      return res.status(400).json({ message: `Cannot delete permanent default packaging "${cleanUnit}"` });
     }
-    const DEFAULT_VARIANTS = ['PCS', 'G', 'KG', 'LTR', 'ML', 'BAG'];
-    if (DEFAULT_VARIANTS.includes(cleanUnit) || ['pcs', 'g', 'kg', 'ltr', 'ml', 'bag'].includes(cleanUnit.toLowerCase())) {
-      return res.status(400).json({ message: `Cannot delete standard default variant unit "${unit}"` });
+    const DEFAULT_MEASUREMENTS = ['KG', 'G', 'TON', 'LTR', 'ML', 'PCS', 'GRAM', 'LITRE', 'MILLILITRE', 'PIECE', 'pcs', 'g', 'kg', 'ltr', 'ml', 'bag'];
+    if (DEFAULT_MEASUREMENTS.includes(cleanUnit) || DEFAULT_MEASUREMENTS.includes(cleanUnit.toLowerCase())) {
+      return res.status(400).json({ message: `Cannot delete standard default measurement "${unit}"` });
     }
 
     const { Product, Seller } = getModels(req);
@@ -597,57 +643,68 @@ router.delete('/custom-units', async (req, res) => {
 
     const sellerQuery = sellerId && mongoose.Types.ObjectId.isValid(sellerId) ? { sellerId } : {};
 
-    // 1. Check if unit is in use by any product's main unit
-    if (type === 'main' || !type) {
-      const mainInUse = await Product.findOne({
+    const isMeasurement = type === 'measurement' || type === 'variant';
+    const isPackaging = type === 'packaging' || type === 'main' || !type;
+
+    // 1. Check if unit is in use by any product's packaging fields
+    if (isPackaging) {
+      const packagingInUse = await Product.findOne({
         ...sellerQuery,
-        unit: { $regex: new RegExp(`^${cleanUnit}$`, 'i') }
+        $or: [
+          { unit: { $regex: new RegExp(`^${cleanUnit}$`, 'i') } },
+          { packagingType: { $regex: new RegExp(`^${cleanUnit}$`, 'i') } },
+          { 'b2b.packagingType': { $regex: new RegExp(`^${cleanUnit}$`, 'i') } }
+        ]
       }).select('name').lean();
 
-      if (mainInUse) {
+      if (packagingInUse) {
         return res.status(400).json({
-          message: `Cannot delete unit "${cleanUnit}". It is currently used by product: "${mainInUse.name}". Please reassign or update the product first.`,
+          message: `Cannot delete packaging type "${cleanUnit}". It is currently used by product: "${packagingInUse.name}". Please reassign or update the product first.`,
           inUse: true,
-          productName: mainInUse.name
+          productName: packagingInUse.name
         });
       }
     }
 
-    // 2. Check if unit is in use by any product's size variants
-    if (type === 'variant' || !type) {
-      // Regex matches packetSize ending with the unit name (e.g. "500CARTON", "10PACKET")
+    // 2. Check if unit is in use by any product's measurement fields
+    if (isMeasurement) {
       const variantRegex = new RegExp(`[\\d\\.]*\\s*${cleanUnit}$`, 'i');
-      const variantInUse = await Product.findOne({
+      const measurementInUse = await Product.findOne({
         ...sellerQuery,
-        'b2b.packetSize': { $regex: variantRegex }
+        $or: [
+          { measurementBasis: { $regex: new RegExp(`^${cleanUnit}$`, 'i') } },
+          { measurementUnit: { $regex: new RegExp(`^${cleanUnit}$`, 'i') } },
+          { 'b2b.packetSizeUnit': { $regex: new RegExp(`^${cleanUnit}$`, 'i') } },
+          { 'b2b.packetSize': { $regex: variantRegex } }
+        ]
       }).select('name b2b').lean();
 
-      if (variantInUse) {
+      if (measurementInUse) {
         return res.status(400).json({
-          message: `Cannot delete variant unit "${cleanUnit}". It is currently used in size variants of product: "${variantInUse.name}". Please update the variant first.`,
+          message: `Cannot delete measurement unit "${cleanUnit}". It is currently used by product: "${measurementInUse.name}". Please update the product or variant first.`,
           inUse: true,
-          productName: variantInUse.name
+          productName: measurementInUse.name
         });
       }
     }
 
-    // 3. Remove from customUnits array in Product documents of this seller
+    // 3. Remove from custom lists in Product documents of this seller
     await Product.updateMany(
       sellerQuery,
-      { $pull: { customUnits: cleanUnit } }
+      {
+        $pull: {
+          customUnits: cleanUnit,
+          customPackagingUnits: cleanUnit,
+          customMeasurementUnits: cleanUnit
+        }
+      }
     );
 
     // 4. Remove from Seller document if stored there
     if (sellerId) {
-      const pullUpdate = {};
-      if (type === 'main') {
-        pullUpdate.customUnits = cleanUnit;
-      } else if (type === 'variant') {
-        pullUpdate.customVariantUnits = cleanUnit;
-      } else {
-        pullUpdate.customUnits = cleanUnit;
-        pullUpdate.customVariantUnits = cleanUnit;
-      }
+      const pullUpdate = isMeasurement
+        ? { customMeasurementUnits: cleanUnit, customVariantUnits: cleanUnit }
+        : { customPackagingUnits: cleanUnit, customUnits: cleanUnit };
       await Seller.findByIdAndUpdate(sellerId, { $pull: pullUpdate });
     }
 
