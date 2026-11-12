@@ -5,6 +5,7 @@ const sendEmail = require('../utils/email');
 const PDFDocument = require('pdfkit-table');
 const Order = require('../models/Order');
 const SellerInvoice = require('../models/SellerInvoice');
+const { round2 } = require('../utils/pricing');
 
 const getModels = (req) => {
   return {
@@ -99,6 +100,7 @@ router.post('/generate', protect, async (req, res) => {
     }).populate('items.productId');
 
     let totalAmount = 0;
+    let totalCommission = 0;
     let orderIds = [];
     const validOrders = [];
 
@@ -121,8 +123,9 @@ router.post('/generate', protect, async (req, res) => {
         validOrders.push(order);
         sellerItemsInOrder.forEach(item => {
           if (item.returnStatus !== 'Returned to Seller') {
-            const itemCommission = item.totalCommission || ((item.unitCommission || 0) * item.quantity) || 0;
-            const itemSellerPrice = (item.sellerUnitPrice || item.normalPrice || item.price) * item.quantity;
+            const qty = Number(item.quantity) || 1;
+            const itemCommission = Number(item.totalCommission) || ((Number(item.unitCommission) || 0) * qty) || 0;
+            const itemSellerPrice = (Number(item.sellerUnitPrice) || Number(item.normalPrice) || Number(item.price) || 0) * qty;
             totalAmount += itemSellerPrice;
             totalCommission += itemCommission;
           }
@@ -134,19 +137,23 @@ router.post('/generate', protect, async (req, res) => {
       return res.status(400).json({ message: 'No delivered orders found in this date range.' });
     }
 
+    const roundedTotalAmount = round2(totalAmount);
+    const roundedTotalCommission = round2(totalCommission);
+    const roundedNetAmount = round2(totalAmount);
+
     // Create Invoice Record
     const newInvoice = new InvoiceModel({
       sellerId: sellerId,
       invoiceNumber: invoiceNumber,
       startDate: start,
       endDate: end,
-      totalAmount: totalAmount,
-      totalCommission: totalCommission,
-      netAmount: totalAmount,
+      totalAmount: roundedTotalAmount,
+      totalCommission: roundedTotalCommission,
+      netAmount: roundedNetAmount,
       orderCount: orderIds.length,
       orders: orderIds,
       status: 'Pending',
-      generatedBy: req.user._id
+      generatedBy: req.user ? req.user._id : sellerId
     });
 
     await newInvoice.save();
@@ -166,9 +173,12 @@ router.post('/generate', protect, async (req, res) => {
           subject: `New Seller Invoice: ${seller.businessName}`,
           html: `
             <h3>New Invoice Generated</h3>
-            <p><strong>Seller:</strong> ${seller.businessName}</p>
+            <p><strong>Seller:</strong> ${seller.businessName || seller.name}</p>
+            <p><strong>Invoice Number:</strong> ${invoiceNumber}</p>
             <p><strong>Date Range:</strong> ${start.toDateString()} to ${end.toDateString()}</p>
-            <p><strong>Total Amount:</strong> ₹${totalAmount}</p>
+            <p><strong>Total Amount:</strong> ₹${roundedTotalAmount}</p>
+            <p><strong>Total Commission:</strong> ₹${roundedTotalCommission}</p>
+            <p><strong>Net Payable:</strong> ₹${roundedNetAmount}</p>
             <p><strong>Total Orders:</strong> ${orderIds.length}</p>
           `,
           attachments: [
@@ -229,7 +239,7 @@ router.post('/generate', protect, async (req, res) => {
           const productMatchesName = item.product && item.product.sellerName && seller.name && item.product.sellerName.toLowerCase() === seller.name.toLowerCase();
           const productMatchesStore = item.product && item.product.sellerName && seller.storeName && item.product.sellerName.toLowerCase() === seller.storeName.toLowerCase();
           return matchesSellerObj || matchesProductRef || matchesName || matchesStore || matchesBusiness || productMatchesName || productMatchesStore;
-        }).reduce((sum, i) => sum + (i.normalPrice || i.price) * i.quantity, 0).toFixed(2)}`
+        }).reduce((sum, i) => sum + ((Number(i.sellerUnitPrice) || Number(i.normalPrice) || Number(i.price) || 0) * (Number(i.quantity) || 1)), 0).toFixed(2)}`
       ])
     };
     
@@ -240,7 +250,7 @@ router.post('/generate', protect, async (req, res) => {
     });
 
     doc.moveDown(1.5);
-    doc.font('Helvetica-Bold').fontSize(14).text(`Total Net Amount: Rs. ${totalAmount.toFixed(2)}`, { align: 'right' });
+    doc.font('Helvetica-Bold').fontSize(14).text(`Total Net Amount: Rs. ${roundedTotalAmount.toFixed(2)}`, { align: 'right' });
     
     doc.end();
 
