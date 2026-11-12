@@ -10,37 +10,94 @@ try {
 }
 
 /**
- * Generate a professional single-page A4 Seller Invoice PDF with embedded tax invoice image
+ * Helper to convert image buffer (including WebP) to PNG if needed for pdfkit
+ */
+const prepareImageForPDF = async (buffer, mimeType) => {
+  if (!buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) return null;
+  const isWebP = (
+    (mimeType && mimeType.toLowerCase().includes('webp')) ||
+    (buffer.length > 12 &&
+     buffer.toString('ascii', 0, 4) === 'RIFF' &&
+     buffer.toString('ascii', 8, 12) === 'WEBP')
+  );
+  if (isWebP && sharp) {
+    try {
+      return await sharp(buffer).png().toBuffer();
+    } catch (convErr) {
+      console.warn('WebP conversion fallback:', convErr.message);
+      return buffer;
+    }
+  }
+  return buffer;
+};
+
+/**
+ * Generate a professional Seller Invoice PDF with embedded tax invoice images.
+ * Keeps single-page layout when 1 image is attached (or no image).
+ * When multiple images (or larger images) are present, cleanly uses additional pages.
+ *
  * @param {Object} options
  * @param {Object} options.invoice - Invoice document/object
  * @param {Object} options.seller - Seller object
  * @param {Array} options.orders - Array of delivered orders in range
- * @param {Buffer|null} options.imageBuffer - Raw binary image buffer from MongoDB
+ * @param {Buffer|null} options.imageBuffer - Primary image buffer (legacy/fallback)
  * @param {string|null} options.imageMimeType - MIME type of the uploaded image
+ * @param {Array} options.images - Array of { data: Buffer, mimeType: String, filename: String }
  * @returns {Promise<Buffer>}
  */
-const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuffer = null, imageMimeType = null }) => {
+const generateSellerInvoicePDF = async ({
+  invoice,
+  seller,
+  orders = [],
+  imageBuffer = null,
+  imageMimeType = null,
+  images = []
+}) => {
   return new Promise(async (resolve, reject) => {
     try {
-      // Create document with bottom margin 0 to prevent accidental auto-paging by pdfkit
+      // Consolidate images: if images array is provided, use it; else fallback to single imageBuffer
+      const imageList = [];
+      if (Array.isArray(images) && images.length > 0) {
+        images.forEach(img => {
+          const buf = img.data || img.imageData;
+          if (buf && Buffer.isBuffer(buf) && buf.length > 0) {
+            imageList.push({
+              buffer: buf,
+              mimeType: img.mimeType || img.contentType || 'image/jpeg',
+              filename: img.filename || img.originalName || 'Invoice Image'
+            });
+          }
+        });
+      } else if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
+        imageList.push({
+          buffer: imageBuffer,
+          mimeType: imageMimeType || 'image/jpeg',
+          filename: 'Invoice Image'
+        });
+      }
+
+      // Pre-process all images (convert WebP if needed)
+      const processedImages = [];
+      for (const item of imageList) {
+        try {
+          const prepBuf = await prepareImageForPDF(item.buffer, item.mimeType);
+          if (prepBuf) {
+            processedImages.push({
+              buffer: prepBuf,
+              filename: item.filename
+            });
+          }
+        } catch (e) {
+          console.warn('Failed to prepare image for PDF:', e.message);
+        }
+      }
+
       const doc = new PDFDocument({
         margin: 24,
         size: 'A4',
         bufferPages: true,
         autoFirstPage: true
       });
-
-      // Defensive guard: Strictly prevent adding pages beyond page 1
-      let pageCount = 1;
-      const originalAddPage = doc.addPage;
-      doc.addPage = function(...args) {
-        if (pageCount >= 1) {
-          // Suppress extra page creation to ensure exactly 1 A4 page
-          return this;
-        }
-        pageCount++;
-        return originalAddPage.apply(this, args);
-      };
 
       const chunks = [];
       doc.on('data', chunk => chunks.push(chunk));
@@ -212,7 +269,7 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
         tableRows.push(['1', `#${invoiceNumStr}`, startDateStr, 'Bulk Delivery', 'Delivered Batch Items', `Rs. ${Number(invoice.totalAmount || 0).toFixed(2)}`, `Rs. ${Number(invoice.netAmount || invoice.totalAmount || 0).toFixed(2)}`]);
       }
 
-      // Keep max rows bounded so table doesn't crowd out the image on single A4 page
+      // Keep max rows bounded so table doesn't crowd page 1
       const maxDisplayRows = 5;
       let displayRows = tableRows;
       let extraOrdersCount = 0;
@@ -294,85 +351,171 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
       doc.font('Helvetica-Bold').fontSize(9.5).fillColor(successColor).text(`Rs. ${totNet.toFixed(2)}`, sumX + 110, summaryY + 34, { align: 'right', width: sumWidth - 120, lineBreak: false });
 
       // ==========================================
-      // 6. SELLER UPLOADED TAX INVOICE IMAGE
+      // 6. SELLER UPLOADED TAX INVOICE IMAGES
       // ==========================================
-      const imageSectionTop = summaryY + summaryCardHeight + 8;
       const footerY = 818;
-      const availableImageAreaHeight = footerY - imageSectionTop - 20; // Room for label + box
+      const imageCount = processedImages.length;
 
-      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(primaryColor).text(
-        'Seller Uploaded Tax Invoice Copy',
-        PAGE_LEFT,
-        imageSectionTop,
-        { lineBreak: false }
-      );
+      if (imageCount <= 1) {
+        // Single page layout: Place image 1 (or placeholder) neatly on page 1
+        const imageSectionTop = summaryY + summaryCardHeight + 8;
+        const availableImageAreaHeight = footerY - imageSectionTop - 20;
 
-      const imgBoxY = imageSectionTop + 14;
-      const imgBoxHeight = Math.max(availableImageAreaHeight, 180);
+        doc.font('Helvetica-Bold').fontSize(8.5).fillColor(primaryColor).text(
+          'Seller Uploaded Tax Invoice Copy',
+          PAGE_LEFT,
+          imageSectionTop,
+          { lineBreak: false }
+        );
 
-      doc.roundedRect(PAGE_LEFT, imgBoxY, CONTENT_WIDTH, imgBoxHeight, 4).fillAndStroke('#ffffff', borderColor);
+        const imgBoxY = imageSectionTop + 14;
+        const imgBoxHeight = Math.max(availableImageAreaHeight, 180);
 
-      if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
-        try {
-          let processedBuffer = imageBuffer;
+        doc.roundedRect(PAGE_LEFT, imgBoxY, CONTENT_WIDTH, imgBoxHeight, 4).fillAndStroke('#ffffff', borderColor);
 
-          // Check if image is WebP
-          const isWebP = (
-            (imageMimeType && imageMimeType.toLowerCase().includes('webp')) ||
-            (imageBuffer.length > 12 &&
-             imageBuffer.toString('ascii', 0, 4) === 'RIFF' &&
-             imageBuffer.toString('ascii', 8, 12) === 'WEBP')
-          );
-
-          if (isWebP && sharp) {
-            try {
-              processedBuffer = await sharp(imageBuffer).png().toBuffer();
-            } catch (convErr) {
-              console.warn('WebP conversion fallback:', convErr.message);
-            }
+        if (imageCount === 1) {
+          try {
+            doc.image(processedImages[0].buffer, PAGE_LEFT + 6, imgBoxY + 6, {
+              fit: [CONTENT_WIDTH - 12, imgBoxHeight - 12],
+              align: 'center',
+              valign: 'center'
+            });
+          } catch (imgErr) {
+            console.error('Error embedding image in PDF:', imgErr.message);
+            doc.font('Helvetica-Oblique').fontSize(8).fillColor('#ef4444').text(
+              `Unable to render the uploaded invoice image: ${imgErr.message}`,
+              PAGE_LEFT + 12,
+              imgBoxY + 20,
+              { lineBreak: false }
+            );
           }
+        } else {
+          doc.font('Helvetica-Oblique').fontSize(8).fillColor(mutedColor).text(
+            'No external tax invoice image was attached to this settlement.',
+            PAGE_LEFT,
+            imgBoxY + (imgBoxHeight / 2) - 5,
+            { align: 'center', width: CONTENT_WIDTH, lineBreak: false }
+          );
+        }
 
-          // Embed image neatly inside the box with containment
-          doc.image(processedBuffer, PAGE_LEFT + 6, imgBoxY + 6, {
+        // Page 1 Footer
+        doc.strokeColor(borderColor).lineWidth(0.5).moveTo(PAGE_LEFT, footerY).lineTo(PAGE_RIGHT, footerY).stroke();
+        doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
+          `SNB TRADING.CO (ZUDO PLATFORM)  •  Invoice #${invoiceNumStr}  •  Settlement Verification`,
+          PAGE_LEFT,
+          footerY + 6,
+          { lineBreak: false }
+        );
+        doc.text(
+          'Page 1 of 1',
+          300,
+          footerY + 6,
+          { align: 'right', width: 271, lineBreak: false }
+        );
+      } else {
+        // Multi-image scenario (2-5 images):
+        // Image 1 sits on Page 1 (with indicator of more images on subsequent pages)
+        const imageSectionTop = summaryY + summaryCardHeight + 8;
+        const availableImageAreaHeight = footerY - imageSectionTop - 20;
+
+        doc.font('Helvetica-Bold').fontSize(8.5).fillColor(primaryColor).text(
+          `Seller Uploaded Tax Invoice Copy (1 of ${imageCount})`,
+          PAGE_LEFT,
+          imageSectionTop,
+          { lineBreak: false }
+        );
+
+        const imgBoxY = imageSectionTop + 14;
+        const imgBoxHeight = Math.max(availableImageAreaHeight, 180);
+
+        doc.roundedRect(PAGE_LEFT, imgBoxY, CONTENT_WIDTH, imgBoxHeight, 4).fillAndStroke('#ffffff', borderColor);
+
+        try {
+          doc.image(processedImages[0].buffer, PAGE_LEFT + 6, imgBoxY + 6, {
             fit: [CONTENT_WIDTH - 12, imgBoxHeight - 12],
             align: 'center',
             valign: 'center'
           });
         } catch (imgErr) {
-          console.error('Error embedding image in PDF:', imgErr.message);
           doc.font('Helvetica-Oblique').fontSize(8).fillColor('#ef4444').text(
-            `Unable to render the uploaded invoice image: ${imgErr.message}`,
+            `Unable to render image 1: ${imgErr.message}`,
             PAGE_LEFT + 12,
             imgBoxY + 20,
             { lineBreak: false }
           );
         }
-      } else {
-        // Subtle placeholder text when no image was uploaded
-        doc.font('Helvetica-Oblique').fontSize(8).fillColor(mutedColor).text(
-          'No external tax invoice image was attached to this settlement.',
-          PAGE_LEFT,
-          imgBoxY + (imgBoxHeight / 2) - 5,
-          { align: 'center', width: CONTENT_WIDTH, lineBreak: false }
-        );
-      }
 
-      // ==========================================
-      // 7. SINGLE-PAGE FOOTER
-      // ==========================================
-      doc.strokeColor(borderColor).lineWidth(0.5).moveTo(PAGE_LEFT, footerY).lineTo(PAGE_RIGHT, footerY).stroke();
-      doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
-        `SNB TRADING.CO (ZUDO PLATFORM)  •  Invoice #${invoiceNumStr}  •  Settlement Verification`,
-        PAGE_LEFT,
-        footerY + 6,
-        { lineBreak: false }
-      );
-      doc.text(
-        'Page 1 of 1',
-        300,
-        footerY + 6,
-        { align: 'right', width: 271, lineBreak: false }
-      );
+        // Page 1 Footer
+        const totalPages = imageCount; // 1 page for invoice summary + image 1, then (imageCount - 1) pages for remaining images
+        doc.strokeColor(borderColor).lineWidth(0.5).moveTo(PAGE_LEFT, footerY).lineTo(PAGE_RIGHT, footerY).stroke();
+        doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
+          `SNB TRADING.CO (ZUDO PLATFORM)  •  Invoice #${invoiceNumStr}  •  Settlement Verification`,
+          PAGE_LEFT,
+          footerY + 6,
+          { lineBreak: false }
+        );
+        doc.text(
+          `Page 1 of ${totalPages}`,
+          300,
+          footerY + 6,
+          { align: 'right', width: 271, lineBreak: false }
+        );
+
+        // Additional Pages: One page per remaining image to ensure maximum legibility and never shrink excessively
+        for (let idx = 1; idx < imageCount; idx++) {
+          doc.addPage({ margin: 24, size: 'A4' });
+          const currPage = idx + 1;
+
+          // Header strip on image pages
+          doc.fontSize(12).font('Helvetica-Bold').fillColor(primaryColor).text('SELLER INVOICE - ATTACHED DOCUMENT', PAGE_LEFT, 24, { lineBreak: false });
+          doc.fontSize(9).font('Helvetica-Bold').fillColor(secondaryColor).text(`INVOICE #${invoiceNumStr}  •  Image ${currPage} of ${totalPages}`, 300, 26, { align: 'right', width: 271, lineBreak: false });
+          doc.strokeColor(borderColor).lineWidth(1).moveTo(PAGE_LEFT, 46).lineTo(PAGE_RIGHT, 46).stroke();
+
+          // Document title / filename label
+          const imgMetaTitle = processedImages[idx].filename || `Supporting Document ${idx + 1}`;
+          doc.fontSize(9).font('Helvetica-Bold').fillColor(secondaryColor).text(
+            `Document #${currPage}: ${imgMetaTitle}`,
+            PAGE_LEFT,
+            56,
+            { lineBreak: false }
+          );
+
+          // Full page image area
+          const fullImgY = 72;
+          const fullImgHeight = footerY - fullImgY - 14; // ~730pt height
+          doc.roundedRect(PAGE_LEFT, fullImgY, CONTENT_WIDTH, fullImgHeight, 4).fillAndStroke('#ffffff', borderColor);
+
+          try {
+            doc.image(processedImages[idx].buffer, PAGE_LEFT + 6, fullImgY + 6, {
+              fit: [CONTENT_WIDTH - 12, fullImgHeight - 12],
+              align: 'center',
+              valign: 'center'
+            });
+          } catch (imgErr) {
+            doc.font('Helvetica-Oblique').fontSize(8).fillColor('#ef4444').text(
+              `Unable to render image ${currPage}: ${imgErr.message}`,
+              PAGE_LEFT + 12,
+              fullImgY + 20,
+              { lineBreak: false }
+            );
+          }
+
+          // Page Footer
+          doc.strokeColor(borderColor).lineWidth(0.5).moveTo(PAGE_LEFT, footerY).lineTo(PAGE_RIGHT, footerY).stroke();
+          doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
+            `SNB TRADING.CO (ZUDO PLATFORM)  •  Invoice #${invoiceNumStr}  •  Settlement Verification`,
+            PAGE_LEFT,
+            footerY + 6,
+            { lineBreak: false }
+          );
+          doc.text(
+            `Page ${currPage} of ${totalPages}`,
+            300,
+            footerY + 6,
+            { align: 'right', width: 271, lineBreak: false }
+          );
+        }
+      }
 
       doc.end();
     } catch (err) {

@@ -19,7 +19,7 @@ const invoiceImageSchema = new mongoose.Schema({
   },
   originalName: {
     type: String,
-    required: true
+    required: false
   },
   mimeType: {
     type: String,
@@ -27,11 +27,19 @@ const invoiceImageSchema = new mongoose.Schema({
   },
   size: {
     type: Number,
-    required: true
+    required: false
+  },
+  fileSize: {
+    type: Number,
+    required: false
+  },
+  imageData: {
+    type: Buffer,
+    required: false
   },
   data: {
     type: Buffer,
-    required: true
+    required: false
   }
 }, { timestamps: true });
 
