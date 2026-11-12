@@ -615,7 +615,7 @@ router.delete('/custom-units', async (req, res) => {
     const cleanUnit = unit.trim().toUpperCase();
 
     // Guard against deleting permanent defaults
-    const DEFAULT_PACKAGING = ['BAG', 'BOX', 'TIN', 'BOTTLE', 'PACK', 'PIECE'];
+    const DEFAULT_PACKAGING = ['BAG', 'BOX', 'TIN', 'BOTTLE', 'PACK', 'PIECE', 'FGB', 'GHNM'];
     if (DEFAULT_PACKAGING.includes(cleanUnit)) {
       return res.status(400).json({ message: `Cannot delete permanent default packaging "${cleanUnit}"` });
     }
