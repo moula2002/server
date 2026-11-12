@@ -727,10 +727,17 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
     cleanCustomUnits = Array.from(new Set(cleanCustomUnits));
 
     const comms = await loadCommissions(req);
+    const packagingType = req.body.packagingType || cleanUnit;
+    const measurementBasis = req.body.measurementBasis || req.body.measurementUnit || 'KG';
+    const priceBasis = req.body.priceBasis || (req.body.isPackagePrice ? 'per_package' : 'per_unit');
+
     const pricingPayload = processProductPricing({
       categoryId,
       unit: cleanUnit,
-      measurementUnit: req.body.measurementUnit || null,
+      packagingType,
+      measurementBasis,
+      measurementUnit: measurementBasis,
+      priceBasis,
       unitSize: req.body.unitSize !== undefined ? req.body.unitSize : 1,
       sellerPrice: req.body.sellerPrice || req.body.sellerB2bPrice || price,
       sellerB2bPrice: req.body.sellerB2bPrice || req.body.sellerPrice || b2bPrice || price,
@@ -769,7 +776,10 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       sellerUnitPrice: pricingPayload.sellerUnitPrice,
       sellerPricePerBaseUnit: pricingPayload.sellerPricePerBaseUnit,
       productMeasurementUnit: pricingPayload.productMeasurementUnit,
-      measurementUnit: pricingPayload.measurementUnit || req.body.measurementUnit || null,
+      measurementBasis: pricingPayload.measurementBasis || measurementBasis,
+      measurementUnit: pricingPayload.measurementUnit || measurementBasis,
+      packagingType: pricingPayload.packagingType || packagingType,
+      priceBasis: pricingPayload.priceBasis || priceBasis,
       sellerPricePerProductUnit: pricingPayload.sellerPricePerProductUnit,
       adminCommissionPerBaseUnit: pricingPayload.adminCommissionPerBaseUnit,
       commissionPerProductUnit: pricingPayload.commissionPerProductUnit,
@@ -1074,13 +1084,14 @@ router.post(['/calculate-pricing', '/calculate-price'], async (req, res) => {
         });
       }
 
-      const commissions = await loadCommissions(req);
-      const rule = findCategoryCommission(commissions, product.categoryId, product.unit, pincode);
-
-      const commType = rule?.commissionType || commissionType || product.commissionType || 'flat';
-      const commVal = rule ? rule.commissionValue : (commissionRate ?? commissionValue ?? product.commissionValue ?? 0);
-
       let unitPrice = 0;
+      let targetUnitSize = product.unitSize || 1;
+      let targetPackagingType = product.packagingType || product.unit || 'BAG';
+      let targetMeasurementBasis = product.measurementBasis || product.measurementUnit || 'KG';
+      let targetPriceBasis = product.priceBasis || 'per_unit';
+      let targetSellerPricePerBaseUnit = product.sellerPricePerBaseUnit;
+      let targetSellerPricePerProductUnit = product.sellerPricePerProductUnit;
+
       if (isB2B) {
         unitPrice = product.sellerB2bPrice !== undefined ? product.sellerB2bPrice : (product.sellerPrice || product.b2bPrice || product.price || 0);
       } else {
@@ -1092,15 +1103,36 @@ router.post(['/calculate-pricing', '/calculate-price'], async (req, res) => {
         const vFound = vArray.find(v => (v.packetSize || v.sizeName) === variantSize);
         if (vFound) {
           unitPrice = vFound.sellerPrice !== undefined ? vFound.sellerPrice : (vFound.price || unitPrice);
+          targetUnitSize = extractUnitSize(vFound.unitSize || vFound.packetSizeVal || vFound.packetSize, targetUnitSize);
+          targetPackagingType = vFound.packagingType || targetPackagingType;
+          targetMeasurementBasis = vFound.measurementBasis || vFound.measurementUnit || targetMeasurementBasis;
+          targetPriceBasis = vFound.priceBasis || 'per_package';
+          targetSellerPricePerBaseUnit = vFound.sellerPricePerBaseUnit;
+          targetSellerPricePerProductUnit = vFound.sellerPricePerProductUnit;
         }
       }
 
+      const commissions = await loadCommissions(req);
+      const rule = findCategoryCommission(commissions, product.categoryId, targetPackagingType, targetMeasurementBasis, pincode);
+
+      const commType = rule?.commissionType || commissionType || product.commissionType || 'flat';
+      const commVal = rule ? rule.commissionValue : (commissionRate ?? commissionValue ?? product.commissionValue ?? 0);
       const effectiveGst = gstPercent !== undefined ? gstPercent : (product.gstPercent || 0);
 
       const breakdown = calculatePricingBreakdown({
         sellerUnitPrice: unitPrice,
+        sellerPrice: unitPrice,
+        sellerPricePerBaseUnit: targetSellerPricePerBaseUnit,
+        sellerPricePerProductUnit: targetSellerPricePerProductUnit,
+        priceBasis: targetPriceBasis,
+        packagingType: targetPackagingType,
+        measurementBasis: targetMeasurementBasis,
+        unit: targetPackagingType,
+        measurementUnit: targetMeasurementBasis,
+        commissionUnit: rule?.unit || targetMeasurementBasis,
         commissionType: commType,
         commissionValue: commVal,
+        unitSize: targetUnitSize,
         gstPercent: effectiveGst,
         quantity: targetQty,
         availableStock: stock,
@@ -1113,8 +1145,17 @@ router.post(['/calculate-pricing', '/calculate-price'], async (req, res) => {
 
     const breakdown = calculatePricingBreakdown({
       sellerUnitPrice: sellerUnitPrice || 0,
+      sellerPrice: req.body.sellerPrice || sellerUnitPrice || 0,
+      sellerPricePerBaseUnit: req.body.sellerPricePerBaseUnit,
+      sellerPricePerProductUnit: req.body.sellerPricePerProductUnit,
+      priceBasis: req.body.priceBasis,
+      packagingType: req.body.packagingType || req.body.unit || 'BAG',
+      measurementBasis: req.body.measurementBasis || req.body.measurementUnit || 'KG',
+      unit: req.body.unit || req.body.packagingType || 'BAG',
+      measurementUnit: req.body.measurementUnit || req.body.measurementBasis || 'KG',
       commissionType: commissionType || 'flat',
       commissionValue: commissionRate !== undefined ? commissionRate : (commissionValue || 0),
+      unitSize: req.body.unitSize || 1,
       gstPercent: gstPercent || 0,
       quantity: targetQty,
       availableStock: availableStock || 0,
@@ -1357,8 +1398,17 @@ router.put('/:id', protect, async (req, res) => {
     if (req.body.unitSize === undefined && existingProd.unitSize) {
       req.body.unitSize = existingProd.unitSize;
     }
-    if (req.body.measurementUnit === undefined && existingProd.measurementUnit) {
-      req.body.measurementUnit = existingProd.measurementUnit;
+    if (req.body.measurementUnit === undefined && (existingProd.measurementUnit || existingProd.measurementBasis)) {
+      req.body.measurementUnit = existingProd.measurementUnit || existingProd.measurementBasis;
+    }
+    if (req.body.measurementBasis === undefined && (existingProd.measurementBasis || existingProd.measurementUnit)) {
+      req.body.measurementBasis = existingProd.measurementBasis || existingProd.measurementUnit;
+    }
+    if (req.body.packagingType === undefined && (existingProd.packagingType || existingProd.unit)) {
+      req.body.packagingType = existingProd.packagingType || existingProd.unit;
+    }
+    if (req.body.priceBasis === undefined && existingProd.priceBasis) {
+      req.body.priceBasis = existingProd.priceBasis;
     }
     const updatedPayload = processProductPricing(req.body, comms);
     if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
@@ -1370,8 +1420,17 @@ router.put('/:id', protect, async (req, res) => {
     if (req.body.unit) {
       updatedPayload.unit = req.body.unit;
     }
+    if (req.body.packagingType) {
+      updatedPayload.packagingType = req.body.packagingType;
+    }
+    if (req.body.measurementBasis !== undefined) {
+      updatedPayload.measurementBasis = req.body.measurementBasis;
+    }
     if (req.body.measurementUnit !== undefined) {
       updatedPayload.measurementUnit = req.body.measurementUnit;
+    }
+    if (req.body.priceBasis !== undefined) {
+      updatedPayload.priceBasis = req.body.priceBasis;
     }
     if (req.body.unitSize !== undefined) {
       updatedPayload.unitSize = req.body.unitSize;

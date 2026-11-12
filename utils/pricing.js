@@ -121,10 +121,14 @@ function resolveMeasurementBasis(unit, measurementUnit, unitSizeStr) {
   }
 
   const isPackaging = PACKAGING_UNITS.includes(normUnit) || !BASE_MEASUREMENT_UNITS.includes(normUnit);
+  const displayPackaging = unit ? String(unit).trim().toUpperCase() : (normUnit ? normUnit.toUpperCase() : 'BAG');
+  const displayMeas = normMeas ? normMeas.toUpperCase() : (measurementUnit ? String(measurementUnit).trim().toUpperCase() : (isPackaging ? null : displayPackaging));
 
   return {
-    packagingUnit: normUnit || 'unit',
-    measurementUnit: normMeas || (isPackaging ? null : normUnit),
+    packagingUnit: displayPackaging,
+    measurementUnit: displayMeas,
+    normPackagingUnit: normUnit || 'unit',
+    normMeasurementUnit: normMeas || (isPackaging ? null : normUnit),
     isPackagingUnit: isPackaging
   };
 }
@@ -147,32 +151,34 @@ function checkCommissionCompatibility(productBasis, commissionRuleOrUnit) {
 
   if (!commUnit) return { isCompatible: true, conversionFactor: 1 };
 
-  const { packagingUnit, measurementUnit, isPackagingUnit } = productBasis;
+  const normPackaging = productBasis.normPackagingUnit || normalizeUnit(productBasis.packagingUnit);
+  const normMeas = productBasis.normMeasurementUnit || normalizeUnit(productBasis.measurementUnit);
+  const isPackagingUnit = productBasis.isPackagingUnit;
 
   // 1. Direct unit match with packaging unit (e.g. Rule is Per Tin, product packaging is Tin)
-  if (commUnit === packagingUnit) {
+  if (commUnit === normPackaging) {
     return { isCompatible: true, conversionFactor: 1, matchedOn: 'packaging' };
   }
 
   // 2. Direct unit match with measurement basis (e.g. Rule is Per KG, product measurement basis is KG)
-  if (measurementUnit && commUnit === measurementUnit) {
+  if (normMeas && commUnit === normMeas) {
     return { isCompatible: true, conversionFactor: 1, matchedOn: 'measurement' };
   }
 
   // 3. Compatible measurement unit conversion (e.g. Rule is Per Ton, product measurement basis is KG)
-  if (measurementUnit) {
-    const factor = convertMeasurement(1, measurementUnit, commUnit);
+  if (normMeas) {
+    const factor = convertMeasurement(1, normMeas, commUnit);
     if (factor !== null) {
       return { isCompatible: true, conversionFactor: factor, matchedOn: 'conversion' };
     }
   }
 
   // 4. Missing measurement basis for packaging / custom unit (e.g. Tin without KG or LTR)
-  if (isPackagingUnit && !measurementUnit) {
+  if (isPackagingUnit && !normMeas) {
     return {
       isCompatible: false,
       conversionFactor: 0,
-      validationMessage: `Measurement basis is missing for '${packagingUnit}'. Please specify product measurement unit (e.g. KG or Litre) to calculate commission.`
+      validationMessage: `Measurement basis is missing for '${productBasis.packagingUnit}'. Please specify product measurement unit (e.g. KG or Litre) to calculate commission.`
     };
   }
 
@@ -180,7 +186,7 @@ function checkCommissionCompatibility(productBasis, commissionRuleOrUnit) {
   return {
     isCompatible: false,
     conversionFactor: 0,
-    validationMessage: `Incompatible measurement units: product is in '${measurementUnit || packagingUnit}', but category commission is configured in '${commUnit}'.`
+    validationMessage: `Incompatible measurement units: product is in '${productBasis.measurementUnit || productBasis.packagingUnit}', but category commission is configured in '${commUnit.toUpperCase()}'.`
   };
 }
 
@@ -333,19 +339,32 @@ function calculateCustomerPrice(
 
   let isPackagePrice = false;
   if (typeof arg1 === 'object' && arg1 !== null) {
-    if (arg1.isPackagePrice !== undefined) {
+    if (arg1.priceBasis === 'per_package') {
+      isPackagePrice = true;
+    } else if (arg1.priceBasis === 'per_unit') {
+      isPackagePrice = false;
+    } else if (arg1.isPackagePrice !== undefined) {
       isPackagePrice = Boolean(arg1.isPackagePrice);
     } else if (arg1.sellerPricePerProductUnit !== undefined && arg1.sellerPricePerBaseUnit === undefined) {
       isPackagePrice = true;
     }
-  } else if (extraOpts && extraOpts.isPackagePrice !== undefined) {
-    isPackagePrice = Boolean(extraOpts.isPackagePrice);
+  } else if (extraOpts) {
+    if (extraOpts.priceBasis === 'per_package') {
+      isPackagePrice = true;
+    } else if (extraOpts.priceBasis === 'per_unit') {
+      isPackagePrice = false;
+    } else if (extraOpts.isPackagePrice !== undefined) {
+      isPackagePrice = Boolean(extraOpts.isPackagePrice);
+    }
   }
 
   let sellerPricePerBaseUnit = 0;
   let sPricePerProductUnit = 0;
 
-  if (isPackagePrice) {
+  if (typeof arg1 === 'object' && arg1 !== null && arg1.sellerPricePerProductUnit !== undefined && arg1.sellerPricePerBaseUnit !== undefined && arg1.sellerPricePerProductUnit > 0 && arg1.sellerPricePerBaseUnit > 0) {
+    sellerPricePerBaseUnit = round2(arg1.sellerPricePerBaseUnit);
+    sPricePerProductUnit = round2(arg1.sellerPricePerProductUnit);
+  } else if (isPackagePrice) {
     sPricePerProductUnit = round2(basePrice);
     sellerPricePerBaseUnit = uSize > 0 ? round2(basePrice / uSize) : round2(basePrice);
   } else {
@@ -411,9 +430,12 @@ function calculateCustomerPrice(
  */
 function processProductPricing(payload, commissions = []) {
   const categoryId = payload.categoryId;
-  const unit = payload.unit || 'pcs';
-  const measurementUnit = payload.measurementUnit || null;
+  const packagingType = (payload.packagingType || payload.unit || 'BAG').trim();
+  const unit = packagingType;
+  const measurementBasis = (payload.measurementBasis || payload.measurementUnit || 'KG').trim();
+  const measurementUnit = measurementBasis;
   const unitSize = extractUnitSize(payload.unitSize, 1);
+  const priceBasis = payload.priceBasis || (payload.isPackagePrice ? 'per_package' : 'per_unit');
 
   const adminRule = findCategoryCommission(commissions, categoryId, unit, measurementUnit);
 
@@ -440,56 +462,76 @@ function processProductPricing(payload, commissions = []) {
         ? parseFloat(payload.sellerB2bPrice) || 0
         : (parseFloat(payload.price) || parseFloat(payload.b2bPrice) || 0));
 
-  const extraOpts = { unit, measurementUnit, commissionRule: adminRule };
+  const extraOpts = { unit, packagingType, measurementUnit, measurementBasis, commissionRule: adminRule, priceBasis };
   const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
   const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
 
   // Process B2C variants
   const processedB2c = (payload.b2c || []).map(v => {
+    const vPriceBasis = v.priceBasis || (v.isPackagePrice !== undefined ? (v.isPackagePrice ? 'per_package' : 'per_unit') : 'per_package');
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== '' && v.sellerPrice !== null
       ? parseFloat(v.sellerPrice) || 0
       : (parseFloat(v.price) || 0);
-    const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const vIsPackagePrice = v.isPackagePrice !== undefined ? Boolean(v.isPackagePrice) : true;
+    const vUnitSize = extractUnitSize(v.unitSize || v.packetSizeVal || v.packetSize, unitSize);
+    const vPkgType = v.packagingType || packagingType || 'BAG';
+    const vMeasUnit = v.measurementBasis || v.measurementUnit || measurementBasis || 'KG';
+    const vGst = v.gstPercent !== undefined && v.gstPercent !== '' && v.gstPercent !== null ? parseFloat(v.gstPercent) || 0 : (parseFloat(payload.gstPercent) || 0);
+    const vStock = v.stock !== undefined && v.stock !== '' && v.stock !== null ? parseInt(v.stock, 10) || 0 : 0;
     const vExtraOpts = {
       ...extraOpts,
-      isPackagePrice: vIsPackagePrice,
-      unit: v.packagingType || payload.unit || 'pack',
-      measurementUnit: v.measurementUnit || payload.measurementUnit || 'kg'
+      priceBasis: vPriceBasis,
+      isPackagePrice: vPriceBasis === 'per_package',
+      unit: vPkgType,
+      packagingType: vPkgType,
+      measurementUnit: vMeasUnit,
+      measurementBasis: vMeasUnit
     };
-    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
+    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, vGst, false, vExtraOpts);
     return {
       ...v,
       unitSize: vUnitSize,
       sizeValue: v.sizeValue || vUnitSize,
-      measurementUnit: vExtraOpts.measurementUnit,
-      packagingType: vExtraOpts.unit,
+      measurementBasis: vMeasUnit,
+      measurementUnit: vMeasUnit,
+      packagingType: vPkgType,
+      priceBasis: vPriceBasis,
       sellerPrice: vCalc.sellerPricePerProductUnit,
       sellerPricePerBaseUnit: vCalc.sellerPricePerBaseUnit,
       sellerPricePerProductUnit: vCalc.sellerPricePerProductUnit,
+      adminCommissionPerBaseUnit: vCalc.adminCommissionPerBaseUnit,
+      commissionPerProductUnit: vCalc.commissionPerProductUnit,
       customerUnitBasePrice: vCalc.customerUnitBasePrice,
-      price: vCalc.customerPrice,
+      price: vCalc.customerFinalPricePerProductUnit || vCalc.customerPrice,
       commissionType,
       commissionValue,
       commissionAmount: vCalc.commissionAmount,
-      unitCommission: vCalc.unitCommission
+      unitCommission: vCalc.unitCommission,
+      gstPercent: vGst,
+      stock: vStock
     };
   });
 
   // Process B2B variants
   const processedB2b = (payload.b2b || []).map(v => {
+    const vPriceBasis = v.priceBasis || (v.isPackagePrice !== undefined ? (v.isPackagePrice ? 'per_package' : 'per_unit') : 'per_package');
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== '' && v.sellerPrice !== null
       ? parseFloat(v.sellerPrice) || 0
       : (parseFloat(v.price) || 0);
-    const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const vIsPackagePrice = v.isPackagePrice !== undefined ? Boolean(v.isPackagePrice) : true;
+    const vUnitSize = extractUnitSize(v.unitSize || v.packetSizeVal || v.packetSize, unitSize);
+    const vPkgType = v.packagingType || packagingType || 'BAG';
+    const vMeasUnit = v.measurementBasis || v.measurementUnit || measurementBasis || 'KG';
+    const vGst = v.gstPercent !== undefined && v.gstPercent !== '' && v.gstPercent !== null ? parseFloat(v.gstPercent) || 0 : (parseFloat(payload.gstPercent) || 0);
+    const vStock = v.stock !== undefined && v.stock !== '' && v.stock !== null ? parseInt(v.stock, 10) || 0 : 0;
     const vExtraOpts = {
       ...extraOpts,
-      isPackagePrice: vIsPackagePrice,
-      unit: v.packagingType || payload.unit || 'pack',
-      measurementUnit: v.measurementUnit || payload.measurementUnit || 'kg'
+      priceBasis: vPriceBasis,
+      isPackagePrice: vPriceBasis === 'per_package',
+      unit: vPkgType,
+      packagingType: vPkgType,
+      measurementUnit: vMeasUnit,
+      measurementBasis: vMeasUnit
     };
-    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
+    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, vGst, false, vExtraOpts);
 
     let processedTiers = v.priceTiers;
     if (Array.isArray(v.priceTiers)) {
@@ -497,7 +539,7 @@ function processProductPricing(payload, commissions = []) {
         const tSellerPrice = tier.sellerPrice !== undefined && tier.sellerPrice !== '' && tier.sellerPrice !== null
           ? parseFloat(tier.sellerPrice) || 0
           : (parseFloat(tier.price) || 0);
-        const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
+        const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize, vGst, false, vExtraOpts);
         return {
           ...tier,
           sellerPrice: tCalc.sellerPricePerProductUnit,
@@ -512,17 +554,23 @@ function processProductPricing(payload, commissions = []) {
       ...v,
       unitSize: vUnitSize,
       sizeValue: v.sizeValue || vUnitSize,
-      measurementUnit: vExtraOpts.measurementUnit,
-      packagingType: vExtraOpts.unit,
+      measurementBasis: vMeasUnit,
+      measurementUnit: vMeasUnit,
+      packagingType: vPkgType,
+      priceBasis: vPriceBasis,
       sellerPrice: vCalc.sellerPricePerProductUnit,
       sellerPricePerBaseUnit: vCalc.sellerPricePerBaseUnit,
       sellerPricePerProductUnit: vCalc.sellerPricePerProductUnit,
+      adminCommissionPerBaseUnit: vCalc.adminCommissionPerBaseUnit,
+      commissionPerProductUnit: vCalc.commissionPerProductUnit,
       customerUnitBasePrice: vCalc.customerUnitBasePrice,
-      price: vCalc.customerPrice,
+      price: vCalc.customerFinalPricePerProductUnit || vCalc.customerPrice,
       commissionType,
       commissionValue,
       commissionAmount: vCalc.commissionAmount,
       unitCommission: vCalc.unitCommission,
+      gstPercent: vGst,
+      stock: vStock,
       priceTiers: processedTiers
     };
   });
@@ -534,10 +582,12 @@ function processProductPricing(payload, commissions = []) {
       const tSellerPrice = tier.sellerPrice !== undefined && tier.sellerPrice !== '' && tier.sellerPrice !== null
         ? parseFloat(tier.sellerPrice) || 0
         : (parseFloat(tier.price) || 0);
-      const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, unitSize);
+      const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
       return {
         ...tier,
-        sellerPrice: tSellerPrice,
+        sellerPrice: tCalc.sellerPricePerProductUnit,
+        sellerPricePerBaseUnit: tCalc.sellerPricePerBaseUnit,
+        sellerPricePerProductUnit: tCalc.sellerPricePerProductUnit,
         price: tCalc.customerPrice
       };
     });
@@ -553,7 +603,7 @@ function processProductPricing(payload, commissions = []) {
   const finalB2bPrice = (customerB2bPrice === 0 && processedB2b.length > 0) ? processedB2b[0].price : (customerB2bPrice || customerPrice);
   const finalPrice = (customerPrice === 0 && processedB2c.length > 0) ? processedB2c[0].price : (customerPrice || customerB2bPrice || finalB2bPrice);
 
-  // New Separate Inventory Valuation (Section 6)
+  // Separate Inventory Valuation (Section 6)
   const totalStockWeight = round2(unitSize * Math.max(0, availableStock));
   const totalStockCommission = round2(primaryPricing.commissionPerProductUnit * Math.max(0, availableStock));
   const totalSellerStockValue = round2(primaryPricing.sellerPricePerProductUnit * Math.max(0, availableStock));
@@ -566,9 +616,12 @@ function processProductPricing(payload, commissions = []) {
     // 10-Step Breakdown Fields (Section 5)
     sellerPricePerBaseUnit: primaryPricing.sellerPricePerBaseUnit,
     productMeasurementUnit: primaryPricing.productMeasurementUnit,
+    measurementBasis: primaryPricing.measurementUnit,
     measurementUnit: primaryPricing.measurementUnit,
+    packagingType: primaryPricing.unit,
     unit: primaryPricing.unit,
     unitSize,
+    priceBasis,
     sellerPricePerProductUnit: primaryPricing.sellerPricePerProductUnit,
     adminCommissionPerBaseUnit: primaryPricing.adminCommissionPerBaseUnit,
     commissionPerProductUnit: primaryPricing.commissionPerProductUnit,
@@ -621,9 +674,12 @@ function processProductPricing(payload, commissions = []) {
 function applyCommission(product, commissions = [], pincode = null) {
   if (!product) return product;
 
-  const unit = product.unit || 'pcs';
-  const measurementUnit = product.measurementUnit || null;
+  const packagingType = (product.packagingType || product.unit || 'BAG').trim();
+  const unit = packagingType;
+  const measurementBasis = (product.measurementBasis || product.measurementUnit || 'KG').trim();
+  const measurementUnit = measurementBasis;
   const unitSize = extractUnitSize(product.unitSize, 1);
+  const priceBasis = product.priceBasis || (product.isPackagePrice ? 'per_package' : 'per_unit');
 
   let ruleList = [];
   let directRule = null;
@@ -645,68 +701,119 @@ function applyCommission(product, commissions = [], pincode = null) {
     commissionValue = Number(product.commissionValue) || 0;
   }
 
-  const sellerB2bPrice = product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null
-    ? product.sellerB2bPrice
-    : (product.sellerPrice !== undefined && product.sellerPrice !== null
-        ? product.sellerPrice
-        : (product.b2bPrice || product.price || 0));
+  // Idempotent seller price extraction
+  let sellerB2bPrice = 0;
+  let sellerPrice = 0;
 
-  const sellerPrice = product.sellerPrice !== undefined && product.sellerPrice !== null
-    ? product.sellerPrice
-    : (product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null
-        ? product.sellerB2bPrice
-        : (product.price || product.b2bPrice || 0));
+  if (priceBasis === 'per_package') {
+    sellerB2bPrice = product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null
+      ? product.sellerB2bPrice
+      : (product.sellerPricePerProductUnit !== undefined ? product.sellerPricePerProductUnit : (product.b2bPrice || product.price || 0));
+    sellerPrice = product.sellerPrice !== undefined && product.sellerPrice !== null
+      ? product.sellerPrice
+      : (product.sellerPricePerProductUnit !== undefined ? product.sellerPricePerProductUnit : (product.price || product.b2bPrice || 0));
+  } else {
+    // per_unit
+    sellerB2bPrice = product.sellerPricePerBaseUnit !== undefined && product.sellerPricePerBaseUnit > 0
+      ? product.sellerPricePerBaseUnit
+      : (product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null ? product.sellerB2bPrice : (product.sellerPrice || product.b2bPrice || product.price || 0));
+    sellerPrice = product.sellerPricePerBaseUnit !== undefined && product.sellerPricePerBaseUnit > 0
+      ? product.sellerPricePerBaseUnit
+      : (product.sellerPrice !== undefined && product.sellerPrice !== null ? product.sellerPrice : (product.price || product.b2bPrice || 0));
+  }
 
-  const extraOpts = { unit, measurementUnit, commissionRule: adminRule };
+  const extraOpts = { unit, packagingType, measurementUnit, measurementBasis, commissionRule: adminRule, priceBasis };
   const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
   const { customerPrice: customerB2bPrice } = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
 
   const newB2c = (product.b2c || []).map(v => {
-    const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
-    const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const vIsPackagePrice = v.isPackagePrice !== undefined ? Boolean(v.isPackagePrice) : true;
+    const vPriceBasis = v.priceBasis || (v.isPackagePrice !== undefined ? (v.isPackagePrice ? 'per_package' : 'per_unit') : 'per_package');
+    const vUnitSize = extractUnitSize(v.unitSize || v.packetSizeVal || v.packetSize, unitSize);
+    const vPkgType = v.packagingType || packagingType || 'BAG';
+    const vMeasUnit = v.measurementBasis || v.measurementUnit || measurementBasis || 'KG';
+    const vGst = v.gstPercent !== undefined && v.gstPercent !== '' && v.gstPercent !== null ? parseFloat(v.gstPercent) || 0 : (parseFloat(product.gstPercent) || 0);
+    const vStock = v.stock !== undefined && v.stock !== '' && v.stock !== null ? parseInt(v.stock, 10) || 0 : 0;
+
+    let vSellerPrice = 0;
+    if (vPriceBasis === 'per_package') {
+      vSellerPrice = v.sellerPricePerProductUnit !== undefined && v.sellerPricePerProductUnit > 0
+        ? v.sellerPricePerProductUnit
+        : (v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0));
+    } else {
+      vSellerPrice = v.sellerPricePerBaseUnit !== undefined && v.sellerPricePerBaseUnit > 0
+        ? v.sellerPricePerBaseUnit
+        : (v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0));
+    }
+
     const vExtraOpts = {
       ...extraOpts,
-      isPackagePrice: vIsPackagePrice,
-      unit: v.packagingType || unit,
-      measurementUnit: v.measurementUnit || measurementUnit
+      priceBasis: vPriceBasis,
+      isPackagePrice: vPriceBasis === 'per_package',
+      unit: vPkgType,
+      packagingType: vPkgType,
+      measurementUnit: vMeasUnit,
+      measurementBasis: vMeasUnit
     };
-    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit, customerUnitBasePrice: vCustomerUnitBasePrice } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
+    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, vGst, false, vExtraOpts);
     return {
       ...v,
       unitSize: vUnitSize,
       sizeValue: v.sizeValue || vUnitSize,
-      measurementUnit: vExtraOpts.measurementUnit,
-      packagingType: vExtraOpts.unit,
-      sellerPrice: vSellerPricePerProductUnit,
-      sellerPricePerBaseUnit: vSellerPricePerBaseUnit,
-      sellerPricePerProductUnit: vSellerPricePerProductUnit,
-      customerUnitBasePrice: vCustomerUnitBasePrice,
-      price: vCustomerPrice,
+      measurementBasis: vMeasUnit,
+      measurementUnit: vMeasUnit,
+      packagingType: vPkgType,
+      priceBasis: vPriceBasis,
+      sellerPrice: vCalc.sellerPricePerProductUnit,
+      sellerPricePerBaseUnit: vCalc.sellerPricePerBaseUnit,
+      sellerPricePerProductUnit: vCalc.sellerPricePerProductUnit,
+      adminCommissionPerBaseUnit: vCalc.adminCommissionPerBaseUnit,
+      commissionPerProductUnit: vCalc.commissionPerProductUnit,
+      customerUnitBasePrice: vCalc.customerUnitBasePrice,
+      price: vCalc.customerFinalPricePerProductUnit || vCalc.customerPrice,
       commissionType,
       commissionValue,
-      commissionAmount: vCommAmt,
-      unitCommission: vCommAmt
+      commissionAmount: vCalc.commissionAmount,
+      unitCommission: vCalc.unitCommission,
+      gstPercent: vGst,
+      stock: vStock
     };
   });
 
   const newB2b = (product.b2b || []).map(v => {
-    const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
-    const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const vIsPackagePrice = v.isPackagePrice !== undefined ? Boolean(v.isPackagePrice) : true;
+    const vPriceBasis = v.priceBasis || (v.isPackagePrice !== undefined ? (v.isPackagePrice ? 'per_package' : 'per_unit') : 'per_package');
+    const vUnitSize = extractUnitSize(v.unitSize || v.packetSizeVal || v.packetSize, unitSize);
+    const vPkgType = v.packagingType || packagingType || 'BAG';
+    const vMeasUnit = v.measurementBasis || v.measurementUnit || measurementBasis || 'KG';
+    const vGst = v.gstPercent !== undefined && v.gstPercent !== '' && v.gstPercent !== null ? parseFloat(v.gstPercent) || 0 : (parseFloat(product.gstPercent) || 0);
+    const vStock = v.stock !== undefined && v.stock !== '' && v.stock !== null ? parseInt(v.stock, 10) || 0 : 0;
+
+    let vSellerPrice = 0;
+    if (vPriceBasis === 'per_package') {
+      vSellerPrice = v.sellerPricePerProductUnit !== undefined && v.sellerPricePerProductUnit > 0
+        ? v.sellerPricePerProductUnit
+        : (v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0));
+    } else {
+      vSellerPrice = v.sellerPricePerBaseUnit !== undefined && v.sellerPricePerBaseUnit > 0
+        ? v.sellerPricePerBaseUnit
+        : (v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0));
+    }
+
     const vExtraOpts = {
       ...extraOpts,
-      isPackagePrice: vIsPackagePrice,
-      unit: v.packagingType || unit,
-      measurementUnit: v.measurementUnit || measurementUnit
+      priceBasis: vPriceBasis,
+      isPackagePrice: vPriceBasis === 'per_package',
+      unit: vPkgType,
+      packagingType: vPkgType,
+      measurementUnit: vMeasUnit,
+      measurementBasis: vMeasUnit
     };
-    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit, customerUnitBasePrice: vCustomerUnitBasePrice } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
+    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, vGst, false, vExtraOpts);
 
     let newTiers = v.priceTiers;
     if (Array.isArray(v.priceTiers)) {
       newTiers = v.priceTiers.map(t => {
         const tSellerPrice = t.sellerPrice !== undefined && t.sellerPrice !== null ? t.sellerPrice : (t.price || 0);
-        const { customerPrice: tCustomerPrice, sellerPricePerProductUnit: tSellerPricePerProductUnit, sellerPricePerBaseUnit: tSellerPricePerBaseUnit } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
+        const { customerPrice: tCustomerPrice, sellerPricePerProductUnit: tSellerPricePerProductUnit, sellerPricePerBaseUnit: tSellerPricePerBaseUnit } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize, vGst, false, vExtraOpts);
         return {
           ...t,
           sellerPrice: tSellerPricePerProductUnit,
@@ -721,17 +828,23 @@ function applyCommission(product, commissions = [], pincode = null) {
       ...v,
       unitSize: vUnitSize,
       sizeValue: v.sizeValue || vUnitSize,
-      measurementUnit: vExtraOpts.measurementUnit,
-      packagingType: vExtraOpts.unit,
-      sellerPrice: vSellerPricePerProductUnit,
-      sellerPricePerBaseUnit: vSellerPricePerBaseUnit,
-      sellerPricePerProductUnit: vSellerPricePerProductUnit,
-      customerUnitBasePrice: vCustomerUnitBasePrice,
-      price: vCustomerPrice,
+      measurementBasis: vMeasUnit,
+      measurementUnit: vMeasUnit,
+      packagingType: vPkgType,
+      priceBasis: vPriceBasis,
+      sellerPrice: vCalc.sellerPricePerProductUnit,
+      sellerPricePerBaseUnit: vCalc.sellerPricePerBaseUnit,
+      sellerPricePerProductUnit: vCalc.sellerPricePerProductUnit,
+      adminCommissionPerBaseUnit: vCalc.adminCommissionPerBaseUnit,
+      commissionPerProductUnit: vCalc.commissionPerProductUnit,
+      customerUnitBasePrice: vCalc.customerUnitBasePrice,
+      price: vCalc.customerFinalPricePerProductUnit || vCalc.customerPrice,
       commissionType,
       commissionValue,
-      commissionAmount: vCommAmt,
-      unitCommission: vCommAmt,
+      commissionAmount: vCalc.commissionAmount,
+      unitCommission: vCalc.unitCommission,
+      gstPercent: vGst,
+      stock: vStock,
       priceTiers: newTiers
     };
   });
@@ -772,9 +885,12 @@ function applyCommission(product, commissions = [], pincode = null) {
     // 10-Step Breakdown Fields (Section 5)
     sellerPricePerBaseUnit: primaryPricing.sellerPricePerBaseUnit,
     productMeasurementUnit: primaryPricing.productMeasurementUnit,
+    measurementBasis: primaryPricing.measurementUnit,
     measurementUnit: primaryPricing.measurementUnit,
+    packagingType: primaryPricing.unit,
     unit: primaryPricing.unit,
     unitSize,
+    priceBasis,
     sellerPricePerProductUnit: primaryPricing.sellerPricePerProductUnit,
     adminCommissionPerBaseUnit: primaryPricing.adminCommissionPerBaseUnit,
     commissionPerProductUnit: primaryPricing.commissionPerProductUnit,
@@ -843,12 +959,18 @@ function applyCommission(product, commissions = [], pincode = null) {
  */
 function calculatePricingBreakdown({
   sellerUnitPrice = 0,
+  sellerPrice = undefined,
   sellerPricePerBaseUnit = undefined,
+  sellerPricePerProductUnit = undefined,
+  priceBasis = undefined,
+  isPackagePrice = undefined,
   commissionType = 'flat',
   commissionValue = 0,
   commissionRate = undefined,
   commissionBasisRate = undefined,
   unit = 'unit',
+  packagingType = undefined,
+  measurementBasis = undefined,
   measurementUnit = null,
   commissionUnit = null,
   unitSize = 1,
@@ -862,20 +984,31 @@ function calculatePricingBreakdown({
   const rawQty = orderedQuantity !== undefined ? orderedQuantity : quantity;
   const qty = parseInt(rawQty, 10) > 0 ? parseInt(rawQty, 10) : 1;
   const uSize = extractUnitSize(unitSize, 1);
+  const pkgUnit = packagingType || unit || 'bag';
+  const measUnit = measurementBasis || measurementUnit || null;
 
-  // Determine base seller price per unit of measurement (e.g. ₹50 / KG)
-  let baseSellerPrice = 0;
-  if (sellerPricePerBaseUnit !== undefined && sellerPricePerBaseUnit !== null) {
-    baseSellerPrice = parseFloat(sellerPricePerBaseUnit) || 0;
+  const productBasis = resolveMeasurementBasis(pkgUnit, measUnit, uSize);
+  const compatibility = checkCommissionCompatibility(productBasis, commissionUnit || productBasis.measurementUnit || pkgUnit);
+
+  const isPackage = priceBasis === 'per_package' || Boolean(isPackagePrice) || (sellerPricePerProductUnit !== undefined && sellerPricePerBaseUnit === undefined);
+
+  let sPricePerBaseUnit = 0;
+  let sPricePerProductUnit = 0;
+
+  if (sellerPricePerProductUnit !== undefined && sellerPricePerBaseUnit !== undefined && Number(sellerPricePerProductUnit) > 0 && Number(sellerPricePerBaseUnit) > 0) {
+    sPricePerProductUnit = round2(sellerPricePerProductUnit);
+    sPricePerBaseUnit = round2(sellerPricePerBaseUnit);
+  } else if (isPackage) {
+    const rawVal = sellerPricePerProductUnit !== undefined ? sellerPricePerProductUnit : (sellerPrice !== undefined ? sellerPrice : sellerUnitPrice);
+    const enteredPkgPrice = parseFloat(rawVal) || 0;
+    sPricePerProductUnit = round2(enteredPkgPrice);
+    sPricePerBaseUnit = uSize > 0 ? round2(enteredPkgPrice / uSize) : round2(enteredPkgPrice);
   } else {
-    baseSellerPrice = parseFloat(sellerUnitPrice) || 0;
+    const rawVal = sellerPricePerBaseUnit !== undefined ? sellerPricePerBaseUnit : (sellerPrice !== undefined ? sellerPrice : sellerUnitPrice);
+    const enteredBasePrice = parseFloat(rawVal) || 0;
+    sPricePerBaseUnit = round2(enteredBasePrice);
+    sPricePerProductUnit = round2(enteredBasePrice * uSize);
   }
-
-  const productBasis = resolveMeasurementBasis(unit, measurementUnit, uSize);
-  const compatibility = checkCommissionCompatibility(productBasis, commissionUnit || unit);
-
-  // Step 1: Seller Price Per Product Unit (e.g. 50 * 30 = 1500)
-  const sellerPricePerProductUnit = round2(baseSellerPrice * uSize);
 
   // Step 2: Commission Per Product Unit (e.g. 20 * 30 = 600)
   const rawCommVal = commissionRate !== undefined ? commissionRate : commissionValue;
@@ -889,14 +1022,14 @@ function calculatePricingBreakdown({
     const factor = compatibility.isCompatible ? (compatibility.conversionFactor !== undefined ? compatibility.conversionFactor : 1) : 1;
     commissionPerProductUnit = round2(cVal * factor * uSize);
   } else {
-    commissionPerProductUnit = round2((sellerPricePerProductUnit * cVal) / 100);
+    commissionPerProductUnit = round2((sPricePerProductUnit * cVal) / 100);
   }
 
   // Step 3: Customer Unit Base Price (1500 + 600 = 2100)
-  const customerUnitBasePrice = round2(sellerPricePerProductUnit + commissionPerProductUnit);
+  const customerUnitBasePrice = round2(sPricePerProductUnit + commissionPerProductUnit);
 
   // Step 4: Total Seller Amount (1500 * 2 = 3000)
-  const totalSellerAmount = round2(sellerPricePerProductUnit * qty);
+  const totalSellerAmount = round2(sPricePerProductUnit * qty);
 
   // Step 5: Total Commission (600 * 2 = 1200)
   const totalCommission = round2(commissionPerProductUnit * qty);
@@ -929,23 +1062,33 @@ function calculatePricingBreakdown({
   const stock = typeof availableStock === 'number' ? availableStock : (parseInt(availableStock, 10) || 0);
   const totalStockWeight = round2(uSize * Math.max(0, stock));
   const totalStockCommission = round2(commissionPerProductUnit * Math.max(0, stock));
-  const totalSellerStockValue = round2(sellerPricePerProductUnit * Math.max(0, stock));
+  const totalSellerStockValue = round2(sPricePerProductUnit * Math.max(0, stock));
   const totalStockSubtotal = round2(totalSellerStockValue + totalStockCommission);
   const totalStockGst = isGstInclusive ? 0 : round2(totalStockSubtotal * (gstRate / 100));
   const totalStockValuation = isGstInclusive ? totalStockSubtotal : round2(totalStockSubtotal + totalStockGst);
 
   return {
     // 10-step Product Breakdown items (Section 5)
-    sellerPricePerBaseUnit: baseSellerPrice,
+    sellerPricePerBaseUnit: sPricePerBaseUnit,
     productMeasurementUnit: productBasis.measurementUnit || productBasis.packagingUnit,
     measurementUnit: productBasis.measurementUnit || productBasis.packagingUnit,
+    measurementBasis: productBasis.measurementUnit || productBasis.packagingUnit,
+    packagingType: productBasis.packagingUnit,
     unit: productBasis.packagingUnit,
     unitSize: uSize,
-    sellerPricePerProductUnit,
+    productUnitSize: uSize,
+    sellerPriceBasis: isPackage ? 'per_package' : 'per_unit',
+    priceBasis: isPackage ? 'per_package' : 'per_unit',
+    sellerPricePerPackage: sPricePerProductUnit,
+    sellerPricePerProductUnit: sPricePerProductUnit,
+    adminCommissionRate: cVal,
     adminCommissionPerBaseUnit: cVal,
+    commissionMeasurementUnit: commissionUnit || productBasis.measurementUnit || productBasis.packagingUnit,
+    commissionPerPackage: commissionPerProductUnit,
     commissionPerProductUnit,
     customerUnitBasePrice,
     gstPercent: gstRate,
+    gstRate,
     gstAmountPerProductUnit: unitGst,
     customerFinalPricePerProductUnit: unitFinalCustomerPrice,
 
@@ -956,6 +1099,7 @@ function calculatePricingBreakdown({
     // Ordered Quantity Totals (Section 2, 3, 4, 8)
     orderedQuantity: qty,
     quantity: qty,
+    totalMeasurementQuantity: totalProductWeight,
     totalProductWeight,
     totalSellerAmount,
     totalCommission,
@@ -973,11 +1117,14 @@ function calculatePricingBreakdown({
     totalStockValuation,
 
     // Backward compatibility aliases
-    sellerPrice: sellerPricePerProductUnit,
-    sellerUnitPrice: sellerPricePerProductUnit,
+    sellerPrice: sPricePerProductUnit,
+    sellerUnitPrice: sPricePerProductUnit,
+    normalPrice: sPricePerProductUnit,
     unitCommission: commissionPerProductUnit,
     commissionType: cType,
     commissionRate: cVal,
+    commissionValue: cVal,
+    commissionAmount: commissionPerProductUnit,
     price: customerUnitBasePrice,
     unitCustomerPrice: unitFinalCustomerPrice,
     totalAmount: finalCustomerAmount,

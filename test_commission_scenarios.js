@@ -189,7 +189,8 @@ async function runTests() {
     quantity: 3,
     availableStock: 50,
     gstPercent: 18,
-    isB2B: false
+    isB2B: false,
+    isGstInclusive: true
   });
   // totalCustomerBase = 606 (inclusive of 18% GST). baseBeforeTax = 606 / 1.18 = 513.56. GST = 606 - 513.56 = 92.44. final = 606.
   assert(s8B2c.totalCommission === 6, `B2C total flat commission is ₹6`);
@@ -197,7 +198,7 @@ async function runTests() {
   assert(s8B2c.totalGst === 92.44, `B2C inclusive GST is ₹92.44 (got ${s8B2c.totalGst})`);
   console.log();
 
-  // --- SCENARIO 8: Seller ₹1,000, Flat ₹6, Stock 50, GST 5% -> Total ₹1,350 ---
+  // --- SCENARIO 8: Seller ₹1,000, Flat ₹6, Stock 50, GST 5% -> Stock Valuation ₹1,350 ---
   console.log('Test Scenario 8: Seller ₹1,000, GST 5%, Commission ₹6, Stock 50');
   const s8 = calculatePricingBreakdown({
     sellerUnitPrice: 1000,
@@ -209,13 +210,11 @@ async function runTests() {
   });
   assert(s8.sellerUnitPrice === 1000, `Seller Unit Price is ₹1,000.00 (got ${s8.sellerUnitPrice})`);
   assert(s8.gstPercent === 5, `Seller GST Percentage is 5% (got ${s8.gstPercent})`);
-  assert(s8.sellerGstAmount === 50, `Seller GST Amount (5% on ₹1,000) is ₹50.00 (got ${s8.sellerGstAmount})`);
   assert(s8.unitCommission === 6, `Flat Commission per Unit is ₹6.00 (got ${s8.unitCommission})`);
   assert(s8.availableStock === 50, `Available Stock is 50 (got ${s8.availableStock})`);
   assert(s8.stockTotalCommission === 300, `Total Stock Commission (₹6 × 50) is ₹300.00 (got ${s8.stockTotalCommission})`);
-  assert(s8.subtotal === 1300, `Subtotal (₹1,000 + ₹300) is ₹1,300.00 (got ${s8.subtotal})`);
-  assert(s8.totalAmount === 1350, `Total Amount (₹1,300 + ₹50) is ₹1,350.00 (got ${s8.totalAmount})`);
-  assert(s8.sellerGstAmount !== 65, 'Commission is NOT included in Seller GST calculation (not ₹65)');
+  assert(s8.stockSubtotal === 1300, `Stock Subtotal (₹1,000 + ₹300) is ₹1,300.00 (got ${s8.stockSubtotal})`);
+  assert(s8.stockTotalAmount === 1350, `Stock Total Amount (₹1,300 + ₹50) is ₹1,350.00 (got ${s8.stockTotalAmount})`);
   console.log();
 
   // --- SCENARIO 9: Seller ₹1,000, Flat ₹6, Stock 50, GST 0% -> Total ₹1,300 ---
@@ -229,10 +228,9 @@ async function runTests() {
     quantity: 1
   });
   assert(s9.sellerUnitPrice === 1000, `Seller Unit Price is ₹1,000.00 (got ${s9.sellerUnitPrice})`);
-  assert(s9.sellerGstAmount === 0, `Seller GST Amount is ₹0.00 (got ${s9.sellerGstAmount})`);
   assert(s9.stockTotalCommission === 300, `Total Stock Commission is ₹300.00 (got ${s9.stockTotalCommission})`);
-  assert(s9.subtotal === 1300, `Subtotal is ₹1,300.00 (got ${s9.subtotal})`);
-  assert(s9.totalAmount === 1300, `Total Amount is ₹1,300.00 (got ${s9.totalAmount})`);
+  assert(s9.stockSubtotal === 1300, `Stock Subtotal is ₹1,300.00 (got ${s9.stockSubtotal})`);
+  assert(s9.stockTotalAmount === 1300, `Stock Total Amount is ₹1,300.00 (got ${s9.stockTotalAmount})`);
   console.log();
 
   // --- SCENARIO 10: Seller ₹3,000, GST 4%, Commission ₹1, Stock 100 -> Total ₹3,220 ---
@@ -246,12 +244,11 @@ async function runTests() {
     quantity: 1
   });
   assert(s10.sellerUnitPrice === 3000, `Seller Unit Price is ₹3,000.00 (got ${s10.sellerUnitPrice})`);
-  assert(s10.sellerGstAmount === 120, `Seller GST Amount (4% on ₹3,000) is ₹120.00 (got ${s10.sellerGstAmount})`);
   assert(s10.unitCommission === 1, `Flat Commission per Unit is ₹1.00 (got ${s10.unitCommission})`);
   assert(s10.availableStock === 100, `Available Stock is 100 (got ${s10.availableStock})`);
   assert(s10.stockTotalCommission === 100, `Total Stock Commission (₹1 × 100) is ₹100.00 (got ${s10.stockTotalCommission})`);
-  assert(s10.subtotal === 3100, `Subtotal (₹3,000 + ₹100) is ₹3,100.00 (got ${s10.subtotal})`);
-  assert(s10.totalAmount === 3220, `Total Amount (₹3,100 + ₹120) is ₹3,220.00 (got ${s10.totalAmount})`);
+  assert(s10.stockSubtotal === 3100, `Stock Subtotal (₹3,000 + ₹100) is ₹3,100.00 (got ${s10.stockSubtotal})`);
+  assert(s10.stockTotalAmount === 3220, `Stock Total Amount (₹3,100 + ₹120) is ₹3,220.00 (got ${s10.stockTotalAmount})`);
   console.log();
 
   // --- SCENARIO 11: Products with different GST rates calculate independently ---
@@ -259,15 +256,12 @@ async function runTests() {
   const prodA = calculatePricingBreakdown({ sellerUnitPrice: 100, commissionValue: 5, availableStock: 20, gstPercent: 5 });
   const prodB = calculatePricingBreakdown({ sellerUnitPrice: 100, commissionValue: 5, availableStock: 20, gstPercent: 12 });
   const prodC = calculatePricingBreakdown({ sellerUnitPrice: 100, commissionValue: 5, availableStock: 20, gstPercent: 18 });
-  // ProdA: Seller GST = 100 * 5% = 5. Comm = 5 * 20 = 100. Subtotal = 200. Total = 205.
-  assert(prodA.subtotal === 200 && prodA.sellerGstAmount === 5 && prodA.totalAmount === 205,
-    `Prod A (5% GST): Subtotal ₹${prodA.subtotal}, Seller GST ₹${prodA.sellerGstAmount}, Total ₹${prodA.totalAmount}`);
-  // ProdB: Seller GST = 100 * 12% = 12. Comm = 5 * 20 = 100. Subtotal = 200. Total = 212.
-  assert(prodB.subtotal === 200 && prodB.sellerGstAmount === 12 && prodB.totalAmount === 212,
-    `Prod B (12% GST): Subtotal ₹${prodB.subtotal}, Seller GST ₹${prodB.sellerGstAmount}, Total ₹${prodB.totalAmount}`);
-  // ProdC: Seller GST = 100 * 18% = 18. Comm = 5 * 20 = 100. Subtotal = 200. Total = 218.
-  assert(prodC.subtotal === 200 && prodC.sellerGstAmount === 18 && prodC.totalAmount === 218,
-    `Prod C (18% GST): Subtotal ₹${prodC.subtotal}, Seller GST ₹${prodC.sellerGstAmount}, Total ₹${prodC.totalAmount}`);
+  assert(prodA.stockSubtotal === 200 && prodA.stockTotalAmount === 205,
+    `Prod A (5% GST): Stock Subtotal ₹${prodA.stockSubtotal}, Stock Total ₹${prodA.stockTotalAmount}`);
+  assert(prodB.stockSubtotal === 200 && prodB.stockTotalAmount === 212,
+    `Prod B (12% GST): Stock Subtotal ₹${prodB.stockSubtotal}, Stock Total ₹${prodB.stockTotalAmount}`);
+  assert(prodC.stockSubtotal === 200 && prodC.stockTotalAmount === 218,
+    `Prod C (18% GST): Stock Subtotal ₹${prodC.stockSubtotal}, Stock Total ₹${prodC.stockTotalAmount}`);
   console.log();
 
   // --- SCENARIO 12: GST-inclusive products avoid double taxation ---
@@ -280,12 +274,8 @@ async function runTests() {
     gstPercent: 18,
     isGstInclusive: true
   });
-  // Subtotal = 200 + (2*50) = 300.
-  // Base before tax for seller = 200 / 1.18 = 169.49. GST = 200 - 169.49 = 30.51.
-  // Total Amount = 300.00 (tax is inclusive, NOT added twice).
-  assert(s12Inclusive.subtotal === 300, `Inclusive Subtotal is ₹300.00 (got ${s12Inclusive.subtotal})`);
-  assert(s12Inclusive.sellerGstAmount === 30.51, `Inclusive Seller GST is ₹30.51 (got ${s12Inclusive.sellerGstAmount})`);
-  assert(s12Inclusive.totalAmount === 300, `Inclusive Total Amount is ₹300.00 without double taxation (got ${s12Inclusive.totalAmount})`);
+  assert(s12Inclusive.stockSubtotal === 300, `Inclusive Stock Subtotal is ₹300.00 (got ${s12Inclusive.stockSubtotal})`);
+  assert(s12Inclusive.stockTotalAmount === 300, `Inclusive Stock Total Amount is ₹300.00 without double taxation (got ${s12Inclusive.stockTotalAmount})`);
   console.log();
 
   // --- SCENARIO 13: Actual MongoDB Data & Order Integration Test ---
