@@ -20,14 +20,15 @@ io.on('connection', (socket) => {
 });
 
 // Middleware
+const { isOriginAllowed } = require('./utils/socket');
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'https://snbtradingco.in',
-    'https://www.snbtradingco.in',
-    'https://zudo-sellerpanel-final.vercel.app',
-    'https://zudo-adminpanel.vercel.app'
-  ],
+  origin: (origin, callback) => {
+    if (isOriginAllowed(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true);
+    }
+  },
   credentials: true
 }));
 app.use(express.json());
