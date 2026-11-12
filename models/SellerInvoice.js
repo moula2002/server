@@ -17,6 +17,10 @@ const sellerInvoiceSchema = new mongoose.Schema({
     required: false,
     index: true
   },
+  imageIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'InvoiceImage'
+  }],
   invoiceImage: {
     data: {
       type: Buffer,
