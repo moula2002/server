@@ -1,5 +1,6 @@
+const path = require('path');
 const mongoose = require('mongoose');
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const {
   calculatePricingBreakdown,
   calculateCustomerPrice,
