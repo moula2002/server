@@ -4,11 +4,33 @@ const sellerInvoiceSchema = new mongoose.Schema({
   sellerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Seller',
-    required: true
+    required: true,
+    index: true
   },
   invoiceNumber: {
     type: String,
-    required: false
+    required: true,
+    trim: true
+  },
+  invoiceSequenceNumber: {
+    type: Number,
+    required: false,
+    index: true
+  },
+  invoiceImage: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'InvoiceImage',
+    default: null
+  },
+  hasInvoiceImage: {
+    type: Boolean,
+    default: false
+  },
+  imageMetadata: {
+    filename: String,
+    originalName: String,
+    mimeType: String,
+    size: Number
   },
   startDate: {
     type: Date,
@@ -51,5 +73,8 @@ const sellerInvoiceSchema = new mongoose.Schema({
     ref: 'Seller'
   }
 }, { timestamps: true });
+
+// Prevent duplicate invoice number for the same seller
+sellerInvoiceSchema.index({ sellerId: 1, invoiceNumber: 1 }, { unique: true });
 
 module.exports = mongoose.model('SellerInvoice', sellerInvoiceSchema);

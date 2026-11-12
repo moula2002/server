@@ -1,16 +1,35 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
 const { protect } = require('../middleware/auth');
 const sendEmail = require('../utils/email');
 const PDFDocument = require('pdfkit-table');
 const Order = require('../models/Order');
 const SellerInvoice = require('../models/SellerInvoice');
+const InvoiceImage = require('../models/InvoiceImage');
 const { round2 } = require('../utils/pricing');
+
+// Configure multer to store file in memory as Buffer for MongoDB binary storage
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    if (allowedTypes.includes(file.mimetype.toLowerCase())) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid image type. Only JPG, JPEG, PNG, and WEBP are allowed.'));
+    }
+  }
+});
 
 const getModels = (req) => {
   return {
     Order: req.models?.Order || Order,
     SellerInvoice: req.models?.SellerInvoice || SellerInvoice,
+    InvoiceImage: req.models?.InvoiceImage || InvoiceImage,
     Seller: req.models?.Seller || require('../models/Seller')
   };
 };
@@ -28,6 +47,7 @@ router.param('id', async (req, res, next, id) => {
           req.models = {
             Order: tenantConn.models.Order || tenantConn.model('Order', require('../models/Order').schema),
             SellerInvoice: TenantInvoice,
+            InvoiceImage: tenantConn.models.InvoiceImage || tenantConn.model('InvoiceImage', require('../models/InvoiceImage').schema),
             Seller: tenantConn.models.Seller || tenantConn.model('Seller', require('../models/Seller').schema)
           };
           req.db = tenantConn;
@@ -41,15 +61,70 @@ router.param('id', async (req, res, next, id) => {
   next();
 });
 
+// @route   GET /api/seller-invoices/next-number
+// @desc    Get the current invoice sequence status for the logged-in seller
+router.get('/next-number', protect, async (req, res) => {
+  try {
+    if (req.user?.role !== 'seller' && !req.admin) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    let sellerId = req.user?._id;
+    if (req.admin && req.query.sellerId) {
+      sellerId = req.query.sellerId;
+    }
+
+    const { SellerInvoice: InvoiceModel } = getModels(req);
+    const existingInvoices = await InvoiceModel.find({ sellerId }).select('invoiceNumber invoiceSequenceNumber createdAt').sort({ createdAt: 1 });
+
+    const usedNumbers = [];
+    const usedNumericSequences = [];
+
+    existingInvoices.forEach(inv => {
+      const numStr = (inv.invoiceNumber || '').toString().trim();
+      if (numStr) usedNumbers.push(numStr);
+
+      const parsed = parseInt(numStr, 10);
+      if (/^\d+$/.test(numStr) && !isNaN(parsed) && parsed > 0) {
+        usedNumericSequences.push(parsed);
+      } else if (inv.invoiceSequenceNumber && inv.invoiceSequenceNumber > 0) {
+        usedNumericSequences.push(inv.invoiceSequenceNumber);
+      }
+    });
+
+    const maxNumeric = usedNumericSequences.length > 0 ? Math.max(...usedNumericSequences) : 0;
+    const nextExpectedNumber = maxNumeric + 1;
+
+    res.json({
+      totalInvoices: existingInvoices.length,
+      lastInvoiceNumber: existingInvoices.length > 0 ? existingInvoices[existingInvoices.length - 1].invoiceNumber : null,
+      maxSequentialNumber: maxNumeric,
+      nextExpectedNumber,
+      usedNumbers
+    });
+  } catch (error) {
+    console.error('Error fetching next invoice number:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // @route   POST /api/seller-invoices/generate
-// @desc    Generate a new invoice for a seller
-router.post('/generate', protect, async (req, res) => {
+// @desc    Generate a new invoice for a seller with optional or required image upload
+router.post('/generate', protect, (req, res, next) => {
+  upload.single('invoiceImage')(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({ message: err.message || 'Image upload error' });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
     if (req.user?.role !== 'seller' && !req.admin) {
       return res.status(403).json({ message: 'Not authorized to generate invoices' });
     }
 
-    const { startDate, endDate, invoiceNumber } = req.body;
+    const { startDate, endDate } = req.body;
+    const rawInvoiceNumber = req.body.invoiceNumber;
     let sellerId = req.user?._id;
     
     if (req.admin) {
@@ -59,11 +134,63 @@ router.post('/generate', protect, async (req, res) => {
       sellerId = req.body.sellerId;
     }
 
-    if (!startDate || !endDate || !invoiceNumber) {
-      return res.status(400).json({ message: 'Start date, end date, and invoice number are required' });
+    if (!startDate || !endDate) {
+      return res.status(400).json({ message: 'Start date and end date are required' });
     }
 
-    const { Order: OrderModel, SellerInvoice: InvoiceModel, Seller: SellerModel } = getModels(req);
+    if (!rawInvoiceNumber || !rawInvoiceNumber.toString().trim()) {
+      return res.status(400).json({ message: 'Manual invoice number is required (e.g. 1, 2, 3...)' });
+    }
+
+    const trimmedInvoiceNumber = rawInvoiceNumber.toString().trim();
+
+    // Must be a valid positive integer string for sequential enforcement (1, 2, 3...)
+    if (!/^\d+$/.test(trimmedInvoiceNumber)) {
+      return res.status(400).json({ 
+        message: 'Invoice number must be a sequential positive number (1, 2, 3, 4...).' 
+      });
+    }
+
+    const numericInvoiceNumber = parseInt(trimmedInvoiceNumber, 10);
+    if (numericInvoiceNumber <= 0) {
+      return res.status(400).json({ message: 'Invoice number must be greater than 0.' });
+    }
+
+    const { Order: OrderModel, SellerInvoice: InvoiceModel, InvoiceImage: InvoiceImageModel, Seller: SellerModel } = getModels(req);
+
+    // 1. Check for duplicate invoice number for this seller
+    const duplicate = await InvoiceModel.findOne({
+      sellerId: sellerId,
+      invoiceNumber: trimmedInvoiceNumber
+    });
+
+    if (duplicate) {
+      return res.status(400).json({ 
+        message: `Invoice number "${trimmedInvoiceNumber}" has already been used by you. Duplicate invoice numbers are not allowed.` 
+      });
+    }
+
+    // 2. Validate sequential order against previously generated invoices
+    const allSellerInvoices = await InvoiceModel.find({ sellerId }).select('invoiceNumber invoiceSequenceNumber').lean();
+    const usedNumericSequences = [];
+    allSellerInvoices.forEach(inv => {
+      const numStr = (inv.invoiceNumber || '').toString().trim();
+      const p = parseInt(numStr, 10);
+      if (/^\d+$/.test(numStr) && !isNaN(p) && p > 0) {
+        usedNumericSequences.push(p);
+      } else if (inv.invoiceSequenceNumber && inv.invoiceSequenceNumber > 0) {
+        usedNumericSequences.push(inv.invoiceSequenceNumber);
+      }
+    });
+
+    const maxNumeric = usedNumericSequences.length > 0 ? Math.max(...usedNumericSequences) : 0;
+    const nextExpectedNumber = maxNumeric + 1;
+
+    if (numericInvoiceNumber !== nextExpectedNumber) {
+      return res.status(400).json({
+        message: `Sequential numbering required. The next expected invoice number is ${nextExpectedNumber}. You entered ${numericInvoiceNumber}. Skipping or regressing numbers is not permitted.`
+      });
+    }
 
     // Check for overlapping cleared/pending invoices
     const start = new Date(startDate);
@@ -81,11 +208,6 @@ router.post('/generate', protect, async (req, res) => {
       return res.status(400).json({ 
         message: 'You already have an invoice generated that overlaps with this date range. Status: ' + overlappingInvoice.status 
       });
-    }
-
-    const existingInvoiceNum = await InvoiceModel.findOne({ sellerId, invoiceNumber });
-    if (existingInvoiceNum) {
-      return res.status(400).json({ message: 'This invoice number already exists for this seller' });
     }
 
     const seller = await SellerModel.findById(sellerId);
@@ -144,7 +266,8 @@ router.post('/generate', protect, async (req, res) => {
     // Create Invoice Record
     const newInvoice = new InvoiceModel({
       sellerId: sellerId,
-      invoiceNumber: invoiceNumber,
+      invoiceNumber: trimmedInvoiceNumber,
+      invoiceSequenceNumber: numericInvoiceNumber,
       startDate: start,
       endDate: end,
       totalAmount: roundedTotalAmount,
@@ -153,8 +276,32 @@ router.post('/generate', protect, async (req, res) => {
       orderCount: orderIds.length,
       orders: orderIds,
       status: 'Pending',
+      hasInvoiceImage: Boolean(req.file),
       generatedBy: req.user ? req.user._id : sellerId
     });
+
+    // If an image was uploaded, store it in InvoiceImage collection as raw binary Buffer
+    if (req.file) {
+      const invoiceImageDoc = new InvoiceImageModel({
+        invoiceId: newInvoice._id,
+        sellerId: sellerId,
+        filename: `${trimmedInvoiceNumber}_${Date.now()}_${req.file.originalname}`,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
+        data: req.file.buffer
+      });
+
+      await invoiceImageDoc.save();
+
+      newInvoice.invoiceImage = invoiceImageDoc._id;
+      newInvoice.imageMetadata = {
+        filename: invoiceImageDoc.filename,
+        originalName: invoiceImageDoc.originalName,
+        mimeType: invoiceImageDoc.mimeType,
+        size: invoiceImageDoc.size
+      };
+    }
 
     await newInvoice.save();
     
@@ -174,16 +321,17 @@ router.post('/generate', protect, async (req, res) => {
           html: `
             <h3>New Invoice Generated</h3>
             <p><strong>Seller:</strong> ${seller.businessName || seller.name}</p>
-            <p><strong>Invoice Number:</strong> ${invoiceNumber}</p>
+            <p><strong>Invoice Number:</strong> ${trimmedInvoiceNumber}</p>
             <p><strong>Date Range:</strong> ${start.toDateString()} to ${end.toDateString()}</p>
             <p><strong>Total Amount:</strong> ₹${roundedTotalAmount}</p>
             <p><strong>Total Commission:</strong> ₹${roundedTotalCommission}</p>
             <p><strong>Net Payable:</strong> ₹${roundedNetAmount}</p>
             <p><strong>Total Orders:</strong> ${orderIds.length}</p>
+            ${req.file ? `<p><strong>Attached Invoice Image:</strong> ${req.file.originalname} (${(req.file.size / 1024).toFixed(1)} KB)</p>` : ''}
           `,
           attachments: [
             {
-              filename: `Invoice_${seller.businessName.replace(/\s+/g, '_')}_${invoiceNumber}.pdf`,
+              filename: `Invoice_${seller.businessName.replace(/\s+/g, '_')}_${trimmedInvoiceNumber}.pdf`,
               content: pdfBuffer,
               contentType: 'application/pdf'
             }
@@ -216,7 +364,7 @@ router.post('/generate', protect, async (req, res) => {
     // Meta Details Grid
     doc.rect(40, 180, 515, 65).stroke('#d1d5db');
     doc.font('Helvetica-Bold').fontSize(10);
-    doc.text('Invoice No:', 55, 195).font('Helvetica').text(invoiceNumber, 140, 195);
+    doc.text('Invoice No:', 55, 195).font('Helvetica').text(trimmedInvoiceNumber, 140, 195);
     doc.font('Helvetica-Bold').text('Date Range:', 55, 215).font('Helvetica').text(`${start.toLocaleDateString()} to ${end.toLocaleDateString()}`, 140, 215);
     
     doc.font('Helvetica-Bold').text('Status:', 350, 195).font('Helvetica').text(newInvoice.status, 430, 195);
@@ -261,6 +409,38 @@ router.post('/generate', protect, async (req, res) => {
   }
 });
 
+// @route   GET /api/seller-invoices/:id/image
+// @desc    Retrieve raw invoice image from MongoDB binary storage
+router.get('/:id/image', protect, async (req, res) => {
+  try {
+    const { SellerInvoice: InvoiceModel, InvoiceImage: InvoiceImageModel } = getModels(req);
+    const invoice = await InvoiceModel.findById(req.params.id);
+    if (!invoice) {
+      return res.status(404).json({ message: 'Invoice not found' });
+    }
+
+    const sellerIdStr = invoice.sellerId.toString();
+    const isOwner = req.user && req.user._id && req.user._id.toString() === sellerIdStr;
+    if (!isOwner && !req.admin) {
+      return res.status(403).json({ message: 'Not authorized to view this invoice image' });
+    }
+
+    const imageDoc = await InvoiceImageModel.findOne({ invoiceId: invoice._id });
+    if (!imageDoc || !imageDoc.data) {
+      return res.status(404).json({ message: 'No image uploaded for this invoice' });
+    }
+
+    res.setHeader('Content-Type', imageDoc.mimeType || 'image/jpeg');
+    res.setHeader('Content-Length', imageDoc.size || imageDoc.data.length);
+    res.setHeader('Content-Disposition', `inline; filename="${imageDoc.filename || 'invoice-image'}"`);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    return res.send(imageDoc.data);
+  } catch (error) {
+    console.error('Error retrieving invoice image:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // @route   GET /api/seller-invoices/my-invoices
 // @desc    Get all invoices for logged in seller
 router.get('/my-invoices', protect, async (req, res) => {
@@ -269,7 +449,9 @@ router.get('/my-invoices', protect, async (req, res) => {
       return res.status(403).json({ message: 'Only sellers can access this' });
     }
     const { SellerInvoice: InvoiceModel } = getModels(req);
-    const invoices = await InvoiceModel.find({ sellerId: req.user._id }).sort({ createdAt: -1 });
+    const invoices = await InvoiceModel.find({ sellerId: req.user._id })
+      .populate('sellerId', 'businessName name email storeName')
+      .sort({ createdAt: -1 });
     res.json(invoices);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -290,16 +472,43 @@ router.get('/admin/all', protect, async (req, res) => {
         'SellerInvoice', 
         req, 
         {}, 
-        [{ path: 'sellerId', select: 'businessName name email' }], 
+        [{ path: 'sellerId', select: 'businessName name email storeName phone' }], 
         '', 
         { createdAt: -1 }
       );
       return res.json(invoices);
     } else {
       const { SellerInvoice: InvoiceModel } = getModels(req);
-      const invoices = await InvoiceModel.find().populate('sellerId', 'businessName name email').sort({ createdAt: -1 });
+      const invoices = await InvoiceModel.find()
+        .populate('sellerId', 'businessName name email storeName phone')
+        .sort({ createdAt: -1 });
       return res.json(invoices);
     }
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   GET /api/seller-invoices/:id
+// @desc    Get single invoice details for Seller or Admin
+router.get('/:id', protect, async (req, res) => {
+  try {
+    const { SellerInvoice: InvoiceModel, Order: OrderModel, Seller: SellerModel } = getModels(req);
+    const invoice = await InvoiceModel.findById(req.params.id).populate('sellerId', 'businessName name email storeName phone address gstNumber');
+    if (!invoice) return res.status(404).json({ message: 'Invoice not found' });
+
+    const sellerIdStr = invoice.sellerId?._id ? invoice.sellerId._id.toString() : invoice.sellerId.toString();
+    const isOwner = req.user && req.user._id && req.user._id.toString() === sellerIdStr;
+    if (!isOwner && !req.admin) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    const orders = await OrderModel.find({ _id: { $in: invoice.orders } }).select('orderId totalAmount orderStatus createdAt items paymentMethod');
+
+    res.json({
+      ...invoice.toObject(),
+      ordersList: orders
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
