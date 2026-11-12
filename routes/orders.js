@@ -384,9 +384,10 @@ router.post('/validate-cart', async (req, res) => {
     // Calculate combined quantity per product across variants or separate lines
     const combinedProductQuantities = {};
     for (const item of items) {
-      const pId = (item.productId || item.product || item.id || item._id)?.toString();
+      const rawPid = item.productId || item.product || item.id || item._id;
+      const pId = (rawPid && typeof rawPid === 'object' && rawPid._id) ? rawPid._id.toString() : rawPid?.toString();
       const qty = parseInt(item.quantity, 10);
-      if (pId) {
+      if (pId && mongoose.Types.ObjectId.isValid(pId)) {
         combinedProductQuantities[pId] = (combinedProductQuantities[pId] || 0) + (isNaN(qty) ? 0 : qty);
       }
     }
@@ -395,9 +396,10 @@ router.post('/validate-cart', async (req, res) => {
     const validatedItems = [];
 
     for (const item of items) {
-      const pId = item.productId || item.product || item.id || item._id;
-      if (!pId) {
-        errors.push({ message: 'Missing product ID in item', item });
+      const rawPid = item.productId || item.product || item.id || item._id;
+      const pId = (rawPid && typeof rawPid === 'object' && rawPid._id) ? rawPid._id.toString() : rawPid?.toString();
+      if (!pId || !mongoose.Types.ObjectId.isValid(pId)) {
+        errors.push({ message: `Invalid product ID: "${pId || rawPid}"`, item });
         continue;
       }
 
@@ -535,7 +537,11 @@ router.post('/', protect, async (req, res) => {
     // Also track combined quantity per product across variants or duplicate entries
     const combinedProductQuantities = {};
     for (const item of items) {
-      const pId = (item.product || item.id || item._id)?.toString();
+      const rawPid = item.productId || item.product || item.id || item._id;
+      const pId = (rawPid && typeof rawPid === 'object' && rawPid._id) ? rawPid._id.toString() : rawPid?.toString();
+      if (!pId || !mongoose.Types.ObjectId.isValid(pId)) {
+        return res.status(400).json({ message: `Invalid Product ID in order items: "${pId || rawPid}"` });
+      }
       const qty = parseInt(item.quantity, 10);
       if (pId) {
         combinedProductQuantities[pId] = (combinedProductQuantities[pId] || 0) + (isNaN(qty) ? 0 : qty);
@@ -543,7 +549,8 @@ router.post('/', protect, async (req, res) => {
     }
 
     for (const item of items) {
-      const pId = item.product || item.id || item._id;
+      const rawPid = item.productId || item.product || item.id || item._id;
+      const pId = (rawPid && typeof rawPid === 'object' && rawPid._id) ? rawPid._id.toString() : rawPid?.toString();
       const productData = await ProductModel.findById(pId);
       if (!productData) {
         return res.status(404).json({ message: `Product not found: ${item.name || pId}` });
@@ -595,7 +602,8 @@ router.post('/', protect, async (req, res) => {
     const commissions = await loadCommissions(req);
 
     const enrichedItems = await Promise.all(items.map(async (item) => {
-      const pId = item.product || item.id || item._id;
+      const rawPid = item.productId || item.product || item.id || item._id;
+      const pId = (rawPid && typeof rawPid === 'object' && rawPid._id) ? rawPid._id.toString() : rawPid?.toString();
       let name = item.name;
       let image = item.image || item.imageUrl;
       let finalPrice = item.price;
@@ -1785,7 +1793,11 @@ router.post('/admin/create', protect, async (req, res) => {
     // Validate stock, quantity, and seller maximum order quantity (MOQ)
     const adminCombinedQuantities = {};
     for (const item of items) {
-      const pId = (item.productId || item.product || item.id || item._id)?.toString();
+      const rawPid = item.productId || item.product || item.id || item._id;
+      const pId = (rawPid && typeof rawPid === 'object' && rawPid._id) ? rawPid._id.toString() : rawPid?.toString();
+      if (!pId || !mongoose.Types.ObjectId.isValid(pId)) {
+        return res.status(400).json({ message: `Invalid Product ID in order items: "${pId || rawPid}"` });
+      }
       const qty = parseInt(item.quantity, 10);
       if (pId) {
         adminCombinedQuantities[pId] = (adminCombinedQuantities[pId] || 0) + (isNaN(qty) ? 0 : qty);
@@ -1793,7 +1805,8 @@ router.post('/admin/create', protect, async (req, res) => {
     }
 
     for (const item of items) {
-      const pId = item.productId || item.product || item.id || item._id;
+      const rawPid = item.productId || item.product || item.id || item._id;
+      const pId = (rawPid && typeof rawPid === 'object' && rawPid._id) ? rawPid._id.toString() : rawPid?.toString();
       const productData = await ProductModel.findById(pId);
       if (!productData) {
         return res.status(404).json({ message: `Product not found: ${item.name || pId}` });
@@ -1845,7 +1858,8 @@ router.post('/admin/create', protect, async (req, res) => {
     const commissions = await loadCommissions(req);
 
     const enrichedItems = await Promise.all(items.map(async (item) => {
-      const pId = item.productId || item.product;
+      const rawPid = item.productId || item.product || item.id || item._id;
+      const pId = (rawPid && typeof rawPid === 'object' && rawPid._id) ? rawPid._id.toString() : rawPid?.toString();
       const productData = await ProductModel.findById(pId);
       if (!productData) {
         throw new Error(`Product not found: ${pId}`);

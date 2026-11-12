@@ -15,7 +15,7 @@ const notificationSchema = new mongoose.Schema({
     default: 'all'
   },
   locationId: { 
-    type: mongoose.Schema.Types.ObjectId, 
+    type: mongoose.Schema.Types.Mixed, 
     ref: 'Location',
     default: null 
   },
