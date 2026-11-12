@@ -273,38 +273,14 @@ router.post('/generate', protect, (req, res, next) => {
       return res.status(400).json({ message: 'Start date and end date are required' });
     }
 
-    if (!rawInvoiceNumber || !rawInvoiceNumber.toString().trim()) {
-      return res.status(400).json({ message: 'Manual invoice number is required (e.g. 1, 2, 3...)' });
-    }
-
-    const trimmedInvoiceNumber = rawInvoiceNumber.toString().trim();
-
-    if (!/^\d+$/.test(trimmedInvoiceNumber)) {
-      return res.status(400).json({ 
-        message: 'Invoice number must be a sequential positive number (1, 2, 3, 4...).' 
-      });
-    }
-
-    const numericInvoiceNumber = parseInt(trimmedInvoiceNumber, 10);
-    if (numericInvoiceNumber <= 0) {
-      return res.status(400).json({ message: 'Invoice number must be greater than 0.' });
-    }
-
     const { Order: OrderModel, SellerInvoice: InvoiceModel, InvoiceImage: InvoiceImageModel, Seller: SellerModel } = getModels(req);
 
-    // 1. Check for duplicate invoice number for this seller
-    const duplicate = await InvoiceModel.findOne({
-      sellerId: sellerId,
-      invoiceNumber: trimmedInvoiceNumber
-    });
-
-    if (duplicate) {
-      return res.status(400).json({ 
-        message: `Invoice number "${trimmedInvoiceNumber}" has already been used by you. Duplicate invoice numbers are not allowed.` 
-      });
+    const seller = await SellerModel.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ message: 'Seller not found' });
     }
 
-    // 2. Validate sequential order against previously generated invoices
+    // 1. Calculate next sequential invoice number
     const allSellerInvoices = await InvoiceModel.find({ sellerId }).select('invoiceNumber invoiceSequenceNumber').lean();
     const usedNumericSequences = [];
     allSellerInvoices.forEach(inv => {
@@ -320,9 +296,44 @@ router.post('/generate', protect, (req, res, next) => {
     const maxNumeric = usedNumericSequences.length > 0 ? Math.max(...usedNumericSequences) : 0;
     const nextExpectedNumber = maxNumeric + 1;
 
-    if (numericInvoiceNumber !== nextExpectedNumber) {
-      return res.status(400).json({
-        message: `Sequential numbering required. The next expected invoice number is ${nextExpectedNumber}. You entered ${numericInvoiceNumber}. Skipping or regressing numbers is not permitted.`
+    let trimmedInvoiceNumber = rawInvoiceNumber ? rawInvoiceNumber.toString().trim() : '';
+    let numericInvoiceNumber = parseInt(trimmedInvoiceNumber, 10);
+
+    // Auto-assign next sequential number if omitted or blank
+    if (!trimmedInvoiceNumber) {
+      trimmedInvoiceNumber = String(nextExpectedNumber);
+      numericInvoiceNumber = nextExpectedNumber;
+    } else if (/^\d+$/.test(trimmedInvoiceNumber)) {
+      numericInvoiceNumber = parseInt(trimmedInvoiceNumber, 10);
+      if (numericInvoiceNumber <= 0) {
+        return res.status(400).json({ message: 'Invoice number must be greater than 0.' });
+      }
+      // Sellers must follow strict sequential numbering; Admins have flexibility
+      if (!req.admin && numericInvoiceNumber !== nextExpectedNumber) {
+        return res.status(400).json({
+          message: `Sequential numbering required. The next expected invoice number is ${nextExpectedNumber}. You entered ${numericInvoiceNumber}. Skipping or regressing numbers is not permitted.`
+        });
+      }
+    } else {
+      // Non-numeric custom invoice number (e.g. INV-001) - permitted for admins
+      if (!req.admin) {
+        return res.status(400).json({ 
+          message: 'Invoice number must be a sequential positive number (1, 2, 3, 4...).' 
+        });
+      }
+      numericInvoiceNumber = nextExpectedNumber;
+    }
+
+    // 2. Check for duplicate invoice number for this seller
+    const duplicate = await InvoiceModel.findOne({
+      sellerId: sellerId,
+      invoiceNumber: trimmedInvoiceNumber,
+      status: { $nin: ['Cancelled', 'Rejected'] }
+    });
+
+    if (duplicate) {
+      return res.status(400).json({ 
+        message: `Invoice number "${trimmedInvoiceNumber}" has already been used for this seller. Duplicate invoice numbers are not allowed.` 
       });
     }
 
@@ -333,20 +344,28 @@ router.post('/generate', protect, (req, res, next) => {
     
     const overlappingInvoice = await InvoiceModel.findOne({
       sellerId: sellerId,
+      status: { $nin: ['Cancelled', 'Rejected'] },
       startDate: { $lte: end },
       endDate: { $gte: start }
     });
 
-    if (overlappingInvoice) {
+    // If non-admin seller, block date overlap. If admin, check if un-invoiced orders exist.
+    if (overlappingInvoice && !req.admin) {
       return res.status(400).json({ 
         message: 'You already have an invoice generated that overlaps with this date range. Status: ' + overlappingInvoice.status 
       });
     }
 
-    const seller = await SellerModel.findById(sellerId);
-    if (!seller) {
-      return res.status(404).json({ message: 'Seller not found' });
-    }
+    // Fetch order IDs already included in existing non-cancelled invoices for this seller
+    const existingSellerInvoices = await InvoiceModel.find({
+      sellerId: sellerId,
+      status: { $nin: ['Cancelled', 'Rejected'] }
+    }).select('orders').lean();
+
+    const alreadyInvoicedOrderIds = new Set();
+    existingSellerInvoices.forEach(inv => {
+      (inv.orders || []).forEach(oId => alreadyInvoicedOrderIds.add(oId.toString()));
+    });
 
     // Query all Delivered orders within date range
     const orders = await OrderModel.find({
@@ -359,10 +378,16 @@ router.post('/generate', protect, (req, res, next) => {
     let orderIds = [];
     const validOrders = [];
 
-    // Calculate totals specifically for this seller's items
+    // Calculate totals specifically for this seller's un-invoiced items
     orders.forEach(order => {
+      // Avoid invoicing the same order twice
+      if (alreadyInvoicedOrderIds.has(order._id.toString())) {
+        return;
+      }
+
       let sellerItemsInOrder = order.items.filter(item => {
         const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerId.toString();
+        const matchesDirectSellerId = item.sellerId && item.sellerId.toString() === sellerId.toString();
         const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerId.toString();
         const matchesName = item.sellerName && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
         const matchesStore = item.sellerName && seller.storeName && item.sellerName.toLowerCase() === seller.storeName.toLowerCase();
@@ -370,7 +395,7 @@ router.post('/generate', protect, (req, res, next) => {
         const productMatchesName = item.product && item.product.sellerName && seller.name && item.product.sellerName.toLowerCase() === seller.name.toLowerCase();
         const productMatchesStore = item.product && item.product.sellerName && seller.storeName && item.product.sellerName.toLowerCase() === seller.storeName.toLowerCase();
         
-        return matchesSellerObj || matchesProductRef || matchesName || matchesStore || matchesBusiness || productMatchesName || productMatchesStore;
+        return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName || matchesStore || matchesBusiness || productMatchesName || productMatchesStore;
       });
       
       if (sellerItemsInOrder.length > 0) {
@@ -389,7 +414,14 @@ router.post('/generate', protect, (req, res, next) => {
     });
 
     if (orderIds.length === 0) {
-      return res.status(400).json({ message: 'No delivered orders found in this date range.' });
+      if (alreadyInvoicedOrderIds.size > 0 && orders.length > 0) {
+        return res.status(400).json({ 
+          message: `All delivered orders for ${seller.name} in this date range have already been invoiced in invoice #${allSellerInvoices.map(i => i.invoiceNumber).join(', #')}.` 
+        });
+      }
+      return res.status(400).json({ 
+        message: `No delivered orders found for ${seller.name} in the selected date range (${startDate} to ${endDate}). Commercial invoices require delivered orders.` 
+      });
     }
 
     const roundedTotalAmount = round2(totalAmount);
