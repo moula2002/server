@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const { protect } = require('../middleware/auth');
 const { getModel } = require('../utils/model_loader');
 const { round2 } = require('../utils/pricing');
+const { generatePaymentReceiptPDF } = require('../utils/pdfPaymentReceipt');
 
 /**
  * Helper to determine if an order is Cash on Delivery (COD)
@@ -852,6 +853,16 @@ router.post('/settle', protect, async (req, res) => {
     const remainingOutstanding = round2(currentOutstanding - numericAmount);
     const settlementType = numericAmount >= currentOutstanding ? 'Full Settlement' : 'Partial Settlement';
 
+    // Compute sequential receipt number
+    const lastPayment = await SellerPaymentModel.findOne({ 
+      receiptSequence: { $exists: true, $ne: null } 
+    }).sort({ receiptSequence: -1 }).lean();
+    const countAll = await SellerPaymentModel.countDocuments();
+    const nextSeq = (lastPayment?.receiptSequence && lastPayment.receiptSequence >= countAll)
+      ? (lastPayment.receiptSequence + 1)
+      : (countAll + 1);
+    const receiptNumber = 'ZUDO-PAY-' + String(nextSeq).padStart(4, '0');
+
     const adminInfo = {
       id: req.user?._id || req.admin?._id,
       name: req.user?.name || req.admin?.name || 'Super Admin'
@@ -859,6 +870,10 @@ router.post('/settle', protect, async (req, res) => {
 
     const newPayout = new SellerPaymentModel({
       sellerId,
+      receiptNumber,
+      receiptSequence: nextSeq,
+      totalPayableAtSettlement: totalSellerPayable,
+      previouslySettledAtSettlement: previouslySettled,
       amount: numericAmount,
       paymentMethod: paymentMethod || 'Bank Transfer',
       transactionId: transactionId || utrReference || '',
@@ -913,6 +928,76 @@ router.post('/settle', protect, async (req, res) => {
 router.post('/clear', protect, async (req, res) => {
   req.url = '/settle';
   return router.handle(req, res);
+});
+
+// @route   GET /api/payments/receipt/:paymentId/download
+// @desc    Download official payment receipt PDF for a settlement
+router.get('/receipt/:paymentId/download', protect, async (req, res) => {
+  try {
+    const { SellerPaymentModel, SellerModel } = await loadPaymentContext(req);
+    const payment = await SellerPaymentModel.findById(req.params.paymentId).lean();
+    if (!payment) {
+      return res.status(404).json({ message: 'Payment settlement record not found' });
+    }
+    const seller = await SellerModel.findById(payment.sellerId).lean();
+
+    const receiptNum = payment.receiptNumber || (payment.receiptSequence 
+      ? `ZUDO-PAY-${String(payment.receiptSequence).padStart(4, '0')}` 
+      : `ZUDO-PAY-${payment._id.toString().slice(-4).toUpperCase()}`);
+
+    const pdfBuffer = await generatePaymentReceiptPDF({
+      payment: { ...payment, receiptNumber: receiptNum },
+      seller
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Payment_Receipt_${receiptNum}.pdf"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error('Download payment receipt error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   GET /api/payments/sellers/:sellerId/receipts/download-all
+// @desc    Download latest or combined payment receipts for a seller
+router.get('/sellers/:sellerId/receipts/download-all', protect, async (req, res) => {
+  try {
+    const { SellerPaymentModel, SellerModel } = await loadPaymentContext(req);
+    const seller = await SellerModel.findById(req.params.sellerId).lean();
+    if (!seller) {
+      return res.status(404).json({ message: 'Seller not found' });
+    }
+
+    const payments = await SellerPaymentModel.find({ 
+      sellerId: req.params.sellerId,
+      status: { $ne: 'Reversed' }
+    }).sort({ createdAt: -1 }).lean();
+
+    if (!payments.length) {
+      return res.status(400).json({ message: 'No payment settlement records found for this seller' });
+    }
+
+    const latest = payments[0];
+    const receiptNum = latest.receiptNumber || (latest.receiptSequence 
+      ? `ZUDO-PAY-${String(latest.receiptSequence).padStart(4, '0')}` 
+      : `ZUDO-PAY-${latest._id.toString().slice(-4).toUpperCase()}`);
+
+    const pdfBuffer = await generatePaymentReceiptPDF({
+      payment: { ...latest, receiptNumber: receiptNum },
+      seller
+    });
+
+    const safeName = (seller.name || seller.businessName || 'Seller').replace(/[^a-zA-Z0-9_-]/g, '_');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Settlement_Receipt_${safeName}_${receiptNum}.pdf"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error('Download all seller receipts error:', error);
+    res.status(500).json({ message: error.message });
+  }
 });
 
 // ============================================================================

@@ -23,14 +23,11 @@ io.on('connection', (socket) => {
 const { isOriginAllowed } = require('./utils/socket');
 app.use(cors({
   origin: (origin, callback) => {
-    if (isOriginAllowed(origin)) {
-      callback(null, true);
-    } else {
-      callback(null, true);
-    }
+    callback(null, true);
   },
   credentials: true
 }));
+app.options('*', cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(require('./middleware/tenant'));
 
@@ -118,6 +115,11 @@ app.get('/health', (req, res) => {
 
 // Global error handler
 app.use((err, req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
   console.error('Unhandled Error:', err);
   res.status(500).json({
     message: 'Internal Server Error',
