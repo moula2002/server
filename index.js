@@ -21,13 +21,14 @@ io.on('connection', (socket) => {
 
 // Middleware
 const { isOriginAllowed } = require('./utils/socket');
-app.use(cors({
+const corsOptions = {
   origin: (origin, callback) => {
     callback(null, true);
   },
   credentials: true
-}));
-app.options('*', cors({ origin: true, credentials: true }));
+};
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(express.json());
 app.use(require('./middleware/tenant'));
 
