@@ -78,7 +78,8 @@ const protect = async (req, res, next) => {
           Feed: tenantConn.models.Feed || tenantConn.model('Feed', require('../models/Feed').schema),
           Attendance: tenantConn.models.Attendance || tenantConn.model('Attendance', require('../models/Attendance').schema),
           Commission: tenantConn.models.Commission || tenantConn.model('Commission', require('../models/Commission').schema),
-          SellerInvoice: tenantConn.models.SellerInvoice || tenantConn.model('SellerInvoice', require('../models/SellerInvoice').schema)
+          SellerInvoice: tenantConn.models.SellerInvoice || tenantConn.model('SellerInvoice', require('../models/SellerInvoice').schema),
+          InvoiceImage: tenantConn.models.InvoiceImage || tenantConn.model('InvoiceImage', require('../models/InvoiceImage').schema)
         };
 
         req.tenantModels = tenantModels;

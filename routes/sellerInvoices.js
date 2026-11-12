@@ -201,6 +201,10 @@ router.get('/next-number', protect, async (req, res) => {
     }
 
     const { SellerInvoice: InvoiceModel } = getModels(req);
+    if (!InvoiceModel) {
+      return res.status(503).json({ message: 'Database service unavailable. Please check database connection.' });
+    }
+
     const existingInvoices = await InvoiceModel.find({ sellerId })
       .select('invoiceNumber invoiceSequenceNumber createdAt')
       .sort({ createdAt: 1 });
@@ -232,7 +236,10 @@ router.get('/next-number', protect, async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching next invoice number:', error);
-    res.status(500).json({ message: error.message });
+    if (error.name === 'MongoServerSelectionError' || error.name === 'MongooseServerSelectionError') {
+      return res.status(503).json({ message: 'Database connection failed. Please try again in a moment.' });
+    }
+    res.status(500).json({ message: error.message || 'Internal server error' });
   }
 });
 
@@ -494,7 +501,10 @@ router.post('/generate', protect, (req, res, next) => {
     res.status(201).json(invoiceResp);
   } catch (error) {
     console.error('Error generating invoice:', error);
-    res.status(500).json({ message: error.message });
+    if (error.name === 'MongoServerSelectionError' || error.name === 'MongooseServerSelectionError') {
+      return res.status(503).json({ message: 'Database connection failed. Please try again in a moment.' });
+    }
+    res.status(500).json({ message: error.message || 'Internal server error' });
   }
 });
 
@@ -561,13 +571,20 @@ router.get('/my-invoices', protect, async (req, res) => {
       return res.status(403).json({ message: 'Only sellers can access this' });
     }
     const { SellerInvoice: InvoiceModel } = getModels(req);
+    if (!InvoiceModel) {
+      return res.json([]);
+    }
     const invoices = await InvoiceModel.find({ sellerId: req.user._id })
       .select('-invoiceImage.data')
       .populate('sellerId', 'businessName name email storeName')
       .sort({ createdAt: -1 });
-    res.json(invoices);
+    res.json(invoices || []);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('Error fetching seller invoices:', error);
+    if (error.name === 'MongoServerSelectionError' || error.name === 'MongooseServerSelectionError') {
+      return res.status(503).json({ message: 'Database connection failed. Please try again in a moment.' });
+    }
+    res.status(500).json({ message: error.message || 'Internal server error' });
   }
 });
 
