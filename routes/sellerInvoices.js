@@ -1,12 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
+const jwt = require('jsonwebtoken');
 const { protect } = require('../middleware/auth');
 const sendEmail = require('../utils/email');
 const PDFDocument = require('pdfkit-table');
 const Order = require('../models/Order');
 const SellerInvoice = require('../models/SellerInvoice');
 const InvoiceImage = require('../models/InvoiceImage');
+const Seller = require('../models/Seller');
+const Admin = require('../models/Admin');
 const { round2 } = require('../utils/pricing');
 
 // Configure multer to store file in memory as Buffer for MongoDB binary storage
@@ -17,7 +20,10 @@ const upload = multer({
   },
   fileFilter: (req, file, cb) => {
     const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-    if (allowedTypes.includes(file.mimetype.toLowerCase())) {
+    const ext = (file.originalname || '').split('.').pop()?.toLowerCase();
+    const isAllowedExt = ['jpg', 'jpeg', 'png', 'webp'].includes(ext);
+
+    if (allowedTypes.includes(file.mimetype.toLowerCase()) || isAllowedExt) {
       cb(null, true);
     } else {
       cb(new Error('Invalid image type. Only JPG, JPEG, PNG, and WEBP are allowed.'));
@@ -30,7 +36,7 @@ const getModels = (req) => {
     Order: req.models?.Order || Order,
     SellerInvoice: req.models?.SellerInvoice || SellerInvoice,
     InvoiceImage: req.models?.InvoiceImage || InvoiceImage,
-    Seller: req.models?.Seller || require('../models/Seller')
+    Seller: req.models?.Seller || Seller
   };
 };
 
@@ -61,6 +67,50 @@ router.param('id', async (req, res, next, id) => {
   next();
 });
 
+// Middleware for image route that checks either Bearer header OR ?token= query parameter
+const protectImage = async (req, res, next) => {
+  try {
+    let token = null;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+      token = req.headers.authorization.split(' ')[1];
+    } else if (req.query.token) {
+      token = req.query.token;
+    }
+
+    if (!token) {
+      return res.status(401).json({ message: 'Authentication token required' });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    
+    // Check Admin in Global
+    let account = await Admin.findById(decoded.id).select('-password');
+    if (account) {
+      req.admin = account;
+      req.user = account;
+      return next();
+    }
+
+    // Check Seller in Global or Tenant
+    const { Seller: SellerModel } = getModels(req);
+    account = await SellerModel.findById(decoded.id).select('-password');
+    if (!account) {
+      account = await Seller.findById(decoded.id).select('-password');
+    }
+
+    if (account) {
+      req.user = account;
+      req.user.role = 'seller';
+      return next();
+    }
+
+    return res.status(403).json({ message: 'Not authorized' });
+  } catch (err) {
+    console.error('protectImage auth error:', err.message);
+    return res.status(401).json({ message: 'Invalid or expired authentication token' });
+  }
+};
+
 // @route   GET /api/seller-invoices/next-number
 // @desc    Get the current invoice sequence status for the logged-in seller
 router.get('/next-number', protect, async (req, res) => {
@@ -75,7 +125,9 @@ router.get('/next-number', protect, async (req, res) => {
     }
 
     const { SellerInvoice: InvoiceModel } = getModels(req);
-    const existingInvoices = await InvoiceModel.find({ sellerId }).select('invoiceNumber invoiceSequenceNumber createdAt').sort({ createdAt: 1 });
+    const existingInvoices = await InvoiceModel.find({ sellerId })
+      .select('invoiceNumber invoiceSequenceNumber createdAt')
+      .sort({ createdAt: 1 });
 
     const usedNumbers = [];
     const usedNumericSequences = [];
@@ -109,7 +161,7 @@ router.get('/next-number', protect, async (req, res) => {
 });
 
 // @route   POST /api/seller-invoices/generate
-// @desc    Generate a new invoice for a seller with optional or required image upload
+// @desc    Generate a new invoice for a seller with optional/required image upload
 router.post('/generate', protect, (req, res, next) => {
   upload.single('invoiceImage')(req, res, (err) => {
     if (err) {
@@ -144,7 +196,6 @@ router.post('/generate', protect, (req, res, next) => {
 
     const trimmedInvoiceNumber = rawInvoiceNumber.toString().trim();
 
-    // Must be a valid positive integer string for sequential enforcement (1, 2, 3...)
     if (!/^\d+$/.test(trimmedInvoiceNumber)) {
       return res.status(400).json({ 
         message: 'Invoice number must be a sequential positive number (1, 2, 3, 4...).' 
@@ -197,7 +248,6 @@ router.post('/generate', protect, (req, res, next) => {
     const end = new Date(endDate);
     end.setHours(23, 59, 59, 999);
     
-    // An invoice overlaps if (invoice.start <= requested.end AND invoice.end >= requested.start)
     const overlappingInvoice = await InvoiceModel.findOne({
       sellerId: sellerId,
       startDate: { $lte: end },
@@ -280,27 +330,37 @@ router.post('/generate', protect, (req, res, next) => {
       generatedBy: req.user ? req.user._id : sellerId
     });
 
-    // If an image was uploaded, store it in InvoiceImage collection as raw binary Buffer
+    // Store raw binary Buffer directly in MongoDB
     if (req.file) {
-      const invoiceImageDoc = new InvoiceImageModel({
-        invoiceId: newInvoice._id,
-        sellerId: sellerId,
-        filename: `${trimmedInvoiceNumber}_${Date.now()}_${req.file.originalname}`,
+      newInvoice.invoiceImage = {
+        data: req.file.buffer,
+        contentType: req.file.mimetype,
+        fileName: `${trimmedInvoiceNumber}_${Date.now()}_${req.file.originalname}`,
+        size: req.file.size
+      };
+
+      newInvoice.imageMetadata = {
+        filename: newInvoice.invoiceImage.fileName,
         originalName: req.file.originalname,
         mimeType: req.file.mimetype,
-        size: req.file.size,
-        data: req.file.buffer
-      });
-
-      await invoiceImageDoc.save();
-
-      newInvoice.invoiceImage = invoiceImageDoc._id;
-      newInvoice.imageMetadata = {
-        filename: invoiceImageDoc.filename,
-        originalName: invoiceImageDoc.originalName,
-        mimeType: invoiceImageDoc.mimeType,
-        size: invoiceImageDoc.size
+        size: req.file.size
       };
+
+      // Also save in InvoiceImage collection for dual-layer compatibility
+      try {
+        const invoiceImageDoc = new InvoiceImageModel({
+          invoiceId: newInvoice._id,
+          sellerId: sellerId,
+          filename: newInvoice.invoiceImage.fileName,
+          originalName: req.file.originalname,
+          mimeType: req.file.mimetype,
+          size: req.file.size,
+          data: req.file.buffer
+        });
+        await invoiceImageDoc.save();
+      } catch (err) {
+        console.warn('Could not save to InvoiceImage collection:', err.message);
+      }
     }
 
     await newInvoice.save();
@@ -370,7 +430,7 @@ router.post('/generate', protect, (req, res, next) => {
     doc.font('Helvetica-Bold').text('Status:', 350, 195).font('Helvetica').text(newInvoice.status, 430, 195);
     doc.font('Helvetica-Bold').text('Total Orders:', 350, 215).font('Helvetica').text(orderIds.length.toString(), 430, 215);
 
-    doc.moveDown(5); // Move cursor down below the rect
+    doc.moveDown(5);
 
     const table = {
       title: "Order Breakdown",
@@ -402,7 +462,13 @@ router.post('/generate', protect, (req, res, next) => {
     
     doc.end();
 
-    res.status(201).json(newInvoice);
+    // Strip binary buffer from JSON response for efficiency
+    const invoiceResp = newInvoice.toObject();
+    if (invoiceResp.invoiceImage) {
+      delete invoiceResp.invoiceImage.data;
+    }
+
+    res.status(201).json(invoiceResp);
   } catch (error) {
     console.error('Error generating invoice:', error);
     res.status(500).json({ message: error.message });
@@ -410,8 +476,8 @@ router.post('/generate', protect, (req, res, next) => {
 });
 
 // @route   GET /api/seller-invoices/:id/image
-// @desc    Retrieve raw invoice image from MongoDB binary storage
-router.get('/:id/image', protect, async (req, res) => {
+// @desc    Retrieve raw invoice image from MongoDB binary storage (Auth via Bearer OR ?token=)
+router.get('/:id/image', protectImage, async (req, res) => {
   try {
     const { SellerInvoice: InvoiceModel, InvoiceImage: InvoiceImageModel } = getModels(req);
     const invoice = await InvoiceModel.findById(req.params.id);
@@ -425,16 +491,36 @@ router.get('/:id/image', protect, async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to view this invoice image' });
     }
 
-    const imageDoc = await InvoiceImageModel.findOne({ invoiceId: invoice._id });
-    if (!imageDoc || !imageDoc.data) {
+    let binaryData = null;
+    let mimeType = 'image/jpeg';
+    let filename = `invoice-${invoice.invoiceNumber || invoice._id}`;
+
+    // 1. Try invoice.invoiceImage.data (embedded buffer)
+    if (invoice.invoiceImage && invoice.invoiceImage.data) {
+      binaryData = invoice.invoiceImage.data;
+      mimeType = invoice.invoiceImage.contentType || invoice.imageMetadata?.mimeType || 'image/jpeg';
+      filename = invoice.invoiceImage.fileName || invoice.imageMetadata?.filename || filename;
+    }
+
+    // 2. Fallback to InvoiceImage collection
+    if (!binaryData) {
+      const imageDoc = await InvoiceImageModel.findOne({ invoiceId: invoice._id });
+      if (imageDoc && imageDoc.data) {
+        binaryData = imageDoc.data;
+        mimeType = imageDoc.mimeType || 'image/jpeg';
+        filename = imageDoc.filename || filename;
+      }
+    }
+
+    if (!binaryData) {
       return res.status(404).json({ message: 'No image uploaded for this invoice' });
     }
 
-    res.setHeader('Content-Type', imageDoc.mimeType || 'image/jpeg');
-    res.setHeader('Content-Length', imageDoc.size || imageDoc.data.length);
-    res.setHeader('Content-Disposition', `inline; filename="${imageDoc.filename || 'invoice-image'}"`);
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Length', binaryData.length);
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
     res.setHeader('Cache-Control', 'private, max-age=86400');
-    return res.send(imageDoc.data);
+    return res.send(binaryData);
   } catch (error) {
     console.error('Error retrieving invoice image:', error);
     res.status(500).json({ message: error.message });
@@ -442,7 +528,7 @@ router.get('/:id/image', protect, async (req, res) => {
 });
 
 // @route   GET /api/seller-invoices/my-invoices
-// @desc    Get all invoices for logged in seller
+// @desc    Get all invoices for logged in seller (excludes large image binary data from JSON payload)
 router.get('/my-invoices', protect, async (req, res) => {
   try {
     if (req.user.role !== 'seller') {
@@ -450,6 +536,7 @@ router.get('/my-invoices', protect, async (req, res) => {
     }
     const { SellerInvoice: InvoiceModel } = getModels(req);
     const invoices = await InvoiceModel.find({ sellerId: req.user._id })
+      .select('-invoiceImage.data')
       .populate('sellerId', 'businessName name email storeName')
       .sort({ createdAt: -1 });
     res.json(invoices);
@@ -459,7 +546,7 @@ router.get('/my-invoices', protect, async (req, res) => {
 });
 
 // @route   GET /api/seller-invoices/admin/all
-// @desc    Get all invoices for admin
+// @desc    Get all invoices for admin (excludes large image binary data from list)
 router.get('/admin/all', protect, async (req, res) => {
   try {
     if (!req.admin) {
@@ -473,13 +560,14 @@ router.get('/admin/all', protect, async (req, res) => {
         req, 
         {}, 
         [{ path: 'sellerId', select: 'businessName name email storeName phone' }], 
-        '', 
+        '-invoiceImage.data', 
         { createdAt: -1 }
       );
       return res.json(invoices);
     } else {
       const { SellerInvoice: InvoiceModel } = getModels(req);
       const invoices = await InvoiceModel.find()
+        .select('-invoiceImage.data')
         .populate('sellerId', 'businessName name email storeName phone')
         .sort({ createdAt: -1 });
       return res.json(invoices);
@@ -494,7 +582,9 @@ router.get('/admin/all', protect, async (req, res) => {
 router.get('/:id', protect, async (req, res) => {
   try {
     const { SellerInvoice: InvoiceModel, Order: OrderModel, Seller: SellerModel } = getModels(req);
-    const invoice = await InvoiceModel.findById(req.params.id).populate('sellerId', 'businessName name email storeName phone address gstNumber');
+    const invoice = await InvoiceModel.findById(req.params.id)
+      .select('-invoiceImage.data')
+      .populate('sellerId', 'businessName name email storeName phone address gstNumber');
     if (!invoice) return res.status(404).json({ message: 'Invoice not found' });
 
     const sellerIdStr = invoice.sellerId?._id ? invoice.sellerId._id.toString() : invoice.sellerId.toString();
@@ -588,7 +678,7 @@ router.get('/:id/download', protect, async (req, res) => {
     doc.font('Helvetica-Bold').text('Status:', 350, 195).font('Helvetica').text(invoice.status, 430, 195);
     doc.font('Helvetica-Bold').text('Total Orders:', 350, 215).font('Helvetica').text(invoice.orderCount.toString(), 430, 215);
 
-    doc.moveDown(5); // Move cursor down below the rect
+    doc.moveDown(5);
 
     const table = {
       title: "Order Breakdown",
@@ -620,6 +710,41 @@ router.get('/:id/download', protect, async (req, res) => {
     
     doc.end();
   } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   DELETE /api/seller-invoices/:id
+// @desc    Delete an invoice (only creator seller or admin) and clean up its raw binary images
+router.delete('/:id', protect, async (req, res) => {
+  try {
+    const { SellerInvoice: InvoiceModel, InvoiceImage: InvoiceImageModel } = getModels(req);
+    const invoice = await InvoiceModel.findById(req.params.id);
+    if (!invoice) {
+      return res.status(404).json({ message: 'Invoice not found' });
+    }
+
+    const sellerIdStr = invoice.sellerId.toString();
+    const isOwner = req.user && req.user._id && req.user._id.toString() === sellerIdStr;
+    if (!isOwner && !req.admin) {
+      return res.status(403).json({ message: 'Not authorized to delete this invoice' });
+    }
+
+    // Clean up stored image in InvoiceImage collection if exists
+    try {
+      await InvoiceImageModel.deleteMany({ invoiceId: invoice._id });
+    } catch (e) {
+      console.warn('Could not clean InvoiceImage records:', e.message);
+    }
+
+    await InvoiceModel.findByIdAndDelete(req.params.id);
+
+    res.json({ 
+      message: `Invoice #${invoice.invoiceNumber || invoice._id} deleted successfully`,
+      deletedId: invoice._id 
+    });
+  } catch (error) {
+    console.error('Error deleting invoice:', error);
     res.status(500).json({ message: error.message });
   }
 });
