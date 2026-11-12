@@ -668,9 +668,10 @@ router.get('/:id/download', protect, async (req, res) => {
 
     const sellerIdStr = invoice.sellerId ? (invoice.sellerId._id ? invoice.sellerId._id.toString() : invoice.sellerId.toString()) : '';
 
-    // Auth check
+    // Auth check: Allow invoice owner (seller) or any authenticated admin
     const isOwner = req.user && req.user._id && req.user._id.toString() === sellerIdStr;
-    if (!isOwner && !req.admin) {
+    const isAdmin = !!req.admin || (req.user && (req.user.role === 'admin' || req.user.role === 'super_admin' || req.user.role === 'sales'));
+    if (!isOwner && !isAdmin) {
       return res.status(403).json({ message: 'Not authorized' });
     }
 

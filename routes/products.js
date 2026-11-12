@@ -732,6 +732,7 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
     const priceBasis = req.body.priceBasis || (req.body.isPackagePrice ? 'per_package' : 'per_unit');
 
     const pricingPayload = processProductPricing({
+      name,
       categoryId,
       unit: cleanUnit,
       packagingType,
@@ -1340,7 +1341,7 @@ router.put('/:id', protect, async (req, res) => {
     let { Product } = getModels(req);
     let targetProductModel = Product;
 
-    let existingProd = await Product.findById(id).select('sellerId customUnits unit');
+    let existingProd = await Product.findById(id).select('sellerId customUnits unit packagingType measurementBasis measurementUnit unitSize priceBasis sellerPrice sellerB2bPrice b2b b2c variants name');
     if (!existingProd) {
       const crossTenant = await findProductAcrossTenants(id, req, false);
       if (crossTenant) {
@@ -1395,7 +1396,7 @@ router.put('/:id', protect, async (req, res) => {
     }
 
     const comms = await loadCommissions(req);
-    if (req.body.unitSize === undefined && existingProd.unitSize) {
+    if ((req.body.unitSize === undefined || Number(req.body.unitSize) <= 1) && existingProd.unitSize > 1) {
       req.body.unitSize = existingProd.unitSize;
     }
     if (req.body.measurementUnit === undefined && (existingProd.measurementUnit || existingProd.measurementBasis)) {
@@ -1410,7 +1411,15 @@ router.put('/:id', protect, async (req, res) => {
     if (req.body.priceBasis === undefined && existingProd.priceBasis) {
       req.body.priceBasis = existingProd.priceBasis;
     }
-    const updatedPayload = processProductPricing(req.body, comms);
+
+    const pricingInput = {
+      ...(typeof existingProd.toObject === 'function' ? existingProd.toObject() : existingProd),
+      ...req.body,
+      name: req.body.name || existingProd.name,
+      b2b: req.body.b2b !== undefined ? req.body.b2b : existingProd.b2b
+    };
+
+    const updatedPayload = processProductPricing(pricingInput, comms);
     if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
       updatedPayload.subCategoryId = null;
     }
