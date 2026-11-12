@@ -70,16 +70,31 @@ function convertMeasurement(amount, fromUnit, toUnit) {
   if (!f || !t) return null;
   if (f === t) return num;
 
-  // Weight conversions: kg <-> g
+  // Weight conversions: kg <-> g <-> ton
   if (f === 'kg' && t === 'g') return num * 1000;
   if (f === 'g' && t === 'kg') return num / 1000;
+  if (f === 'ton' && t === 'kg') return num * 1000;
+  if (f === 'kg' && t === 'ton') return num / 1000;
+  if (f === 'ton' && t === 'g') return num * 1000000;
+  if (f === 'g' && t === 'ton') return num / 1000000;
 
   // Volume conversions: ltr <-> ml
   if (f === 'ltr' && t === 'ml') return num * 1000;
   if (f === 'ml' && t === 'ltr') return num / 1000;
 
-  // Incompatible (e.g. kg to ltr)
+  // Incompatible (e.g. kg to ltr or custom units)
   return null;
+}
+
+/**
+ * Returns conversion factor from fromUnit to toUnit (defaults to 1 if incompatible).
+ */
+function getUnitConversionFactor(fromUnit, toUnit) {
+  const f = normalizeUnit(fromUnit);
+  const t = normalizeUnit(toUnit);
+  if (!f || !t || f === t) return 1;
+  const converted = convertMeasurement(1, f, t);
+  return converted !== null ? converted : 1;
 }
 
 /**
@@ -146,32 +161,79 @@ function findCategoryCommission(commissions, categoryId, unit, pincode = null) {
 /**
  * Calculate customer price per unit given base seller price, commission type, commission value, and unit size.
  * Formula:
- * - Flat commission: unitCommission = commissionValue * unitSize; customerPrice = sellerPrice + unitCommission
- * - Percentage commission: unitCommission = (sellerPrice * commissionValue / 100); customerPrice = sellerPrice + unitCommission
+ * - Step 1: Seller Price Per Product Unit = Seller Price Per Base Unit * Product Unit Size (e.g. 50 * 30 = ₹1,500)
+ * - Step 2: Commission Per Product Unit = Admin Commission Per Base Unit * Product Unit Size (e.g. 2 * 30 = ₹60)
+ * - Step 3: Customer Unit Base Price = Seller Price Per Product Unit + Commission Per Product Unit (1500 + 60 = ₹1,560)
+ * - GST Amount Per Product Unit = Customer Unit Base Price * (GST% / 100)
+ * - Customer Final Price Per Product Unit = Customer Unit Base Price + GST Amount
  */
-function calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize = 1) {
-  const sPrice = typeof sellerPrice === 'number' ? sellerPrice : (parseFloat(sellerPrice) || 0);
-  if (sPrice <= 0) return { customerPrice: 0, commissionAmount: 0, unitCommission: 0, unitSize: 1 };
+function calculateCustomerPrice(sellerPricePerBaseUnit, commissionType, commissionValue, unitSize = 1, gstPercent = 0, isGstInclusive = false) {
+  const basePrice = typeof sellerPricePerBaseUnit === 'number' ? sellerPricePerBaseUnit : (parseFloat(sellerPricePerBaseUnit) || 0);
+  if (basePrice <= 0) {
+    return {
+      sellerPricePerBaseUnit: 0,
+      unitSize: 1,
+      sellerPricePerProductUnit: 0,
+      adminCommissionPerBaseUnit: 0,
+      commissionPerProductUnit: 0,
+      customerUnitBasePrice: 0,
+      gstPercent: 0,
+      gstAmountPerProductUnit: 0,
+      customerFinalPricePerProductUnit: 0,
+      customerPrice: 0,
+      sellerPrice: 0,
+      commissionAmount: 0,
+      unitCommission: 0
+    };
+  }
+
+  const uSize = extractUnitSize(unitSize, 1);
+  const sPricePerProductUnit = round2(basePrice * uSize);
 
   const cVal = typeof commissionValue === 'number' ? commissionValue : (parseFloat(commissionValue) || 0);
   const cType = commissionType === 'percentage' ? 'percentage' : 'flat';
-  const uSize = extractUnitSize(unitSize, 1);
 
-  let commissionAmount = 0;
+  let commissionPerProductUnit = 0;
   if (cType === 'flat') {
-    // Admin Commission Per Unit * Product Unit Size
-    commissionAmount = cVal * uSize;
+    commissionPerProductUnit = round2(cVal * uSize);
   } else {
-    commissionAmount = (sPrice * cVal) / 100;
+    commissionPerProductUnit = round2((sPricePerProductUnit * cVal) / 100);
   }
-  commissionAmount = round2(commissionAmount);
 
-  const finalCustomerPrice = round2(sPrice + commissionAmount);
+  const customerUnitBasePrice = round2(sPricePerProductUnit + commissionPerProductUnit);
+
+  const gstRate = typeof gstPercent === 'number' ? gstPercent : (parseFloat(gstPercent) || 0);
+  let gstAmountPerProductUnit = 0;
+  let customerFinalPricePerProductUnit = customerUnitBasePrice;
+
+  if (gstRate > 0) {
+    if (isGstInclusive) {
+      const baseBeforeTax = customerUnitBasePrice / (1 + gstRate / 100);
+      gstAmountPerProductUnit = round2(customerUnitBasePrice - baseBeforeTax);
+      customerFinalPricePerProductUnit = customerUnitBasePrice;
+    } else {
+      gstAmountPerProductUnit = round2(customerUnitBasePrice * (gstRate / 100));
+      customerFinalPricePerProductUnit = round2(customerUnitBasePrice + gstAmountPerProductUnit);
+    }
+  }
+
   return {
-    customerPrice: finalCustomerPrice,
-    commissionAmount: commissionAmount,
-    unitCommission: commissionAmount,
-    unitSize: uSize
+    sellerPricePerBaseUnit: basePrice,
+    unitSize: uSize,
+    sellerPricePerProductUnit: sPricePerProductUnit,
+    adminCommissionPerBaseUnit: cVal,
+    commissionPerProductUnit,
+    customerUnitBasePrice,
+    gstPercent: gstRate,
+    gstAmountPerProductUnit,
+    customerFinalPricePerProductUnit,
+
+    // Aliases for compatibility
+    sellerPrice: sPricePerProductUnit,
+    customerPrice: customerUnitBasePrice,
+    commissionAmount: commissionPerProductUnit,
+    unitCommission: commissionPerProductUnit,
+    finalPrice: customerFinalPricePerProductUnit
   };
 }
 
@@ -222,7 +284,9 @@ function processProductPricing(payload, commissions = []) {
     return {
       ...v,
       unitSize: vUnitSize,
-      sellerPrice: vSellerPrice,
+      sellerPrice: vCalc.sellerPricePerProductUnit,
+      sellerPricePerBaseUnit: vCalc.sellerPricePerBaseUnit,
+      sellerPricePerProductUnit: vCalc.sellerPricePerProductUnit,
       price: vCalc.customerPrice,
       commissionType,
       commissionValue,
@@ -248,7 +312,9 @@ function processProductPricing(payload, commissions = []) {
         const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize);
         return {
           ...tier,
-          sellerPrice: tSellerPrice,
+          sellerPrice: tCalc.sellerPricePerProductUnit,
+          sellerPricePerBaseUnit: tCalc.sellerPricePerBaseUnit,
+          sellerPricePerProductUnit: tCalc.sellerPricePerProductUnit,
           price: tCalc.customerPrice
         };
       });
@@ -257,7 +323,9 @@ function processProductPricing(payload, commissions = []) {
     return {
       ...v,
       unitSize: vUnitSize,
-      sellerPrice: vSellerPrice,
+      sellerPrice: vCalc.sellerPricePerProductUnit,
+      sellerPricePerBaseUnit: vCalc.sellerPricePerBaseUnit,
+      sellerPricePerProductUnit: vCalc.sellerPricePerProductUnit,
       price: vCalc.customerPrice,
       commissionType,
       commissionValue,
@@ -283,58 +351,63 @@ function processProductPricing(payload, commissions = []) {
     });
   }
 
-  const finalB2bPrice = (customerB2bPrice === 0 && processedB2b.length > 0) ? processedB2b[0].price : (customerB2bPrice || customerPrice);
-  const finalPrice = (customerPrice === 0 && processedB2c.length > 0) ? processedB2c[0].price : (customerPrice || customerB2bPrice || finalB2bPrice);
-
   const availableStock = typeof payload.stock === 'number' ? payload.stock : (parseInt(payload.stock, 10) || 0);
   const gstRate = typeof payload.gstPercent === 'number' ? payload.gstPercent : (parseFloat(payload.gstPercent) || 0);
   const isGstInclusive = Boolean(payload.isGstInclusive);
 
-  // Step 1: Seller GST Amount = Seller Unit Price * Seller GST Percentage / 100
-  let sellerGstAmount = 0;
-  if (gstRate > 0) {
-    if (isGstInclusive) {
-      const baseBeforeTax = sellerPrice / (1 + gstRate / 100);
-      sellerGstAmount = round2(sellerPrice - baseBeforeTax);
-    } else {
-      sellerGstAmount = round2(sellerPrice * (gstRate / 100));
-    }
-  }
+  const primaryPricing = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive);
+  const primaryB2bPricing = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive);
 
-  // Step 2: Total Stock Commission = Flat Commission per Unit * Available Stock
-  const stockTotalCommission = round2(commissionAmount * Math.max(0, availableStock));
+  const finalB2bPrice = (customerB2bPrice === 0 && processedB2b.length > 0) ? processedB2b[0].price : (customerB2bPrice || customerPrice);
+  const finalPrice = (customerPrice === 0 && processedB2c.length > 0) ? processedB2c[0].price : (customerPrice || customerB2bPrice || finalB2bPrice);
 
-  // Step 3: Subtotal = Seller Unit Price + Total Stock Commission
-  const stockSubtotal = round2(sellerPrice + stockTotalCommission);
-
-  // Step 4: Total Amount = Subtotal + Seller GST Amount
-  const stockTotalAmount = isGstInclusive ? stockSubtotal : round2(stockSubtotal + sellerGstAmount);
+  // New Separate Inventory Valuation (Section 6)
+  const totalStockWeight = round2(unitSize * Math.max(0, availableStock));
+  const totalStockCommission = round2(primaryPricing.commissionPerProductUnit * Math.max(0, availableStock));
+  const totalSellerStockValue = round2(primaryPricing.sellerPricePerProductUnit * Math.max(0, availableStock));
+  const totalStockSubtotal = round2(totalSellerStockValue + totalStockCommission);
+  const totalStockGst = isGstInclusive ? 0 : round2(totalStockSubtotal * (gstRate / 100));
+  const totalStockValuation = isGstInclusive ? totalStockSubtotal : round2(totalStockSubtotal + totalStockGst);
 
   return {
     ...payload,
+    // 9-Step Breakdown Fields (Section 5)
+    sellerPricePerBaseUnit: primaryPricing.sellerPricePerBaseUnit,
     unitSize,
-    sellerPrice,
-    sellerUnitPrice: sellerPrice,
-    sellerB2bPrice,
+    sellerPricePerProductUnit: primaryPricing.sellerPricePerProductUnit,
+    adminCommissionPerBaseUnit: primaryPricing.adminCommissionPerBaseUnit,
+    commissionPerProductUnit: primaryPricing.commissionPerProductUnit,
+    customerUnitBasePrice: primaryPricing.customerUnitBasePrice,
+    gstPercent: gstRate,
+    gstAmountPerProductUnit: primaryPricing.gstAmountPerProductUnit,
+    customerFinalPricePerProductUnit: primaryPricing.customerFinalPricePerProductUnit,
+
+    // Separate Inventory Valuation (Section 6)
+    availableStock,
+    totalStockWeight,
+    totalStockCommission,
+    totalSellerStockValue,
+    totalStockSubtotal,
+    totalStockValuation,
+
+    // Aliases for backward compatibility
+    sellerPrice: primaryPricing.sellerPricePerProductUnit,
+    sellerUnitPrice: primaryPricing.sellerPricePerProductUnit,
+    sellerB2bPrice: primaryB2bPricing.sellerPricePerProductUnit,
     commissionType,
     commissionValue,
     commissionRate: commissionValue,
-    commissionAmount,
-    unitCommission: commissionAmount,
-    availableStock,
-    stockTotalCommission,
-    subtotal: stockSubtotal,
-    stockSubtotal,
-    gstPercent: gstRate,
-    sellerGstPercent: gstRate,
-    gstAmount: sellerGstAmount,
-    sellerGstAmount,
-    stockGstAmount: sellerGstAmount,
-    totalAmount: stockTotalAmount,
-    stockTotalAmount,
-    isGstInclusive,
-    unitCustomerPrice: finalPrice,
-    price: finalPrice,
+    commissionAmount: primaryPricing.commissionPerProductUnit,
+    unitCommission: primaryPricing.commissionPerProductUnit,
+    subtotal: primaryPricing.customerUnitBasePrice,
+    stockSubtotal: totalStockSubtotal,
+    gstAmount: primaryPricing.gstAmountPerProductUnit,
+    sellerGstAmount: primaryPricing.gstAmountPerProductUnit,
+    stockGstAmount: primaryPricing.gstAmountPerProductUnit,
+    totalAmount: primaryPricing.customerFinalPricePerProductUnit,
+    stockTotalAmount: totalStockValuation,
+    unitCustomerPrice: primaryPricing.customerFinalPricePerProductUnit,
+    price: primaryPricing.customerFinalPricePerProductUnit,
     b2bPrice: finalB2bPrice,
     b2c: processedB2c,
     b2b: processedB2b,
@@ -383,11 +456,13 @@ function applyCommission(product, commissions = [], pincode = null) {
   const newB2c = (product.b2c || []).map(v => {
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
     const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
+    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
     return {
       ...v,
       unitSize: vUnitSize,
-      sellerPrice: vSellerPrice,
+      sellerPrice: vSellerPricePerProductUnit,
+      sellerPricePerBaseUnit: vSellerPricePerBaseUnit,
+      sellerPricePerProductUnit: vSellerPricePerProductUnit,
       price: vCustomerPrice,
       commissionType,
       commissionValue,
@@ -399,16 +474,18 @@ function applyCommission(product, commissions = [], pincode = null) {
   const newB2b = (product.b2b || []).map(v => {
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
     const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
+    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize);
 
     let newTiers = v.priceTiers;
     if (Array.isArray(v.priceTiers)) {
       newTiers = v.priceTiers.map(t => {
         const tSellerPrice = t.sellerPrice !== undefined && t.sellerPrice !== null ? t.sellerPrice : (t.price || 0);
-        const { customerPrice: tCustomerPrice } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize);
+        const { customerPrice: tCustomerPrice, sellerPricePerProductUnit: tSellerPricePerProductUnit, sellerPricePerBaseUnit: tSellerPricePerBaseUnit } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize);
         return {
           ...t,
-          sellerPrice: tSellerPrice,
+          sellerPrice: tSellerPricePerProductUnit,
+          sellerPricePerBaseUnit: tSellerPricePerBaseUnit,
+          sellerPricePerProductUnit: tSellerPricePerProductUnit,
           price: tCustomerPrice
         };
       });
@@ -417,7 +494,9 @@ function applyCommission(product, commissions = [], pincode = null) {
     return {
       ...v,
       unitSize: vUnitSize,
-      sellerPrice: vSellerPrice,
+      sellerPrice: vSellerPricePerProductUnit,
+      sellerPricePerBaseUnit: vSellerPricePerBaseUnit,
+      sellerPricePerProductUnit: vSellerPricePerProductUnit,
       price: vCustomerPrice,
       commissionType,
       commissionValue,
@@ -447,51 +526,58 @@ function applyCommission(product, commissions = [], pincode = null) {
   const gstRate = typeof product.gstPercent === 'number' ? product.gstPercent : (parseFloat(product.gstPercent) || 0);
   const isGstInclusive = Boolean(product.isGstInclusive);
 
-  // Step 1: Seller GST Amount = Seller Unit Price * Seller GST Percentage / 100
-  let sellerGstAmount = 0;
-  if (gstRate > 0) {
-    if (isGstInclusive) {
-      const baseBeforeTax = sellerPrice / (1 + gstRate / 100);
-      sellerGstAmount = round2(sellerPrice - baseBeforeTax);
-    } else {
-      sellerGstAmount = round2(sellerPrice * (gstRate / 100));
-    }
-  }
+  const primaryPricing = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive);
+  const primaryB2bPricing = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive);
 
-  // Step 2: Total Stock Commission = Flat Commission per Unit * Available Stock
-  const stockTotalCommission = round2(commissionAmount * Math.max(0, availableStock));
-
-  // Step 3: Subtotal = Seller Unit Price + Total Stock Commission
-  const stockSubtotal = round2(sellerPrice + stockTotalCommission);
-
-  // Step 4: Total Amount = Subtotal + Seller GST Amount
-  const stockTotalAmount = isGstInclusive ? stockSubtotal : round2(stockSubtotal + sellerGstAmount);
+  // New Separate Inventory Valuation (Section 6)
+  const totalStockWeight = round2(unitSize * Math.max(0, availableStock));
+  const totalStockCommission = round2(primaryPricing.commissionPerProductUnit * Math.max(0, availableStock));
+  const totalSellerStockValue = round2(primaryPricing.sellerPricePerProductUnit * Math.max(0, availableStock));
+  const totalStockSubtotal = round2(totalSellerStockValue + totalStockCommission);
+  const totalStockGst = isGstInclusive ? 0 : round2(totalStockSubtotal * (gstRate / 100));
+  const totalStockValuation = isGstInclusive ? totalStockSubtotal : round2(totalStockSubtotal + totalStockGst);
 
   return {
     ...product,
+    // 9-Step Breakdown Fields (Section 5)
+    sellerPricePerBaseUnit: primaryPricing.sellerPricePerBaseUnit,
     unitSize,
-    sellerPrice,
-    sellerUnitPrice: sellerPrice,
-    sellerB2bPrice,
+    sellerPricePerProductUnit: primaryPricing.sellerPricePerProductUnit,
+    adminCommissionPerBaseUnit: primaryPricing.adminCommissionPerBaseUnit,
+    commissionPerProductUnit: primaryPricing.commissionPerProductUnit,
+    customerUnitBasePrice: primaryPricing.customerUnitBasePrice,
+    gstPercent: gstRate,
+    gstAmountPerProductUnit: primaryPricing.gstAmountPerProductUnit,
+    customerFinalPricePerProductUnit: primaryPricing.customerFinalPricePerProductUnit,
+
+    // Separate Inventory Valuation (Section 6)
+    availableStock,
+    totalStockWeight,
+    totalStockCommission,
+    totalSellerStockValue,
+    totalStockSubtotal,
+    totalStockValuation,
+
+    // Aliases for backward compatibility
+    sellerPrice: primaryPricing.sellerPricePerProductUnit,
+    sellerUnitPrice: primaryPricing.sellerPricePerProductUnit,
+    sellerB2bPrice: primaryB2bPricing.sellerPricePerProductUnit,
     commissionType,
     commissionValue,
     commissionRate: commissionValue,
-    commissionAmount,
-    unitCommission: commissionAmount,
-    availableStock,
-    stockTotalCommission,
-    subtotal: stockSubtotal,
-    stockSubtotal,
-    gstPercent: gstRate,
-    sellerGstPercent: gstRate,
-    gstAmount: sellerGstAmount,
-    sellerGstAmount,
-    stockGstAmount: sellerGstAmount,
-    totalAmount: stockTotalAmount,
-    stockTotalAmount,
+    commissionAmount: primaryPricing.commissionPerProductUnit,
+    unitCommission: primaryPricing.commissionPerProductUnit,
+    subtotal: primaryPricing.customerUnitBasePrice,
+    stockSubtotal: totalStockSubtotal,
+    gstAmount: primaryPricing.gstAmountPerProductUnit,
+    sellerGstAmount: primaryPricing.gstAmountPerProductUnit,
+    stockGstAmount: primaryPricing.gstAmountPerProductUnit,
+    totalAmount: primaryPricing.customerFinalPricePerProductUnit,
+    stockTotalAmount: totalStockValuation,
+    stockTotalCommission: totalStockCommission,
     isGstInclusive,
-    unitCustomerPrice: finalCustomerPrice,
-    price: finalCustomerPrice,
+    unitCustomerPrice: primaryPricing.customerFinalPricePerProductUnit,
+    price: primaryPricing.customerFinalPricePerProductUnit,
     b2bPrice: finalCustomerB2bPrice,
     b2c: newB2c,
     b2b: newB2b,
@@ -501,21 +587,34 @@ function applyCommission(product, commissions = [], pincode = null) {
 
 /**
  * Exact pricing breakdown calculation based on selected quantity, unit size, and commission rules.
- * Handles:
- * - Unit Size: Size or weight per product (e.g. 30 KG per bag)
- * - Flat commission: Flat Commission Per Unit * Product Unit Size * Ordered Quantity
- *     e.g., ₹20 per KG * 30 KG * 2 bags = ₹1,200
- * - Percentage commission: (Seller Unit Price * (Commission Rate / 100)) * Ordered Quantity
- * - Total Product Weight: Product Unit Size * Ordered Quantity (e.g. 30 KG * 2 = 60 KG)
- * - Stock-level commission: Unit Commission * Available Stock (for display only)
- * - GST rules:
- *     - B2B: GST added on top of totalCustomerBase (totalCustomerBase * (gstPercent / 100))
- *     - B2C: GST is inclusive in totalCustomerBase (totalCustomerBase - (totalCustomerBase / (1 + gstPercent / 100)))
- *     - 0% GST: final price is seller price plus commission
- * - Stock limit enforcement & positive quantity validation
+ * Implements the exact 8-Step Formula from Section 3 & 4:
+ *
+ * Step 1 – Seller Price Per Product Unit:
+ *   Seller Price Per Bag = Seller Price Per Base Unit * Product Unit Size (e.g. 50 * 30 = ₹1,500)
+ * Step 2 – Commission Per Product Unit:
+ *   Commission Per Bag = Admin Commission Per Base Unit * Product Unit Size (e.g. 2 * 30 = ₹60)
+ * Step 3 – Customer Unit Base Price:
+ *   Customer Unit Base Price = Seller Price Per Bag + Commission Per Bag (1500 + 60 = ₹1,560)
+ * Step 4 – Total Seller Amount:
+ *   Total Seller Amount = Seller Price Per Bag * Ordered Quantity (1500 * 2 = ₹3,000)
+ * Step 5 – Total Commission:
+ *   Total Commission = Commission Per Bag * Ordered Quantity (60 * 2 = ₹120)
+ * Step 6 – Subtotal:
+ *   Subtotal = Total Seller Amount + Total Commission (3000 + 120 = ₹3,120)
+ * Step 7 – GST:
+ *   GST = Subtotal * (GST Rate / 100) (3120 * 18% = ₹561.60)
+ * Step 8 – Final Customer Amount:
+ *   Final Customer Amount = Subtotal + GST (3120 + 561.60 = ₹3,681.60)
+ *
+ * Total Stock Commission & Valuation (Calculated separately for available stock):
+ *   Total Stock Weight = Available Stock * Unit Size (e.g. 60 * 30 = 1,800 KG)
+ *   Total Stock Commission = 1,800 * Commission Per Base Unit = ₹3,600
+ *   Total Seller Stock Value = 60 * 1,500 = ₹90,000
+ *   Total Stock Valuation = ₹93,600 (+ GST)
  */
 function calculatePricingBreakdown({
   sellerUnitPrice = 0,
+  sellerPricePerBaseUnit = undefined,
   commissionType = 'flat',
   commissionValue = 0,
   commissionRate = undefined,
@@ -526,109 +625,127 @@ function calculatePricingBreakdown({
   orderedQuantity = undefined,
   availableStock = 0,
   isB2B = false,
-  isGstInclusive = undefined
+  isGstInclusive = false
 }) {
   const rawQty = orderedQuantity !== undefined ? orderedQuantity : quantity;
   const qty = parseInt(rawQty, 10) > 0 ? parseInt(rawQty, 10) : 1;
-  const sUnitPrice = typeof sellerUnitPrice === 'number' ? sellerUnitPrice : (parseFloat(sellerUnitPrice) || 0);
+  const uSize = extractUnitSize(unitSize, 1);
 
+  // Determine base seller price per unit of measurement (e.g. ₹50 / KG)
+  let baseSellerPrice = 0;
+  if (sellerPricePerBaseUnit !== undefined && sellerPricePerBaseUnit !== null) {
+    baseSellerPrice = parseFloat(sellerPricePerBaseUnit) || 0;
+  } else {
+    baseSellerPrice = parseFloat(sellerUnitPrice) || 0;
+  }
+
+  // Step 1: Seller Price Per Product Unit (e.g. 50 * 30 = 1500)
+  const sellerPricePerProductUnit = round2(baseSellerPrice * uSize);
+
+  // Step 2: Commission Per Product Unit (e.g. 2 * 30 = 60)
   const rawCommVal = commissionRate !== undefined ? commissionRate : commissionValue;
   const cVal = typeof rawCommVal === 'number' ? rawCommVal : (parseFloat(rawCommVal) || 0);
   const cType = commissionType === 'percentage' ? 'percentage' : 'flat';
-  const uSize = extractUnitSize(unitSize, 1);
 
-  let unitCommission = 0;
+  let commissionPerProductUnit = 0;
   if (commissionBasisRate !== undefined && commissionBasisRate !== null) {
-    // Dynamic Size-based commission per selling unit
-    unitCommission = round2(Number(commissionBasisRate) || 0);
+    commissionPerProductUnit = round2(Number(commissionBasisRate) || 0);
   } else if (cType === 'flat') {
-    // Admin Commission Per Unit * Product Unit Size (e.g. ₹20 * 30 KG = ₹600 per bag)
-    unitCommission = cVal * uSize;
+    commissionPerProductUnit = round2(cVal * uSize);
   } else {
-    unitCommission = (sUnitPrice * cVal) / 100;
+    commissionPerProductUnit = round2((sellerPricePerProductUnit * cVal) / 100);
   }
-  unitCommission = round2(unitCommission);
 
-  const stock = typeof availableStock === 'number' ? availableStock : (parseInt(availableStock, 10) || 0);
+  // Step 3: Customer Unit Base Price (1500 + 60 = 1560)
+  const customerUnitBasePrice = round2(sellerPricePerProductUnit + commissionPerProductUnit);
 
+  // Step 4: Total Seller Amount (1500 * 2 = 3000)
+  const totalSellerAmount = round2(sellerPricePerProductUnit * qty);
+
+  // Step 5: Total Commission (60 * 2 = 120)
+  const totalCommission = round2(commissionPerProductUnit * qty);
+
+  // Step 6: Subtotal (3000 + 120 = 3120)
+  const subtotal = round2(totalSellerAmount + totalCommission);
+
+  // Step 7: GST
   const gstRate = typeof gstPercent === 'number' ? gstPercent : (parseFloat(gstPercent) || 0);
-  const stockIsInclusive = isGstInclusive !== undefined ? Boolean(isGstInclusive) : false;
-
-  // Step 1: Seller GST Amount = Seller Unit Price * Seller GST Percentage / 100
-  let sellerGstAmount = 0;
-  if (gstRate > 0) {
-    if (stockIsInclusive) {
-      const baseBeforeTax = sUnitPrice / (1 + gstRate / 100);
-      sellerGstAmount = round2(sUnitPrice - baseBeforeTax);
-    } else {
-      sellerGstAmount = round2(sUnitPrice * (gstRate / 100));
-    }
-  }
-
-  // Step 2: Total Stock Commission = Flat Commission per Unit * Available Stock
-  const stockTotalCommission = round2(unitCommission * Math.max(0, stock));
-
-  // Step 3: Subtotal = Seller Unit Price + Total Stock Commission
-  const stockSubtotal = round2(sUnitPrice + stockTotalCommission);
-
-  // Step 4: Total Amount = Subtotal + Seller GST Amount
-  const stockTotalAmount = stockIsInclusive ? stockSubtotal : round2(stockSubtotal + sellerGstAmount);
-
-  // Calculation for ordered quantity (orders / checkout)
-  // Commission Per Order = Admin Commission Per Unit * Product Unit Size * Ordered Quantity
-  const totalSellerPrice = round2(sUnitPrice * qty);
-  const totalCommission = round2(unitCommission * qty);
-  const totalProductWeight = round2(uSize * qty);
-  const totalCustomerBase = round2(totalSellerPrice + totalCommission);
-
   let totalGst = 0;
-  let finalCustomerPrice = totalCustomerBase;
+  let finalCustomerAmount = subtotal;
 
-  if (isB2B) {
-    totalGst = round2(totalCustomerBase * (gstRate / 100));
-    finalCustomerPrice = round2(totalCustomerBase + totalGst);
-  } else {
-    if (gstRate > 0) {
-      const baseBeforeTax = totalCustomerBase / (1 + gstRate / 100);
-      totalGst = round2(totalCustomerBase - baseBeforeTax);
+  if (gstRate > 0) {
+    if (isGstInclusive) {
+      const baseBeforeTax = subtotal / (1 + gstRate / 100);
+      totalGst = round2(subtotal - baseBeforeTax);
+      finalCustomerAmount = subtotal;
+    } else {
+      totalGst = round2(subtotal * (gstRate / 100));
+      finalCustomerAmount = round2(subtotal + totalGst);
     }
-    finalCustomerPrice = totalCustomerBase;
   }
 
-  const unitCustomerPrice = round2(finalCustomerPrice / qty);
+  // Unit-level breakdown for display
   const unitGst = round2(totalGst / qty);
+  const unitFinalCustomerPrice = round2(finalCustomerAmount / qty);
+  const totalProductWeight = round2(uSize * qty);
+
+  // Total Stock Valuation (Calculated separately for available stock)
+  const stock = typeof availableStock === 'number' ? availableStock : (parseInt(availableStock, 10) || 0);
+  const totalStockWeight = round2(uSize * Math.max(0, stock));
+  const totalStockCommission = round2(commissionPerProductUnit * Math.max(0, stock));
+  const totalSellerStockValue = round2(sellerPricePerProductUnit * Math.max(0, stock));
+  const totalStockSubtotal = round2(totalSellerStockValue + totalStockCommission);
+  const totalStockGst = isGstInclusive ? 0 : round2(totalStockSubtotal * (gstRate / 100));
+  const totalStockValuation = isGstInclusive ? totalStockSubtotal : round2(totalStockSubtotal + totalStockGst);
 
   return {
-    sellerUnitPrice: sUnitPrice,
+    // 9-step Product Breakdown items (Section 5)
+    sellerPricePerBaseUnit: baseSellerPrice,
+    unitSize: uSize,
+    sellerPricePerProductUnit,
+    adminCommissionPerBaseUnit: cVal,
+    commissionPerProductUnit,
+    customerUnitBasePrice,
+    gstPercent: gstRate,
+    gstAmountPerProductUnit: unitGst,
+    customerFinalPricePerProductUnit: unitFinalCustomerPrice,
+
+    // Ordered Quantity Totals (Section 3 & 4)
+    orderedQuantity: qty,
+    quantity: qty,
+    totalProductWeight,
+    totalSellerAmount,
+    totalCommission,
+    subtotal,
+    gstAmount: totalGst,
+    totalGst,
+    finalCustomerAmount,
+
+    // Stock Valuation (Section 6)
+    availableStock: stock,
+    totalStockWeight,
+    totalStockCommission,
+    totalSellerStockValue,
+    totalStockSubtotal,
+    totalStockValuation,
+
+    // Backward compatibility aliases
+    sellerPrice: sellerPricePerProductUnit,
+    sellerUnitPrice: sellerPricePerProductUnit,
+    unitCommission: commissionPerProductUnit,
     commissionType: cType,
     commissionRate: cVal,
-    unitSize: uSize,
-    totalProductWeight,
-    unitCommission,
-    availableStock: stock,
-    stockTotalCommission,
-    subtotal: stockSubtotal,
-    stockSubtotal,
-    gstPercent: gstRate,
-    sellerGstPercent: gstRate,
-    gstAmount: sellerGstAmount,
-    sellerGstAmount,
-    stockGstAmount: sellerGstAmount,
-    totalAmount: stockTotalAmount,
-    stockTotalAmount,
-    isGstInclusive: stockIsInclusive,
-    unitCustomerPrice,
-    orderedQuantity: qty,
-    totalCommission,
-    totalSellerPrice,
-    totalGst,
-    finalCustomerPrice,
-    // backwards compatibility aliases
-    quantity: qty,
-    commissionValue: cVal,
-    commissionAmount: unitCommission,
-    totalCustomerBase,
-    unitGst
+    price: customerUnitBasePrice,
+    unitCustomerPrice: unitFinalCustomerPrice,
+    totalAmount: finalCustomerAmount,
+    stockTotalCommission: totalStockCommission,
+    stockSubtotal: totalStockSubtotal,
+    sellerGstAmount: unitGst,
+    totalSellerPrice: totalSellerAmount,
+    finalCustomerPrice: finalCustomerAmount,
+    totalCustomerBase: subtotal,
+    unitGst,
+    isGstInclusive
   };
 }
 
