@@ -105,7 +105,7 @@ const findInvoiceAcrossAllDBs = async (id, req) => {
   return { invoice: null, models: currentModels, db: req.db };
 };
 
-// router.param('id') ensures req.models and req.targetInvoice are set if found anywhere
+// router.param('id') ensures req.targetInvoice is set if found anywhere
 router.param('id', async (req, res, next, id) => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ message: 'Invalid invoice ID' });
@@ -114,8 +114,9 @@ router.param('id', async (req, res, next, id) => {
   try {
     const { invoice, models, db } = await findInvoiceAcrossAllDBs(id, req);
     if (invoice) {
-      req.models = models;
-      req.db = db;
+      // Merge models onto req.models to preserve User, Seller, Location, etc. loaded by tenant/auth middleware
+      req.models = { ...(req.models || {}), ...(models || {}) };
+      if (db) req.db = db;
       req.targetInvoice = invoice;
     }
   } catch (error) {

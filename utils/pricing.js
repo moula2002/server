@@ -1091,11 +1091,16 @@ function calculatePricingBreakdown({
   // Step 3: Customer Unit Base Price (1500 + 600 = 2100)
   const customerUnitBasePrice = round2(sPricePerProductUnit + commissionPerProductUnit);
 
-  // Step 4: Total Seller Amount (1500 * 2 = 3000)
+  // Step 4: Total Seller Amount (e.g. 1500 * 2 = 3000)
   const totalSellerAmount = round2(sPricePerProductUnit * qty);
 
-  // Step 5: Total Commission (600 * 2 = 1200)
-  const totalCommission = round2(commissionPerProductUnit * qty);
+  // Total Weight = Customer Quantity * Product Unit Size (e.g. 2 * 30 = 60 KG)
+  const totalMeasurementQuantity = round2(uSize * qty);
+  const totalProductWeight = totalMeasurementQuantity;
+
+  // Step 5: Total Commission = Total Weight * Admin Commission Per Unit (e.g. 60 KG * 20 = 1200)
+  const factor = compatibility.isCompatible ? (compatibility.conversionFactor !== undefined ? compatibility.conversionFactor : 1) : 1;
+  const totalCommission = cType === 'flat' ? round2(totalMeasurementQuantity * (cVal * factor)) : round2(commissionPerProductUnit * qty);
 
   // Step 6: Subtotal (3000 + 1200 = 4200)
   const subtotal = round2(totalSellerAmount + totalCommission);
@@ -1119,7 +1124,6 @@ function calculatePricingBreakdown({
   // Unit-level breakdown for display
   const unitGst = round2(totalGst / qty);
   const unitFinalCustomerPrice = round2(finalCustomerAmount / qty);
-  const totalProductWeight = round2(uSize * qty);
 
   // Total Stock Valuation (Calculated separately for available stock)
   const stock = typeof availableStock === 'number' ? availableStock : (parseInt(availableStock, 10) || 0);

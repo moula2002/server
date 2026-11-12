@@ -480,6 +480,67 @@ async function runTests() {
   assert(testJProcessed.b2b[0].commissionPerProductUnit === 60, `Variant Commission is ₹60 (got ${testJProcessed.b2b[0].commissionPerProductUnit})`);
   assert(testJProcessed.b2b[0].commissionPerProductUnit !== 60000, `Variant Commission is NEVER ₹60,000 (verified)`);
 
+  // ========================================================================
+  // TEST K – Dynamic Product Unit Sizes (Section 5 & 7 Scenarios)
+  // ========================================================================
+  console.log('\nTest K: Dynamic Product Unit Sizes (Bag 30 KG, Tin 15 KG, Custom 50 KG at ₹20/KG)');
+
+  // Scenario 1: 1 Bag × 30 KG × ₹20 = ₹600
+  const k1 = calculatePricingBreakdown({
+    sellerPrice: 1500,
+    priceBasis: 'per_package',
+    packagingType: 'BAG',
+    measurementBasis: 'KG',
+    unitSize: 30,
+    commissionType: 'flat',
+    commissionValue: 20,
+    quantity: 1
+  });
+  assert(k1.totalMeasurementQuantity === 30, `1 Bag Total Weight is 30 KG (got ${k1.totalMeasurementQuantity})`);
+  assert(k1.totalCommission === 600, `1 Bag × 30 KG × ₹20 = ₹600 (got ${k1.totalCommission})`);
+
+  // Scenario 2: 2 Bags × 30 KG × ₹20 = ₹1,200
+  const k2 = calculatePricingBreakdown({
+    sellerPrice: 1500,
+    priceBasis: 'per_package',
+    packagingType: 'BAG',
+    measurementBasis: 'KG',
+    unitSize: 30,
+    commissionType: 'flat',
+    commissionValue: 20,
+    quantity: 2
+  });
+  assert(k2.totalMeasurementQuantity === 60, `2 Bags Total Weight is 60 KG (got ${k2.totalMeasurementQuantity})`);
+  assert(k2.totalCommission === 1200, `2 Bags × 30 KG × ₹20 = ₹1,200 (got ${k2.totalCommission})`);
+
+  // Scenario 3: 1 Tin × 15 KG × ₹20 = ₹300
+  const k3 = calculatePricingBreakdown({
+    sellerPrice: 800,
+    priceBasis: 'per_package',
+    packagingType: 'TIN',
+    measurementBasis: 'KG',
+    unitSize: 15,
+    commissionType: 'flat',
+    commissionValue: 20,
+    quantity: 1
+  });
+  assert(k3.totalMeasurementQuantity === 15, `1 Tin Total Weight is 15 KG (got ${k3.totalMeasurementQuantity})`);
+  assert(k3.totalCommission === 300, `1 Tin × 15 KG × ₹20 = ₹300 (got ${k3.totalCommission})`);
+
+  // Scenario 4: 1 Custom Unit × 50 KG × ₹20 = ₹1,000
+  const k4 = calculatePricingBreakdown({
+    sellerPrice: 2500,
+    priceBasis: 'per_package',
+    packagingType: 'CUSTOM',
+    measurementBasis: 'KG',
+    unitSize: 50,
+    commissionType: 'flat',
+    commissionValue: 20,
+    quantity: 1
+  });
+  assert(k4.totalMeasurementQuantity === 50, `1 Custom Unit Total Weight is 50 KG (got ${k4.totalMeasurementQuantity})`);
+  assert(k4.totalCommission === 1000, `1 Custom Unit × 50 KG × ₹20 = ₹1,000 (got ${k4.totalCommission})`);
+
   console.log('\n================================================================');
   console.log(`  TEST RESULTS: ${passedTests} / ${totalTests} TESTS PASSED`);
   console.log('================================================================\n');
