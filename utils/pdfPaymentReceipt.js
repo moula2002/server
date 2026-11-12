@@ -258,3 +258,4 @@ const generatePaymentReceiptPDF = async ({ payment, seller }) => {
 };
 
 module.exports = { generatePaymentReceiptPDF };
+
