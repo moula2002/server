@@ -5,7 +5,6 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { protect } = require('../middleware/auth');
 const sendEmail = require('../utils/email');
-const PDFDocument = require('pdfkit-table');
 const Order = require('../models/Order');
 const SellerInvoice = require('../models/SellerInvoice');
 const InvoiceImage = require('../models/InvoiceImage');
@@ -13,6 +12,7 @@ const Seller = require('../models/Seller');
 const Admin = require('../models/Admin');
 const { round2 } = require('../utils/pricing');
 const { connectDBByLocation, getTenantConnections } = require('../utils/db_manager');
+const { generateSellerInvoicePDF } = require('../utils/pdfInvoice');
 
 // Configure multer to store file in memory as Buffer for MongoDB binary storage
 const upload = multer({
@@ -405,8 +405,14 @@ router.post('/generate', protect, (req, res, next) => {
       generatedBy: req.user ? req.user._id : sellerId
     });
 
+    let uploadedImageBuffer = null;
+    let uploadedImageMime = null;
+
     // Store raw binary Buffer directly in MongoDB
     if (req.file) {
+      uploadedImageBuffer = req.file.buffer;
+      uploadedImageMime = req.file.mimetype;
+
       newInvoice.invoiceImage = {
         data: req.file.buffer,
         contentType: req.file.mimetype,
@@ -440,102 +446,43 @@ router.post('/generate', protect, (req, res, next) => {
 
     await newInvoice.save();
     
-    // Generate PDF Invoice
-    const doc = new PDFDocument({ margin: 40, size: 'A4' });
-    const chunks = [];
-    doc.on('data', chunk => chunks.push(chunk));
-    doc.on('end', async () => {
-      const pdfBuffer = Buffer.concat(chunks);
-      
+    // Generate Redesigned Professional PDF Invoice with Embedded Image
+    try {
+      const pdfBuffer = await generateSellerInvoicePDF({
+        invoice: newInvoice,
+        seller,
+        orders: validOrders,
+        imageBuffer: uploadedImageBuffer,
+        imageMimeType: uploadedImageMime
+      });
+
       // Email Admin
-      try {
-        const adminEmail = process.env.EMAIL_USER;
-        await sendEmail({
-          to: adminEmail,
-          subject: `New Seller Invoice: ${seller.businessName}`,
-          html: `
-            <h3>New Invoice Generated</h3>
-            <p><strong>Seller:</strong> ${seller.businessName || seller.name}</p>
-            <p><strong>Invoice Number:</strong> ${trimmedInvoiceNumber}</p>
-            <p><strong>Date Range:</strong> ${start.toDateString()} to ${end.toDateString()}</p>
-            <p><strong>Total Amount:</strong> ₹${roundedTotalAmount}</p>
-            <p><strong>Total Commission:</strong> ₹${roundedTotalCommission}</p>
-            <p><strong>Net Payable:</strong> ₹${roundedNetAmount}</p>
-            <p><strong>Total Orders:</strong> ${orderIds.length}</p>
-            ${req.file ? `<p><strong>Attached Invoice Image:</strong> ${req.file.originalname} (${(req.file.size / 1024).toFixed(1)} KB)</p>` : ''}
-          `,
-          attachments: [
-            {
-              filename: `Invoice_${seller.businessName.replace(/\s+/g, '_')}_${trimmedInvoiceNumber}.pdf`,
-              content: pdfBuffer,
-              contentType: 'application/pdf'
-            }
-          ]
-        });
-      } catch (err) {
-        console.error('Error emailing invoice:', err);
-      }
-    });
-
-    const sellerName = seller ? (seller.businessName || seller.companyName || seller.name || 'Unknown Seller') : 'Unknown Seller';
-    
-    // Header
-    doc.fontSize(22).font('Helvetica-Bold').text('SELLER INVOICE', { align: 'right' });
-    doc.moveDown(1.5);
-
-    // From / To sections
-    doc.fontSize(10).font('Helvetica-Bold').text('FROM:', 40, 90);
-    doc.font('Helvetica').text('SNB TRADING.CO (ZUDO PLATFORM)', 40, 105);
-    doc.text('307 ashrya layout vishweshwaria 7th block', 40, 120);
-    doc.text('Bengaluru, Karnataka 560091', 40, 135);
-    doc.text('GSTIN: 29BQHPG3242G1ZYNO', 40, 150);
-
-    doc.font('Helvetica-Bold').text('BILL TO (SELLER):', 300, 90);
-    doc.font('Helvetica').text(sellerName, 300, 105);
-    if (seller && seller.email) doc.text(`Email: ${seller.email}`, 300, 120);
-    if (seller && seller.phone) doc.text(`Phone: ${seller.phone}`, 300, 135);
-    if (seller && seller.gstNumber) doc.text(`GSTIN: ${seller.gstNumber}`, 300, 150);
-
-    // Meta Details Grid
-    doc.rect(40, 180, 515, 65).stroke('#d1d5db');
-    doc.font('Helvetica-Bold').fontSize(10);
-    doc.text('Invoice No:', 55, 195).font('Helvetica').text(trimmedInvoiceNumber, 140, 195);
-    doc.font('Helvetica-Bold').text('Date Range:', 55, 215).font('Helvetica').text(`${start.toLocaleDateString()} to ${end.toLocaleDateString()}`, 140, 215);
-    
-    doc.font('Helvetica-Bold').text('Status:', 350, 195).font('Helvetica').text(newInvoice.status, 430, 195);
-    doc.font('Helvetica-Bold').text('Total Orders:', 350, 215).font('Helvetica').text(orderIds.length.toString(), 430, 215);
-
-    doc.moveDown(5);
-
-    const table = {
-      title: "Order Breakdown",
-      headers: ["Order ID", "Date", "Amount (INR)"],
-      rows: validOrders.map(o => [
-        o._id.toString(),
-        new Date(o.createdAt).toLocaleDateString(),
-        `Rs. ${o.items.filter(item => {
-          const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerId.toString();
-          const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerId.toString();
-          const matchesName = item.sellerName && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
-          const matchesStore = item.sellerName && seller.storeName && item.sellerName.toLowerCase() === seller.storeName.toLowerCase();
-          const matchesBusiness = item.sellerName && seller.businessName && item.sellerName.toLowerCase() === seller.businessName.toLowerCase();
-          const productMatchesName = item.product && item.product.sellerName && seller.name && item.product.sellerName.toLowerCase() === seller.name.toLowerCase();
-          const productMatchesStore = item.product && item.product.sellerName && seller.storeName && item.product.sellerName.toLowerCase() === seller.storeName.toLowerCase();
-          return matchesSellerObj || matchesProductRef || matchesName || matchesStore || matchesBusiness || productMatchesName || productMatchesStore;
-        }).reduce((sum, i) => sum + ((Number(i.sellerUnitPrice) || Number(i.normalPrice) || Number(i.price) || 0) * (Number(i.quantity) || 1)), 0).toFixed(2)}`
-      ])
-    };
-    
-    await doc.table(table, { 
-      width: 515,
-      prepareHeader: () => doc.font("Helvetica-Bold").fontSize(10),
-      prepareRow: (row, i) => doc.font("Helvetica").fontSize(10)
-    });
-
-    doc.moveDown(1.5);
-    doc.font('Helvetica-Bold').fontSize(14).text(`Total Net Amount: Rs. ${roundedTotalAmount.toFixed(2)}`, { align: 'right' });
-    
-    doc.end();
+      const adminEmail = process.env.EMAIL_USER;
+      sendEmail({
+        to: adminEmail,
+        subject: `New Seller Invoice: ${seller.businessName || seller.name}`,
+        html: `
+          <h3>New Invoice Generated</h3>
+          <p><strong>Seller:</strong> ${seller.businessName || seller.name}</p>
+          <p><strong>Invoice Number:</strong> ${trimmedInvoiceNumber}</p>
+          <p><strong>Date Range:</strong> ${start.toDateString()} to ${end.toDateString()}</p>
+          <p><strong>Total Amount:</strong> ₹${roundedTotalAmount}</p>
+          <p><strong>Total Commission:</strong> ₹${roundedTotalCommission}</p>
+          <p><strong>Net Payable:</strong> ₹${roundedNetAmount}</p>
+          <p><strong>Total Orders:</strong> ${orderIds.length}</p>
+          ${req.file ? `<p><strong>Attached Invoice Image:</strong> ${req.file.originalname} (${(req.file.size / 1024).toFixed(1)} KB)</p>` : ''}
+        `,
+        attachments: [
+          {
+            filename: `Invoice_${(seller.businessName || seller.name || 'Seller').replace(/\s+/g, '_')}_${trimmedInvoiceNumber}.pdf`,
+            content: pdfBuffer,
+            contentType: 'application/pdf'
+          }
+        ]
+      }).catch(e => console.error('Error emailing invoice:', e.message));
+    } catch (pdfErr) {
+      console.error('Error generating initial PDF for email:', pdfErr.message);
+    }
 
     // Strip binary buffer from JSON response for efficiency
     const invoiceResp = newInvoice.toObject();
@@ -710,7 +657,7 @@ router.put('/admin/:id/clear', protect, async (req, res) => {
 });
 
 // @route   GET /api/seller-invoices/:id/download
-// @desc    Download invoice PDF
+// @desc    Download redesigned professional invoice PDF with embedded tax invoice image
 router.get('/:id/download', protect, async (req, res) => {
   try {
     const { invoice, models } = req.targetInvoice 
@@ -729,77 +676,45 @@ router.get('/:id/download', protect, async (req, res) => {
 
     const SellerModel = models.Seller || Seller;
     const OrderModel = models.Order || Order;
+    const InvoiceImageModel = models.InvoiceImage || InvoiceImage;
 
-    // Safely fetch seller
+    // Fetch seller and orders
     const seller = await SellerModel.findById(invoice.sellerId);
     const orders = await OrderModel.find({ _id: { $in: invoice.orders } });
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=Invoice_${invoice.invoiceNumber || invoice._id}.pdf`);
+    // Retrieve raw binary image buffer from MongoDB
+    let imageBuffer = null;
+    let imageMimeType = null;
 
-    const doc = new PDFDocument({ margin: 40, size: 'A4' });
-    doc.pipe(res);
+    if (invoice.invoiceImage && invoice.invoiceImage.data) {
+      imageBuffer = invoice.invoiceImage.data;
+      imageMimeType = invoice.invoiceImage.contentType || invoice.imageMetadata?.mimeType;
+    }
 
-    const sellerName = seller ? (seller.businessName || seller.companyName || seller.name || 'Unknown Seller') : 'Unknown Seller';
-    
-    // Header
-    doc.fontSize(22).font('Helvetica-Bold').text('SELLER INVOICE', { align: 'right' });
-    doc.moveDown(1.5);
+    if (!imageBuffer) {
+      const imgDoc = await InvoiceImageModel.findOne({ invoiceId: invoice._id });
+      if (imgDoc && imgDoc.data) {
+        imageBuffer = imgDoc.data;
+        imageMimeType = imgDoc.mimeType;
+      }
+    }
 
-    // From / To sections
-    doc.fontSize(10).font('Helvetica-Bold').text('FROM:', 40, 90);
-    doc.font('Helvetica').text('SNB TRADING.CO (ZUDO PLATFORM)', 40, 105);
-    doc.text('307 ashrya layout vishweshwaria 7th block', 40, 120);
-    doc.text('Bengaluru, Karnataka 560091', 40, 135);
-    doc.text('GSTIN: 29BQHPG3242G1ZYNO', 40, 150);
-
-    doc.font('Helvetica-Bold').text('BILL TO (SELLER):', 300, 90);
-    doc.font('Helvetica').text(sellerName, 300, 105);
-    if (seller && seller.email) doc.text(`Email: ${seller.email}`, 300, 120);
-    if (seller && seller.phone) doc.text(`Phone: ${seller.phone}`, 300, 135);
-    if (seller && seller.gstNumber) doc.text(`GSTIN: ${seller.gstNumber}`, 300, 150);
-
-    // Meta Details Grid
-    doc.rect(40, 180, 515, 65).stroke('#d1d5db');
-    doc.font('Helvetica-Bold').fontSize(10);
-    doc.text('Invoice No:', 55, 195).font('Helvetica').text(invoice.invoiceNumber || invoice._id.toString(), 140, 195);
-    doc.font('Helvetica-Bold').text('Date Range:', 55, 215).font('Helvetica').text(`${new Date(invoice.startDate).toLocaleDateString()} to ${new Date(invoice.endDate).toLocaleDateString()}`, 140, 215);
-    
-    doc.font('Helvetica-Bold').text('Status:', 350, 195).font('Helvetica').text(invoice.status, 430, 195);
-    doc.font('Helvetica-Bold').text('Total Orders:', 350, 215).font('Helvetica').text(invoice.orderCount.toString(), 430, 215);
-
-    doc.moveDown(5);
-
-    const table = {
-      title: "Order Breakdown",
-      headers: ["Order ID", "Date", "Amount (INR)"],
-      rows: orders.map(o => [
-        o._id.toString(),
-        new Date(o.createdAt).toLocaleDateString(),
-        `Rs. ${o.items.filter(item => {
-          const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerIdStr;
-          const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerIdStr;
-          const matchesName = item.sellerName && seller && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
-          const matchesStore = item.sellerName && seller && seller.storeName && item.sellerName.toLowerCase() === seller.storeName.toLowerCase();
-          const matchesBusiness = item.sellerName && seller && seller.businessName && item.sellerName.toLowerCase() === seller.businessName.toLowerCase();
-          const productMatchesName = item.product && item.product.sellerName && seller && seller.name && item.product.sellerName.toLowerCase() === seller.name.toLowerCase();
-          const productMatchesStore = item.product && item.product.sellerName && seller && seller.storeName && item.product.sellerName.toLowerCase() === seller.storeName.toLowerCase();
-          return matchesSellerObj || matchesProductRef || matchesName || matchesStore || matchesBusiness || productMatchesName || productMatchesStore;
-        }).reduce((sum, i) => sum + (i.normalPrice || i.price) * i.quantity, 0).toFixed(2)}`
-      ])
-    };
-    
-    await doc.table(table, { 
-      width: 515,
-      prepareHeader: () => doc.font("Helvetica-Bold").fontSize(10),
-      prepareRow: (row, i) => doc.font("Helvetica").fontSize(10)
+    // Generate the professional PDF
+    const pdfBuffer = await generateSellerInvoicePDF({
+      invoice,
+      seller,
+      orders,
+      imageBuffer,
+      imageMimeType
     });
 
-    doc.moveDown(1.5);
-    doc.font('Helvetica-Bold').fontSize(14).text(`Total Net Amount: Rs. ${invoice.totalAmount.toFixed(2)}`, { align: 'right' });
-    
-    doc.end();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.setHeader('Content-Disposition', `attachment; filename=Invoice_${invoice.invoiceNumber || invoice._id}.pdf`);
+
+    return res.send(pdfBuffer);
   } catch (error) {
+    console.error('Error downloading invoice PDF:', error);
     res.status(500).json({ message: error.message });
   }
 });
