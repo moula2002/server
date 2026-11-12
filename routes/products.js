@@ -782,6 +782,8 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       packagingType: pricingPayload.packagingType || packagingType,
       priceBasis: pricingPayload.priceBasis || priceBasis,
       sellerPricePerProductUnit: pricingPayload.sellerPricePerProductUnit,
+      sellerPricePerPackage: pricingPayload.sellerPricePerPackage || pricingPayload.sellerPricePerProductUnit,
+      customerPricePerPackage: pricingPayload.customerPricePerPackage || pricingPayload.customerFinalPricePerProductUnit,
       adminCommissionPerBaseUnit: pricingPayload.adminCommissionPerBaseUnit,
       commissionPerProductUnit: pricingPayload.commissionPerProductUnit,
       customerUnitBasePrice: pricingPayload.customerUnitBasePrice,
@@ -1443,6 +1445,12 @@ router.put('/:id', protect, async (req, res) => {
     }
     if (req.body.unitSize !== undefined) {
       updatedPayload.unitSize = req.body.unitSize;
+    }
+    if (updatedPayload.sellerPricePerPackage === undefined && updatedPayload.sellerPricePerProductUnit !== undefined) {
+      updatedPayload.sellerPricePerPackage = updatedPayload.sellerPricePerProductUnit;
+    }
+    if (updatedPayload.customerPricePerPackage === undefined && updatedPayload.customerFinalPricePerProductUnit !== undefined) {
+      updatedPayload.customerPricePerPackage = updatedPayload.customerFinalPricePerProductUnit;
     }
     const product = await targetProductModel.findByIdAndUpdate(id, updatedPayload, { returnDocument: 'after' });
     if (!product) return res.status(404).json({ message: 'Product not found' });

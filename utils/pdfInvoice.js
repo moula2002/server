@@ -10,7 +10,7 @@ try {
 }
 
 /**
- * Generate a professional A4 Seller Invoice PDF with embedded tax invoice image
+ * Generate a professional single-page A4 Seller Invoice PDF with embedded tax invoice image
  * @param {Object} options
  * @param {Object} options.invoice - Invoice document/object
  * @param {Object} options.seller - Seller object
@@ -22,12 +22,25 @@ try {
 const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuffer = null, imageMimeType = null }) => {
   return new Promise(async (resolve, reject) => {
     try {
+      // Create document with bottom margin 0 to prevent accidental auto-paging by pdfkit
       const doc = new PDFDocument({
-        margin: 36, // 0.5 inch margins for clean professional layout
+        margin: 24,
         size: 'A4',
         bufferPages: true,
         autoFirstPage: true
       });
+
+      // Defensive guard: Strictly prevent adding pages beyond page 1
+      let pageCount = 1;
+      const originalAddPage = doc.addPage;
+      doc.addPage = function(...args) {
+        if (pageCount >= 1) {
+          // Suppress extra page creation to ensure exactly 1 A4 page
+          return this;
+        }
+        pageCount++;
+        return originalAddPage.apply(this, args);
+      };
 
       const chunks = [];
       doc.on('data', chunk => chunks.push(chunk));
@@ -36,87 +49,94 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
 
       const sellerIdStr = invoice.sellerId ? (invoice.sellerId._id ? invoice.sellerId._id.toString() : invoice.sellerId.toString()) : '';
       const sellerBusiness = seller ? (seller.businessName || seller.storeName || seller.name || 'Seller') : 'Seller';
-      const invoiceNumStr = invoice.invoiceNumber || invoice._id.toString().substring(0, 8).toUpperCase();
+      const invoiceNumStr = invoice.invoiceNumber || (invoice._id ? invoice._id.toString().substring(0, 8).toUpperCase() : 'INV-001');
       const generatedDateStr = new Date(invoice.createdAt || Date.now()).toLocaleDateString('en-IN', {
         day: '2-digit', month: 'short', year: 'numeric'
       });
-      const startDateStr = new Date(invoice.startDate).toLocaleDateString('en-IN', {
+      const startDateStr = new Date(invoice.startDate || Date.now()).toLocaleDateString('en-IN', {
         day: '2-digit', month: 'short', year: 'numeric'
       });
-      const endDateStr = new Date(invoice.endDate).toLocaleDateString('en-IN', {
+      const endDateStr = new Date(invoice.endDate || Date.now()).toLocaleDateString('en-IN', {
         day: '2-digit', month: 'short', year: 'numeric'
       });
 
-      // Colors
+      // Color Palette
       const primaryColor = '#1e3a8a';   // Deep navy blue
       const secondaryColor = '#0f172a'; // Slate dark
       const mutedColor = '#64748b';     // Muted grey
-      const borderColor = '#e2e8f0';    // Light grey border
+      const borderColor = '#cbd5e1';    // Slate border
       const lightBg = '#f8fafc';        // Off-white / light slate card background
       const successColor = '#15803d';    // Forest green
 
+      const PAGE_LEFT = 24;
+      const PAGE_RIGHT = 571;
+      const CONTENT_WIDTH = PAGE_RIGHT - PAGE_LEFT; // 547pt
+
       // ==========================================
-      // 1. HEADER SECTION (Logo & Invoice Title)
+      // 1. HEADER SECTION (Logo & Title)
       // ==========================================
       const logoPath = path.join(__dirname, '../logo.png');
       const hasLogo = fs.existsSync(logoPath);
 
       if (hasLogo) {
         try {
-          doc.image(logoPath, 36, 36, { fit: [120, 48] });
+          doc.image(logoPath, PAGE_LEFT, 24, { fit: [100, 36] });
         } catch (e) {
-          doc.fontSize(20).font('Helvetica-Bold').fillColor(primaryColor).text('ZUDO', 36, 40);
+          doc.fontSize(18).font('Helvetica-Bold').fillColor(primaryColor).text('ZUDO', PAGE_LEFT, 24, { lineBreak: false });
         }
       } else {
-        doc.fontSize(20).font('Helvetica-Bold').fillColor(primaryColor).text('ZUDO', 36, 40);
+        doc.fontSize(18).font('Helvetica-Bold').fillColor(primaryColor).text('ZUDO', PAGE_LEFT, 24, { lineBreak: false });
       }
 
-      // Title on right side
-      doc.fontSize(22).font('Helvetica-Bold').fillColor(primaryColor).text('SELLER INVOICE', 250, 36, { align: 'right' });
-      doc.fontSize(10).font('Helvetica-Bold').fillColor(mutedColor).text(`INVOICE #: `, 250, 64, { align: 'right', continued: true });
-      doc.font('Helvetica-Bold').fillColor(secondaryColor).text(`${invoiceNumStr}`);
-      doc.fontSize(9).font('Helvetica').fillColor(mutedColor).text(`Generated: ${generatedDateStr}`, 250, 78, { align: 'right' });
+      // Title & metadata on right
+      doc.fontSize(18).font('Helvetica-Bold').fillColor(primaryColor).text('SELLER INVOICE', 300, 24, { align: 'right', width: 271, lineBreak: false });
+      doc.fontSize(9).font('Helvetica-Bold').fillColor(mutedColor).text('INVOICE #: ', 300, 46, { align: 'right', width: 271, continued: true, lineBreak: false });
+      doc.font('Helvetica-Bold').fillColor(secondaryColor).text(`${invoiceNumStr}`, { lineBreak: false });
+      doc.fontSize(8).font('Helvetica').fillColor(mutedColor).text(`Generated: ${generatedDateStr}`, 300, 58, { align: 'right', width: 271, lineBreak: false });
 
-      // Horizontal separator line
-      doc.strokeColor(borderColor).lineWidth(1).moveTo(36, 96).lineTo(559, 96).stroke();
+      // Separator line
+      doc.strokeColor(borderColor).lineWidth(1).moveTo(PAGE_LEFT, 72).lineTo(PAGE_RIGHT, 72).stroke();
 
       // ==========================================
-      // 2. COMPANY & SELLER INFORMATION (2 COLUMNS)
+      // 2. COMPANY & SELLER DETAILS (2 COLUMNS)
       // ==========================================
-      const infoTop = 108;
+      const infoY = 78;
       
       // LEFT COLUMN: Platform Info
-      doc.fontSize(9).font('Helvetica-Bold').fillColor(primaryColor).text('FROM (PLATFORM):', 36, infoTop);
-      doc.font('Helvetica-Bold').fontSize(11).fillColor(secondaryColor).text('SNB TRADING.CO (ZUDO PLATFORM)', 36, infoTop + 14);
-      doc.font('Helvetica').fontSize(9).fillColor(mutedColor);
-      doc.text('307 Ashrya Layout, Vishweshwaria 7th Block', 36, infoTop + 28);
-      doc.text('Bengaluru, Karnataka - 560091', 36, infoTop + 40);
-      doc.font('Helvetica-Bold').fillColor(secondaryColor).text('GSTIN: ', 36, infoTop + 54, { continued: true });
-      doc.font('Helvetica').fillColor(mutedColor).text('29BQHPG3242G1ZYNO');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor(primaryColor).text('FROM (PLATFORM):', PAGE_LEFT, infoY, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(secondaryColor).text('SNB TRADING.CO (ZUDO PLATFORM)', PAGE_LEFT, infoY + 11, { lineBreak: false });
+      doc.font('Helvetica').fontSize(7.5).fillColor(mutedColor);
+      doc.text('307 Ashrya Layout, Vishweshwaria 7th Block, Bengaluru, KA - 560091', PAGE_LEFT, infoY + 22, { lineBreak: false });
+      doc.font('Helvetica-Bold').fillColor(secondaryColor).text('GSTIN: ', PAGE_LEFT, infoY + 32, { continued: true, lineBreak: false });
+      doc.font('Helvetica').fillColor(mutedColor).text('29BQHPG3242G1ZYNO', { lineBreak: false });
 
       // RIGHT COLUMN: Seller Info
-      const col2Left = 310;
-      doc.fontSize(9).font('Helvetica-Bold').fillColor(primaryColor).text('BILL TO (SELLER):', col2Left, infoTop);
-      doc.font('Helvetica-Bold').fontSize(11).fillColor(secondaryColor).text(sellerBusiness, col2Left, infoTop + 14);
-      doc.font('Helvetica').fontSize(9).fillColor(mutedColor);
+      const col2Left = 320;
+      doc.fontSize(8).font('Helvetica-Bold').fillColor(primaryColor).text('BILL TO (SELLER):', col2Left, infoY, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(secondaryColor).text(sellerBusiness, col2Left, infoY + 11, { width: 251, lineBreak: false });
+      doc.font('Helvetica').fontSize(7.5).fillColor(mutedColor);
+      
+      let sellerDetailsStr = '';
       if (seller?.name && seller.name !== sellerBusiness) {
-        doc.text(`Contact: ${seller.name}`, col2Left, infoTop + 28);
+        sellerDetailsStr += `Contact: ${seller.name}  •  `;
       }
-      doc.text(`Email: ${seller?.email || 'N/A'}`, col2Left, infoTop + 40);
-      doc.text(`Phone: ${seller?.phone || 'N/A'}`, col2Left, infoTop + 52);
+      sellerDetailsStr += `Email: ${seller?.email || 'N/A'}`;
+      doc.text(sellerDetailsStr, col2Left, infoY + 22, { width: 251, lineBreak: false });
+
+      let sellerSubStr = `Phone: ${seller?.phone || 'N/A'}`;
       if (seller?.gstNumber) {
-        doc.font('Helvetica-Bold').fillColor(secondaryColor).text('GSTIN: ', col2Left, infoTop + 64, { continued: true });
-        doc.font('Helvetica').fillColor(mutedColor).text(seller.gstNumber);
+        sellerSubStr += `  •  GSTIN: ${seller.gstNumber}`;
       }
+      doc.text(sellerSubStr, col2Left, infoY + 32, { width: 251, lineBreak: false });
 
       // ==========================================
-      // 3. INVOICE META GRID (SUMMARY CARD)
+      // 3. INVOICE META STRIP
       // ==========================================
-      const metaBoxY = 190;
-      const metaBoxHeight = 44;
-      doc.roundedRect(36, metaBoxY, 523, metaBoxHeight, 6).fillAndStroke(lightBg, borderColor);
+      const metaBoxY = 126;
+      const metaBoxHeight = 30;
+      doc.roundedRect(PAGE_LEFT, metaBoxY, CONTENT_WIDTH, metaBoxHeight, 4).fillAndStroke(lightBg, borderColor);
 
-      const cellWidth = 523 / 4;
+      const cellWidth = CONTENT_WIDTH / 4;
       const metaLabels = [
         { label: 'INVOICE NUMBER', val: `#${invoiceNumStr}` },
         { label: 'BILLING PERIOD', val: `${startDateStr} - ${endDateStr}` },
@@ -125,26 +145,26 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
       ];
 
       metaLabels.forEach((item, i) => {
-        const xPos = 36 + (i * cellWidth) + 10;
-        doc.font('Helvetica-Bold').fontSize(7.5).fillColor(mutedColor).text(item.label, xPos, metaBoxY + 8);
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(
+        const xPos = PAGE_LEFT + (i * cellWidth) + 8;
+        doc.font('Helvetica-Bold').fontSize(6.5).fillColor(mutedColor).text(item.label, xPos, metaBoxY + 5, { lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(8.5).fillColor(
           item.label.includes('STATUS') ? (item.val === 'CLEARED' ? successColor : '#d97706') : secondaryColor
-        ).text(item.val, xPos, metaBoxY + 22);
+        ).text(item.val, xPos, metaBoxY + 16, { lineBreak: false });
       });
 
       // ==========================================
-      // 4. ORDER BREAKDOWN TABLE
+      // 4. ORDER BREAKDOWN & COMMISSION TABLE
       // ==========================================
-      doc.y = metaBoxY + metaBoxHeight + 16;
-      doc.font('Helvetica-Bold').fontSize(12).fillColor(secondaryColor).text('Order Breakdown & Commission Details', 36, doc.y);
-      doc.moveDown(0.6);
+      const tableStartY = 163;
+      doc.y = tableStartY;
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(secondaryColor).text('Order Breakdown & Commission Details', PAGE_LEFT, tableStartY, { lineBreak: false });
 
       let serialNo = 1;
       const tableRows = [];
 
       orders.forEach(order => {
-        const orderIdShort = order.orderId || order._id.toString().slice(-6).toUpperCase();
-        const orderDateStr = new Date(order.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const orderIdShort = order.orderId || (order._id ? order._id.toString().slice(-6).toUpperCase() : 'ORD');
+        const orderDateStr = new Date(order.createdAt || Date.now()).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
         const customerName = order.userId?.name || 'Customer';
 
         // Filter seller's specific items
@@ -171,19 +191,19 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
             
             orderTotalSellerAmount += itemSellerPrice;
             orderTotalCommission += itemCommission;
-            productSummaries.push(`${item.name || 'Product'} (x${qty})`);
+            productSummaries.push(`${item.name || 'Item'} (x${qty})`);
           }
         });
 
         const netPayout = orderTotalSellerAmount;
-        const productDesc = productSummaries.slice(0, 2).join(', ') + (productSummaries.length > 2 ? ` +${productSummaries.length - 2} more` : '');
+        const productDesc = productSummaries.slice(0, 2).join(', ') + (productSummaries.length > 2 ? ` +${productSummaries.length - 2}` : '');
 
         tableRows.push([
           String(serialNo++),
           `#${orderIdShort}`,
           orderDateStr,
-          customerName,
-          productDesc || 'Order Items',
+          customerName.length > 15 ? customerName.substring(0, 14) + '…' : customerName,
+          productDesc.length > 32 ? productDesc.substring(0, 30) + '…' : (productDesc || 'Order Items'),
           `Rs. ${orderTotalSellerAmount.toFixed(2)}`,
           `Rs. ${orderTotalCommission.toFixed(2)}`,
           `Rs. ${netPayout.toFixed(2)}`
@@ -192,6 +212,15 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
 
       if (tableRows.length === 0) {
         tableRows.push(['1', `#${invoiceNumStr}`, startDateStr, 'Bulk Delivery', 'Delivered Batch Items', `Rs. ${Number(invoice.totalAmount || 0).toFixed(2)}`, `Rs. ${Number(invoice.totalCommission || 0).toFixed(2)}`, `Rs. ${Number(invoice.netAmount || invoice.totalAmount || 0).toFixed(2)}`]);
+      }
+
+      // Keep max rows bounded so table doesn't crowd out the image on single A4 page
+      const maxDisplayRows = 5;
+      let displayRows = tableRows;
+      let extraOrdersCount = 0;
+      if (tableRows.length > maxDisplayRows) {
+        displayRows = tableRows.slice(0, maxDisplayRows);
+        extraOrdersCount = tableRows.length - maxDisplayRows;
       }
 
       const tableData = {
@@ -205,82 +234,96 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
           "Commission",
           "Net Payout"
         ],
-        rows: tableRows
+        rows: displayRows
       };
 
+      doc.y = tableStartY + 14;
       await doc.table(tableData, {
-        width: 523,
-        x: 36,
+        width: CONTENT_WIDTH,
+        x: PAGE_LEFT,
         divider: {
-          header: { disabled: false, width: 1, opacity: 0.8 },
-          horizontal: { disabled: false, width: 0.5, opacity: 0.3 }
+          header: { disabled: false, width: 0.8, opacity: 0.8 },
+          horizontal: { disabled: false, width: 0.4, opacity: 0.3 }
         },
-        prepareHeader: () => doc.font("Helvetica-Bold").fontSize(8).fillColor(secondaryColor),
-        prepareRow: (row, indexColumn, indexRow, rectRow, rectCell) => {
-          doc.font("Helvetica").fontSize(8).fillColor('#334155');
-        },
-        columnsSize: [28, 56, 52, 70, 145, 60, 56, 56]
+        padding: [3, 4],
+        prepareHeader: () => doc.font("Helvetica-Bold").fontSize(7).fillColor(secondaryColor),
+        prepareRow: () => doc.font("Helvetica").fontSize(7).fillColor('#334155'),
+        columnsSize: [26, 52, 50, 80, 163, 60, 58, 58]
       });
 
-      // ==========================================
-      // 5. FINANCIAL SUMMARY TOTALS CARD
-      // ==========================================
-      doc.moveDown(1.5);
-      const summaryBoxY = doc.y;
-
-      // Check page break for summary box
-      if (summaryBoxY + 110 > doc.page.height - 40) {
-        doc.addPage();
+      if (extraOrdersCount > 0) {
+        doc.font('Helvetica-Oblique').fontSize(6.5).fillColor(mutedColor).text(
+          `+ ${extraOrdersCount} more order(s) included in total billing summary.`,
+          PAGE_LEFT,
+          doc.y + 2,
+          { lineBreak: false }
+        );
+        doc.y += 10;
       }
 
-      const currentSumY = doc.y;
-      const sumWidth = 240;
-      const sumX = 559 - sumWidth; // Right aligned
-      doc.roundedRect(sumX, currentSumY, sumWidth, 90, 6).fillAndStroke(lightBg, borderColor);
+      // ==========================================
+      // 5. PAYMENT SUMMARY & TERMS (SIDE-BY-SIDE)
+      // ==========================================
+      const summaryY = Math.max(doc.y + 8, 255);
+      const summaryCardHeight = 68;
+
+      // Left Box: Terms & Conditions
+      const termsWidth = 270;
+      doc.roundedRect(PAGE_LEFT, summaryY, termsWidth, summaryCardHeight, 4).fillAndStroke(lightBg, borderColor);
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(secondaryColor).text('Terms & Conditions:', PAGE_LEFT + 8, summaryY + 7, { lineBreak: false });
+      doc.font('Helvetica').fontSize(6.5).fillColor(mutedColor).text(
+        '1. Reflects verified deliveries and agreed wholesale seller payout.\n' +
+        '2. Payments cleared sequentially per platform settlement schedule.\n' +
+        '3. For tax & invoice discrepancies, email support@snbtradingco.in.',
+        PAGE_LEFT + 8,
+        summaryY + 20,
+        { width: termsWidth - 16, lineGap: 2, lineBreak: false }
+      );
+
+      // Right Box: Payment Summary Totals
+      const sumWidth = 265;
+      const sumX = PAGE_RIGHT - sumWidth;
+      doc.roundedRect(sumX, summaryY, sumWidth, summaryCardHeight, 4).fillAndStroke(lightBg, borderColor);
 
       const totAmount = Number(invoice.totalAmount || 0);
       const totCommission = Number(invoice.totalCommission || 0);
       const totNet = Number(invoice.netAmount || totAmount);
 
-      doc.font('Helvetica').fontSize(9).fillColor(mutedColor).text('Total Order Amount:', sumX + 12, currentSumY + 12);
-      doc.font('Helvetica-Bold').fontSize(9).fillColor(secondaryColor).text(`Rs. ${totAmount.toFixed(2)}`, sumX + 130, currentSumY + 12, { align: 'right', width: 95 });
+      doc.font('Helvetica').fontSize(7.5).fillColor(mutedColor).text('Total Order Amount:', sumX + 8, summaryY + 8, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(secondaryColor).text(`Rs. ${totAmount.toFixed(2)}`, sumX + 130, summaryY + 8, { align: 'right', width: sumWidth - 140, lineBreak: false });
 
-      doc.font('Helvetica').fontSize(9).fillColor(mutedColor).text('Total Platform Commission:', sumX + 12, currentSumY + 30);
-      doc.font('Helvetica-Bold').fontSize(9).fillColor(secondaryColor).text(`Rs. ${totCommission.toFixed(2)}`, sumX + 130, currentSumY + 30, { align: 'right', width: 95 });
+      doc.font('Helvetica').fontSize(7.5).fillColor(mutedColor).text('Total Platform Commission:', sumX + 8, summaryY + 22, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(secondaryColor).text(`Rs. ${totCommission.toFixed(2)}`, sumX + 130, summaryY + 22, { align: 'right', width: sumWidth - 140, lineBreak: false });
 
-      doc.strokeColor(borderColor).lineWidth(0.8).moveTo(sumX + 10, currentSumY + 48).lineTo(sumX + sumWidth - 10, currentSumY + 48).stroke();
+      doc.strokeColor(borderColor).lineWidth(0.6).moveTo(sumX + 8, summaryY + 36).lineTo(sumX + sumWidth - 8, summaryY + 36).stroke();
 
-      doc.font('Helvetica-Bold').fontSize(11).fillColor(successColor).text('Net Payout to Seller:', sumX + 12, currentSumY + 60);
-      doc.font('Helvetica-Bold').fontSize(12).fillColor(successColor).text(`Rs. ${totNet.toFixed(2)}`, sumX + 120, currentSumY + 60, { align: 'right', width: 105 });
-
-      // Note on left side of summary
-      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(secondaryColor).text('Terms & Remarks:', 36, currentSumY + 10);
-      doc.font('Helvetica').fontSize(8).fillColor(mutedColor).text(
-        '1. This invoice reflects verified order deliveries and corresponding seller wholesale payouts.\n' +
-        '2. Payments are cleared sequentially as per platform settlement schedules.\n' +
-        '3. For any discrepancies or tax inquiries, reach out to support@snbtradingco.in.',
-        36, currentSumY + 24, { width: 260, lineGap: 3 }
-      );
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(successColor).text('Net Payout to Seller:', sumX + 8, summaryY + 44, { lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(successColor).text(`Rs. ${totNet.toFixed(2)}`, sumX + 110, summaryY + 43, { align: 'right', width: sumWidth - 120, lineBreak: false });
 
       // ==========================================
       // 6. SELLER UPLOADED TAX INVOICE IMAGE
       // ==========================================
-      // Always present the attached tax invoice image on a dedicated clean section/page
+      const imageSectionTop = summaryY + summaryCardHeight + 8;
+      const footerY = 818;
+      const availableImageAreaHeight = footerY - imageSectionTop - 20; // Room for label + box
+
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(primaryColor).text(
+        'Seller Uploaded Tax Invoice Copy',
+        PAGE_LEFT,
+        imageSectionTop,
+        { lineBreak: false }
+      );
+
+      const imgBoxY = imageSectionTop + 14;
+      const imgBoxHeight = Math.max(availableImageAreaHeight, 180);
+
+      doc.roundedRect(PAGE_LEFT, imgBoxY, CONTENT_WIDTH, imgBoxHeight, 4).fillAndStroke('#ffffff', borderColor);
+
       if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length > 0) {
-        doc.addPage(); // Start fresh page for the uploaded image
-
-        doc.fontSize(16).font('Helvetica-Bold').fillColor(primaryColor).text('Seller Uploaded Tax Invoice', 36, 40);
-        doc.fontSize(9).font('Helvetica').fillColor(mutedColor).text(
-          `Attached signed tax invoice copy for Invoice #${invoiceNumStr} (${(imageBuffer.length / 1024).toFixed(1)} KB)`,
-          36, 60
-        );
-
-        doc.strokeColor(borderColor).lineWidth(1).moveTo(36, 76).lineTo(559, 76).stroke();
-
         try {
           let processedBuffer = imageBuffer;
 
-          // Check if image is WebP (starts with RIFF....WEBP)
+          // Check if image is WebP
           const isWebP = (
             (imageMimeType && imageMimeType.toLowerCase().includes('webp')) ||
             (imageBuffer.length > 12 &&
@@ -292,50 +335,51 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
             try {
               processedBuffer = await sharp(imageBuffer).png().toBuffer();
             } catch (convErr) {
-              console.warn('Failed to convert WebP to PNG using sharp, attempting direct embed:', convErr.message);
+              console.warn('WebP conversion fallback:', convErr.message);
             }
           }
 
-          // Embed the buffer directly into the PDF with aspect ratio preservation
-          const maxImgWidth = 523;
-          const maxImgHeight = 680;
-          const imgY = 90;
-
-          // Box container around the image
-          doc.roundedRect(36, imgY, maxImgWidth, maxImgHeight, 8).fillAndStroke('#ffffff', borderColor);
-
-          // Center the image within container
-          doc.image(processedBuffer, 46, imgY + 10, {
-            fit: [maxImgWidth - 20, maxImgHeight - 20],
+          // Embed image neatly inside the box with containment
+          doc.image(processedBuffer, PAGE_LEFT + 6, imgBoxY + 6, {
+            fit: [CONTENT_WIDTH - 12, imgBoxHeight - 12],
             align: 'center',
             valign: 'center'
           });
         } catch (imgErr) {
           console.error('Error embedding image in PDF:', imgErr.message);
-          doc.font('Helvetica-Oblique').fontSize(10).fillColor('#ef4444').text(
-            `Unable to render the uploaded invoice image format: ${imgErr.message}`,
-            36, 120
+          doc.font('Helvetica-Oblique').fontSize(8).fillColor('#ef4444').text(
+            `Unable to render the uploaded invoice image: ${imgErr.message}`,
+            PAGE_LEFT + 12,
+            imgBoxY + 20,
+            { lineBreak: false }
           );
         }
+      } else {
+        // Subtle placeholder text when no image was uploaded
+        doc.font('Helvetica-Oblique').fontSize(8).fillColor(mutedColor).text(
+          'No external tax invoice image was attached to this settlement.',
+          PAGE_LEFT,
+          imgBoxY + (imgBoxHeight / 2) - 5,
+          { align: 'center', width: CONTENT_WIDTH, lineBreak: false }
+        );
       }
 
       // ==========================================
-      // 7. FOOTER PAGE NUMBERS (All Pages)
+      // 7. SINGLE-PAGE FOOTER
       // ==========================================
-      const pages = doc.bufferedPageRange();
-      for (let i = 0; i < pages.count; i++) {
-        doc.switchToPage(i);
-        doc.strokeColor(borderColor).lineWidth(0.5).moveTo(36, doc.page.height - 30).lineTo(559, doc.page.height - 30).stroke();
-        doc.font('Helvetica').fontSize(8).fillColor(mutedColor).text(
-          `SNB TRADING.CO (ZUDO PLATFORM)  •  Invoice #${invoiceNumStr}`,
-          36, doc.page.height - 22
-        );
-        doc.text(
-          `Page ${i + 1} of ${pages.count}`,
-          250, doc.page.height - 22,
-          { align: 'right', width: 309 }
-        );
-      }
+      doc.strokeColor(borderColor).lineWidth(0.5).moveTo(PAGE_LEFT, footerY).lineTo(PAGE_RIGHT, footerY).stroke();
+      doc.font('Helvetica').fontSize(7).fillColor(mutedColor).text(
+        `SNB TRADING.CO (ZUDO PLATFORM)  •  Invoice #${invoiceNumStr}  •  Settlement Verification`,
+        PAGE_LEFT,
+        footerY + 6,
+        { lineBreak: false }
+      );
+      doc.text(
+        'Page 1 of 1',
+        300,
+        footerY + 6,
+        { align: 'right', width: 271, lineBreak: false }
+      );
 
       doc.end();
     } catch (err) {
@@ -345,4 +389,3 @@ const generateSellerInvoicePDF = async ({ invoice, seller, orders = [], imageBuf
 };
 
 module.exports = { generateSellerInvoicePDF };
-

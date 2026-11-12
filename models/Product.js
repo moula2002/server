@@ -36,6 +36,8 @@ const productSchema = new mongoose.Schema({
   priceBasis: { type: String, enum: ['per_unit', 'per_package'], default: 'per_unit' },
   sellerPricePerBaseUnit: { type: Number, default: 0 },
   sellerPricePerProductUnit: { type: Number, default: 0 },
+  sellerPricePerPackage: { type: Number, default: 0 },
+  customerPricePerPackage: { type: Number, default: 0 },
   adminCommissionPerBaseUnit: { type: Number, default: 0 },
   commissionPerProductUnit: { type: Number, default: 0 },
   customerUnitBasePrice: { type: Number, default: 0 },
