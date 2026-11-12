@@ -440,6 +440,46 @@ async function runTests() {
     process.exitCode = 1;
   }
 
+  // ========================================================================
+  // TEST I – Admin Commission ₹2/KG on 30 KG Bag (Never ₹60,000, Never ₹0.00)
+  // ========================================================================
+  console.log('\nTest I: Admin Commission ₹2/KG on 30 KG Bag (Issue 1 & 2 Regression Prevention)');
+  const testIResult = calculateCustomerPrice(50, 'flat', 2, 30, 0, false, {
+    unit: 'BAG',
+    packagingType: 'BAG',
+    measurementBasis: 'KG',
+    measurementUnit: 'KG',
+    priceBasis: 'per_unit'
+  });
+  assert(testIResult.unitSize === 30, `Product Unit Size is 30 KG (got ${testIResult.unitSize})`);
+  assert(testIResult.adminCommissionPerBaseUnit === 2, `Admin Commission Rate is ₹2/KG (got ${testIResult.adminCommissionPerBaseUnit})`);
+  assert(testIResult.commissionPerProductUnit === 60, `Commission Per Bag is ₹60 (got ${testIResult.commissionPerProductUnit})`);
+  assert(testIResult.commissionPerProductUnit !== 60000, `Commission is NEVER ₹60,000 (verified)`);
+  assert(testIResult.commissionPerProductUnit !== 0, `Commission is NEVER ₹0.00 (verified)`);
+
+  // ========================================================================
+  // TEST J – Unit Size 30 KG Auto-Derivation from Variant / Title
+  // ========================================================================
+  console.log('\nTest J: Unit Size 30 KG Auto-Derivation from Variant or Product Title');
+  const testJPayload = {
+    name: 'RAS MADURI TOOR DAL 30KG',
+    unit: 'BAG',
+    packagingType: 'BAG',
+    measurementBasis: 'KG',
+    unitSize: 1, // seller did not fill root unitSize
+    sellerPrice: 0,
+    sellerB2bPrice: 2963,
+    b2b: [
+      { packetSize: '30kg', unitSize: 30, sellerPrice: 3000, price: 3060 }
+    ]
+  };
+  const testJComms = [{ categoryId: 'cat1', unit: 'kg', commissionValue: 2, commissionType: 'flat', pincode: 'all' }];
+  const testJProcessed = processProductPricing({ ...testJPayload, categoryId: 'cat1' }, testJComms);
+  assert(testJProcessed.unitSize === 30, `Derived unitSize is 30 KG instead of 1 (got ${testJProcessed.unitSize})`);
+  assert(testJProcessed.commissionPerProductUnit === 60, `Derived Commission Per Bag is ₹60 (got ${testJProcessed.commissionPerProductUnit})`);
+  assert(testJProcessed.b2b[0].commissionPerProductUnit === 60, `Variant Commission is ₹60 (got ${testJProcessed.b2b[0].commissionPerProductUnit})`);
+  assert(testJProcessed.b2b[0].commissionPerProductUnit !== 60000, `Variant Commission is NEVER ₹60,000 (verified)`);
+
   console.log('\n================================================================');
   console.log(`  TEST RESULTS: ${passedTests} / ${totalTests} TESTS PASSED`);
   console.log('================================================================\n');

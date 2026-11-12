@@ -232,24 +232,42 @@ function findCategoryCommission(commissions, categoryId, unit, measurementUnit =
     const isExtractedUnit = extractedUnit && cUnit === extractedUnit;
     const isConvertible = (targetMeasUnit || extractedUnit) && convertMeasurement(1, (targetMeasUnit || extractedUnit), cUnit) !== null;
 
-    const isUnitMatch = isExactUnit || isMeasMatch || isExtractedUnit || isConvertible;
-
     const isPinMatch = targetPincode && targetPincode !== 'all' && cPin === targetPincode;
     const isPinAll = !c.pincode || cPin === 'all';
 
     let score = 0;
-    if (isExactUnit && isPinMatch) score = 120;
-    else if (isExactUnit && isPinAll) score = 100;
-    else if (isMeasMatch && isPinMatch) score = 95;
-    else if (isMeasMatch && isPinAll) score = 90;
-    else if (isExtractedUnit && isPinMatch) score = 85;
-    else if (isExtractedUnit && isPinAll) score = 80;
-    else if (isConvertible && isPinMatch) score = 75;
-    else if (isConvertible && isPinAll) score = 70;
-    else if (isUnitMatch) score = 60;
-    else if (isPinMatch) score = 40;
-    else if (isPinAll) score = 20;
-    else score = 10;
+    // Priority 1: Exact direct match on product measurement basis (e.g. KG == KG, LTR == LTR)
+    if (isMeasMatch) {
+      if (isPinMatch) score = 200;
+      else if (isPinAll) score = 190;
+      else score = 180;
+    }
+    // Priority 2: Direct match on packaging container unit (e.g. BOX == BOX, BAG == BAG)
+    else if (isExactUnit) {
+      if (isPinMatch) score = 150;
+      else if (isPinAll) score = 140;
+      else score = 130;
+    }
+    // Priority 3: Compatible unit conversion (e.g. ton <-> kg)
+    else if (isConvertible) {
+      if (isPinMatch) score = 100;
+      else if (isPinAll) score = 90;
+      else score = 80;
+    }
+    // Priority 4: Extracted Unit Match
+    else if (isExtractedUnit) {
+      if (isPinMatch) score = 60;
+      else if (isPinAll) score = 50;
+      else score = 40;
+    }
+    // Priority 5: Pincode match only
+    else if (isPinMatch) {
+      score = 20;
+    } else if (isPinAll) {
+      score = 15;
+    } else {
+      score = 5;
+    }
 
     if (score > bestScore) {
       bestScore = score;
@@ -434,7 +452,37 @@ function processProductPricing(payload, commissions = []) {
   const unit = packagingType;
   const measurementBasis = (payload.measurementBasis || payload.measurementUnit || 'KG').trim();
   const measurementUnit = measurementBasis;
-  const unitSize = extractUnitSize(payload.unitSize, 1);
+
+  let unitSize = extractUnitSize(payload.unitSize, null);
+  if (!unitSize || unitSize <= 1) {
+    if (Array.isArray(payload.b2b) && payload.b2b.length > 0) {
+      for (const v of payload.b2b) {
+        const vs = extractUnitSize(v.unitSize || v.packetSizeVal || v.packetSize, null);
+        if (vs && vs > 1) {
+          unitSize = vs;
+          break;
+        }
+      }
+    }
+    if (!unitSize || unitSize <= 1) {
+      const allVars = [...(payload.variants || []), ...(payload.b2c || [])];
+      for (const v of allVars) {
+        const vs = extractUnitSize(v.unitSize || v.sizeValue || v.packetSize || v.sizeName, null);
+        if (vs && vs > 1) {
+          unitSize = vs;
+          break;
+        }
+      }
+    }
+    if (!unitSize || unitSize <= 1) {
+      const match = String(payload.name || '').match(/([0-9.]+)\s*(kg|g|ltr|pcs|gm|kgs|ton|ml)/i);
+      if (match && parseFloat(match[1]) > 0) {
+        unitSize = parseFloat(match[1]);
+      }
+    }
+  }
+  if (!unitSize || unitSize <= 0) unitSize = 1;
+
   const priceBasis = payload.priceBasis || (payload.isPackagePrice ? 'per_package' : 'per_unit');
 
   const adminRule = findCategoryCommission(commissions, categoryId, unit, measurementUnit);
@@ -450,17 +498,32 @@ function processProductPricing(payload, commissions = []) {
     commissionType = payload.commissionType === 'percentage' ? 'percentage' : 'flat';
   }
 
-  const sellerB2bPrice = payload.sellerB2bPrice !== undefined && payload.sellerB2bPrice !== '' && payload.sellerB2bPrice !== null
+  let sellerB2bPrice = payload.sellerB2bPrice !== undefined && payload.sellerB2bPrice !== '' && payload.sellerB2bPrice !== null
     ? parseFloat(payload.sellerB2bPrice) || 0
     : (payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null
         ? parseFloat(payload.sellerPrice) || 0
         : (parseFloat(payload.b2bPrice) || parseFloat(payload.price) || 0));
 
-  const sellerPrice = payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null
+  let sellerPrice = payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null
     ? parseFloat(payload.sellerPrice) || 0
-    : (payload.sellerB2bPrice !== undefined && payload.sellerB2bPrice !== '' && payload.sellerB2bPrice !== null
-        ? parseFloat(payload.sellerB2bPrice) || 0
-        : (parseFloat(payload.price) || parseFloat(payload.b2bPrice) || 0));
+    : (sellerB2bPrice > 0 ? sellerB2bPrice : (parseFloat(payload.price) || parseFloat(payload.b2bPrice) || 0));
+
+  if (sellerPrice <= 0 && sellerB2bPrice > 0) {
+    sellerPrice = sellerB2bPrice;
+  }
+  if (sellerB2bPrice <= 0 && sellerPrice > 0) {
+    sellerB2bPrice = sellerPrice;
+  }
+
+  // If still 0, check B2B variants
+  if (sellerPrice <= 0 && Array.isArray(payload.b2b) && payload.b2b.length > 0) {
+    const firstB2b = payload.b2b[0];
+    const firstPrice = parseFloat(firstB2b.sellerPrice || firstB2b.price) || 0;
+    if (firstPrice > 0) {
+      sellerPrice = firstPrice;
+      sellerB2bPrice = firstPrice;
+    }
+  }
 
   const extraOpts = { unit, packagingType, measurementUnit, measurementBasis, commissionRule: adminRule, priceBasis };
   const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
