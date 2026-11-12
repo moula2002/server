@@ -6,7 +6,17 @@ const path = require('path');
 const fs = require('fs');
 const mongoose = require('mongoose');
 const { protect } = require('../middleware/auth');
-const { processProductPricing, applyCommission, calculateCustomerPrice, findCategoryCommission } = require('../utils/pricing');
+const {
+  processProductPricing,
+  applyCommission,
+  calculateCustomerPrice,
+  findCategoryCommission,
+  calculatePricingBreakdown,
+  round2,
+  extractUnitSize,
+  convertMeasurement,
+  normalizeUnit
+} = require('../utils/pricing');
 
 // Helper to get models from req
 const { getModel } = require('../utils/model_loader');
