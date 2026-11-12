@@ -52,7 +52,10 @@ router.post('/', (req, res) => {
     }
 
     try {
-      const productionDomain = process.env.PRODUCTION_DOMAIN || 'https://snbtradingco.in';
+      const isLocalHost = req.get('host') && (req.get('host').includes('localhost') || req.get('host').includes('127.0.0.1'));
+      const hostUrl = `${req.protocol}://${req.get('host')}`;
+      const defaultDomain = isLocalHost ? hostUrl : 'https://snbtradingco.in';
+      const productionDomain = process.env.PRODUCTION_DOMAIN || defaultDomain;
       const fileUrl = `${productionDomain}/uploads/${req.file.filename}`;
       res.status(200).json({
         message: 'File uploaded successfully',
