@@ -331,7 +331,27 @@ function calculateCustomerPrice(
     };
   }
 
-  const sPricePerProductUnit = round2(basePrice * uSize);
+  let isPackagePrice = false;
+  if (typeof arg1 === 'object' && arg1 !== null) {
+    if (arg1.isPackagePrice !== undefined) {
+      isPackagePrice = Boolean(arg1.isPackagePrice);
+    } else if (arg1.sellerPricePerProductUnit !== undefined && arg1.sellerPricePerBaseUnit === undefined) {
+      isPackagePrice = true;
+    }
+  } else if (extraOpts && extraOpts.isPackagePrice !== undefined) {
+    isPackagePrice = Boolean(extraOpts.isPackagePrice);
+  }
+
+  let sellerPricePerBaseUnit = 0;
+  let sPricePerProductUnit = 0;
+
+  if (isPackagePrice) {
+    sPricePerProductUnit = round2(basePrice);
+    sellerPricePerBaseUnit = uSize > 0 ? round2(basePrice / uSize) : round2(basePrice);
+  } else {
+    sellerPricePerBaseUnit = round2(basePrice);
+    sPricePerProductUnit = round2(basePrice * uSize);
+  }
 
   let commissionPerProductUnit = 0;
   if (cType === 'flat') {
@@ -359,7 +379,7 @@ function calculateCustomerPrice(
 
   return {
     // 10 Breakdown Items (Section 5)
-    sellerPricePerBaseUnit: basePrice,
+    sellerPricePerBaseUnit,
     productMeasurementUnit: productBasis.measurementUnit || productBasis.packagingUnit,
     measurementUnit: productBasis.measurementUnit || productBasis.packagingUnit,
     unit: productBasis.packagingUnit,
@@ -430,13 +450,24 @@ function processProductPricing(payload, commissions = []) {
       ? parseFloat(v.sellerPrice) || 0
       : (parseFloat(v.price) || 0);
     const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
+    const vIsPackagePrice = v.isPackagePrice !== undefined ? Boolean(v.isPackagePrice) : true;
+    const vExtraOpts = {
+      ...extraOpts,
+      isPackagePrice: vIsPackagePrice,
+      unit: v.packagingType || payload.unit || 'pack',
+      measurementUnit: v.measurementUnit || payload.measurementUnit || 'kg'
+    };
+    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
     return {
       ...v,
       unitSize: vUnitSize,
+      sizeValue: v.sizeValue || vUnitSize,
+      measurementUnit: vExtraOpts.measurementUnit,
+      packagingType: vExtraOpts.unit,
       sellerPrice: vCalc.sellerPricePerProductUnit,
       sellerPricePerBaseUnit: vCalc.sellerPricePerBaseUnit,
       sellerPricePerProductUnit: vCalc.sellerPricePerProductUnit,
+      customerUnitBasePrice: vCalc.customerUnitBasePrice,
       price: vCalc.customerPrice,
       commissionType,
       commissionValue,
@@ -451,7 +482,14 @@ function processProductPricing(payload, commissions = []) {
       ? parseFloat(v.sellerPrice) || 0
       : (parseFloat(v.price) || 0);
     const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
+    const vIsPackagePrice = v.isPackagePrice !== undefined ? Boolean(v.isPackagePrice) : true;
+    const vExtraOpts = {
+      ...extraOpts,
+      isPackagePrice: vIsPackagePrice,
+      unit: v.packagingType || payload.unit || 'pack',
+      measurementUnit: v.measurementUnit || payload.measurementUnit || 'kg'
+    };
+    const vCalc = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
 
     let processedTiers = v.priceTiers;
     if (Array.isArray(v.priceTiers)) {
@@ -459,7 +497,7 @@ function processProductPricing(payload, commissions = []) {
         const tSellerPrice = tier.sellerPrice !== undefined && tier.sellerPrice !== '' && tier.sellerPrice !== null
           ? parseFloat(tier.sellerPrice) || 0
           : (parseFloat(tier.price) || 0);
-        const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
+        const tCalc = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
         return {
           ...tier,
           sellerPrice: tCalc.sellerPricePerProductUnit,
@@ -473,9 +511,13 @@ function processProductPricing(payload, commissions = []) {
     return {
       ...v,
       unitSize: vUnitSize,
+      sizeValue: v.sizeValue || vUnitSize,
+      measurementUnit: vExtraOpts.measurementUnit,
+      packagingType: vExtraOpts.unit,
       sellerPrice: vCalc.sellerPricePerProductUnit,
       sellerPricePerBaseUnit: vCalc.sellerPricePerBaseUnit,
       sellerPricePerProductUnit: vCalc.sellerPricePerProductUnit,
+      customerUnitBasePrice: vCalc.customerUnitBasePrice,
       price: vCalc.customerPrice,
       commissionType,
       commissionValue,
@@ -582,7 +624,15 @@ function applyCommission(product, commissions = [], pincode = null) {
   const unit = product.unit || 'pcs';
   const measurementUnit = product.measurementUnit || null;
   const unitSize = extractUnitSize(product.unitSize, 1);
-  const adminRule = findCategoryCommission(commissions, product.categoryId, unit, measurementUnit, pincode);
+
+  let ruleList = [];
+  let directRule = null;
+  if (Array.isArray(commissions)) {
+    ruleList = commissions;
+  } else if (commissions && typeof commissions === 'object') {
+    directRule = commissions;
+  }
+  const adminRule = directRule || findCategoryCommission(ruleList, product.categoryId, unit, measurementUnit, pincode);
 
   let commissionType = 'flat';
   let commissionValue = 0;
@@ -614,13 +664,24 @@ function applyCommission(product, commissions = [], pincode = null) {
   const newB2c = (product.b2c || []).map(v => {
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
     const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
+    const vIsPackagePrice = v.isPackagePrice !== undefined ? Boolean(v.isPackagePrice) : true;
+    const vExtraOpts = {
+      ...extraOpts,
+      isPackagePrice: vIsPackagePrice,
+      unit: v.packagingType || unit,
+      measurementUnit: v.measurementUnit || measurementUnit
+    };
+    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit, customerUnitBasePrice: vCustomerUnitBasePrice } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
     return {
       ...v,
       unitSize: vUnitSize,
+      sizeValue: v.sizeValue || vUnitSize,
+      measurementUnit: vExtraOpts.measurementUnit,
+      packagingType: vExtraOpts.unit,
       sellerPrice: vSellerPricePerProductUnit,
       sellerPricePerBaseUnit: vSellerPricePerBaseUnit,
       sellerPricePerProductUnit: vSellerPricePerProductUnit,
+      customerUnitBasePrice: vCustomerUnitBasePrice,
       price: vCustomerPrice,
       commissionType,
       commissionValue,
@@ -632,13 +693,20 @@ function applyCommission(product, commissions = [], pincode = null) {
   const newB2b = (product.b2b || []).map(v => {
     const vSellerPrice = v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0);
     const vUnitSize = extractUnitSize(v.unitSize || v.packetSize, unitSize);
-    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
+    const vIsPackagePrice = v.isPackagePrice !== undefined ? Boolean(v.isPackagePrice) : true;
+    const vExtraOpts = {
+      ...extraOpts,
+      isPackagePrice: vIsPackagePrice,
+      unit: v.packagingType || unit,
+      measurementUnit: v.measurementUnit || measurementUnit
+    };
+    const { customerPrice: vCustomerPrice, commissionAmount: vCommAmt, sellerPricePerProductUnit: vSellerPricePerProductUnit, sellerPricePerBaseUnit: vSellerPricePerBaseUnit, customerUnitBasePrice: vCustomerUnitBasePrice } = calculateCustomerPrice(vSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
 
     let newTiers = v.priceTiers;
     if (Array.isArray(v.priceTiers)) {
       newTiers = v.priceTiers.map(t => {
         const tSellerPrice = t.sellerPrice !== undefined && t.sellerPrice !== null ? t.sellerPrice : (t.price || 0);
-        const { customerPrice: tCustomerPrice, sellerPricePerProductUnit: tSellerPricePerProductUnit, sellerPricePerBaseUnit: tSellerPricePerBaseUnit } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, extraOpts);
+        const { customerPrice: tCustomerPrice, sellerPricePerProductUnit: tSellerPricePerProductUnit, sellerPricePerBaseUnit: tSellerPricePerBaseUnit } = calculateCustomerPrice(tSellerPrice, commissionType, commissionValue, vUnitSize, 0, false, vExtraOpts);
         return {
           ...t,
           sellerPrice: tSellerPricePerProductUnit,
@@ -652,9 +720,13 @@ function applyCommission(product, commissions = [], pincode = null) {
     return {
       ...v,
       unitSize: vUnitSize,
+      sizeValue: v.sizeValue || vUnitSize,
+      measurementUnit: vExtraOpts.measurementUnit,
+      packagingType: vExtraOpts.unit,
       sellerPrice: vSellerPricePerProductUnit,
       sellerPricePerBaseUnit: vSellerPricePerBaseUnit,
       sellerPricePerProductUnit: vSellerPricePerProductUnit,
+      customerUnitBasePrice: vCustomerUnitBasePrice,
       price: vCustomerPrice,
       commissionType,
       commissionValue,
