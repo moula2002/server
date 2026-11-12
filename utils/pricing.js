@@ -435,6 +435,8 @@ function calculateCustomerPrice(
 
     // Aliases for compatibility
     sellerPrice: sPricePerProductUnit,
+    sellerPricePerPackage: sPricePerProductUnit,
+    customerPricePerPackage: customerFinalPricePerProductUnit,
     customerPrice: customerUnitBasePrice,
     commissionAmount: commissionPerProductUnit,
     unitCommission: commissionPerProductUnit,
@@ -760,6 +762,8 @@ function processProductPricing(payload, commissions = []) {
 
     // Aliases for backward compatibility
     sellerPrice: primaryPricing.sellerPricePerProductUnit,
+    sellerPricePerPackage: primaryPricing.sellerPricePerProductUnit,
+    customerPricePerPackage: primaryPricing.customerFinalPricePerProductUnit,
     sellerUnitPrice: primaryPricing.sellerPricePerProductUnit,
     sellerB2bPrice: primaryB2bPricing.sellerPricePerProductUnit,
     commissionType,
@@ -1029,6 +1033,8 @@ function applyCommission(product, commissions = [], pincode = null) {
 
     // Aliases for backward compatibility
     sellerPrice: primaryPricing.sellerPricePerProductUnit,
+    sellerPricePerPackage: primaryPricing.sellerPricePerProductUnit,
+    customerPricePerPackage: primaryPricing.customerFinalPricePerProductUnit,
     sellerUnitPrice: primaryPricing.sellerPricePerProductUnit,
     sellerB2bPrice: primaryB2bPricing.sellerPricePerProductUnit,
     commissionType,
