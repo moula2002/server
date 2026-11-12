@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const { protect } = require('../middleware/auth');
 const sendEmail = require('../utils/email');
 const PDFDocument = require('pdfkit-table');
@@ -11,6 +12,7 @@ const InvoiceImage = require('../models/InvoiceImage');
 const Seller = require('../models/Seller');
 const Admin = require('../models/Admin');
 const { round2 } = require('../utils/pricing');
+const { connectDBByLocation, getTenantConnections } = require('../utils/db_manager');
 
 // Configure multer to store file in memory as Buffer for MongoDB binary storage
 const upload = multer({
@@ -40,34 +42,89 @@ const getModels = (req) => {
   };
 };
 
-router.param('id', async (req, res, next, id) => {
-  if (req.isTenant || req.locationId) return next();
+/**
+ * Universal helper to find an invoice across active DB, Global DB, and all Tenant DBs.
+ * Returns { invoice, models, db }
+ */
+const findInvoiceAcrossAllDBs = async (id, req) => {
+  if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+    return { invoice: null, models: getModels(req), db: req.db };
+  }
+
+  // 1. Check req.models first
+  const currentModels = getModels(req);
   try {
-    const { getTenantConnections } = require('../utils/db_manager');
-    const connections = await getTenantConnections();
+    const inv = await currentModels.SellerInvoice.findById(id);
+    if (inv) {
+      return { invoice: inv, models: currentModels, db: req.db };
+    }
+  } catch (e) {}
+
+  // 2. Check Global connection if different
+  try {
+    const globalInv = await SellerInvoice.findById(id);
+    if (globalInv) {
+      return {
+        invoice: globalInv,
+        models: {
+          Order,
+          SellerInvoice,
+          InvoiceImage,
+          Seller
+        },
+        db: mongoose.connection
+      };
+    }
+  } catch (e) {}
+
+  // 3. Search across all tenant connections
+  try {
+    const connections = getTenantConnections();
     for (const [dbName, tenantConn] of Object.entries(connections)) {
-      const TenantInvoice = tenantConn.models.SellerInvoice || tenantConn.model('SellerInvoice', require('../models/SellerInvoice').schema);
       try {
-        const exists = await TenantInvoice.exists({ _id: id });
-        if (exists) {
-          req.models = {
-            Order: tenantConn.models.Order || tenantConn.model('Order', require('../models/Order').schema),
-            SellerInvoice: TenantInvoice,
-            InvoiceImage: tenantConn.models.InvoiceImage || tenantConn.model('InvoiceImage', require('../models/InvoiceImage').schema),
-            Seller: tenantConn.models.Seller || tenantConn.model('Seller', require('../models/Seller').schema)
+        const TenantInvoice = tenantConn.models.SellerInvoice || tenantConn.model('SellerInvoice', SellerInvoice.schema);
+        const inv = await TenantInvoice.findById(id);
+        if (inv) {
+          return {
+            invoice: inv,
+            models: {
+              Order: tenantConn.models.Order || tenantConn.model('Order', Order.schema),
+              SellerInvoice: TenantInvoice,
+              InvoiceImage: tenantConn.models.InvoiceImage || tenantConn.model('InvoiceImage', InvoiceImage.schema),
+              Seller: tenantConn.models.Seller || tenantConn.model('Seller', Seller.schema)
+            },
+            db: tenantConn
           };
-          req.db = tenantConn;
-          return next();
         }
       } catch (e) {}
     }
+  } catch (err) {
+    console.error('Error in findInvoiceAcrossAllDBs:', err);
+  }
+
+  return { invoice: null, models: currentModels, db: req.db };
+};
+
+// router.param('id') ensures req.models and req.targetInvoice are set if found anywhere
+router.param('id', async (req, res, next, id) => {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ message: 'Invalid invoice ID' });
+  }
+
+  try {
+    const { invoice, models, db } = await findInvoiceAcrossAllDBs(id, req);
+    if (invoice) {
+      req.models = models;
+      req.db = db;
+      req.targetInvoice = invoice;
+    }
   } catch (error) {
-    console.error('Error resolving tenant:', error);
+    console.error('Error resolving invoice id param:', error);
   }
   next();
 });
 
-// Middleware for image route that checks either Bearer header OR ?token= query parameter
+// Robust image protection middleware accepting Header Bearer or Query ?token=
 const protectImage = async (req, res, next) => {
   try {
     let token = null;
@@ -82,8 +139,11 @@ const protectImage = async (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    
-    // Check Admin in Global
+    if (!decoded || !decoded.id) {
+      return res.status(401).json({ message: 'Invalid token payload' });
+    }
+
+    // 1. Check Admin in Global DB
     let account = await Admin.findById(decoded.id).select('-password');
     if (account) {
       req.admin = account;
@@ -91,11 +151,26 @@ const protectImage = async (req, res, next) => {
       return next();
     }
 
-    // Check Seller in Global or Tenant
-    const { Seller: SellerModel } = getModels(req);
-    account = await SellerModel.findById(decoded.id).select('-password');
+    // 2. Check Seller in Global or Tenant DBs
+    account = await Seller.findById(decoded.id).select('-password');
+    if (!account && decoded.locationId) {
+      try {
+        const tenantConn = await connectDBByLocation(decoded.locationId, decoded.dbName);
+        const TenantSeller = tenantConn.models.Seller || tenantConn.model('Seller', Seller.schema);
+        account = await TenantSeller.findById(decoded.id).select('-password');
+      } catch (e) {}
+    }
+
     if (!account) {
-      account = await Seller.findById(decoded.id).select('-password');
+      // Check across known tenant connections
+      const connections = getTenantConnections();
+      for (const [dbName, tenantConn] of Object.entries(connections)) {
+        try {
+          const TenantSeller = tenantConn.models.Seller || tenantConn.model('Seller', Seller.schema);
+          account = await TenantSeller.findById(decoded.id).select('-password');
+          if (account) break;
+        } catch (e) {}
+      }
     }
 
     if (account) {
@@ -479,13 +554,15 @@ router.post('/generate', protect, (req, res, next) => {
 // @desc    Retrieve raw invoice image from MongoDB binary storage (Auth via Bearer OR ?token=)
 router.get('/:id/image', protectImage, async (req, res) => {
   try {
-    const { SellerInvoice: InvoiceModel, InvoiceImage: InvoiceImageModel } = getModels(req);
-    const invoice = await InvoiceModel.findById(req.params.id);
+    const { invoice, models } = req.targetInvoice 
+      ? { invoice: req.targetInvoice, models: req.models }
+      : await findInvoiceAcrossAllDBs(req.params.id, req);
+
     if (!invoice) {
       return res.status(404).json({ message: 'Invoice not found' });
     }
 
-    const sellerIdStr = invoice.sellerId.toString();
+    const sellerIdStr = invoice.sellerId ? (invoice.sellerId._id ? invoice.sellerId._id.toString() : invoice.sellerId.toString()) : '';
     const isOwner = req.user && req.user._id && req.user._id.toString() === sellerIdStr;
     if (!isOwner && !req.admin) {
       return res.status(403).json({ message: 'Not authorized to view this invoice image' });
@@ -504,6 +581,7 @@ router.get('/:id/image', protectImage, async (req, res) => {
 
     // 2. Fallback to InvoiceImage collection
     if (!binaryData) {
+      const InvoiceImageModel = models.InvoiceImage || InvoiceImage;
       const imageDoc = await InvoiceImageModel.findOne({ invoiceId: invoice._id });
       if (imageDoc && imageDoc.data) {
         binaryData = imageDoc.data;
@@ -581,22 +659,28 @@ router.get('/admin/all', protect, async (req, res) => {
 // @desc    Get single invoice details for Seller or Admin
 router.get('/:id', protect, async (req, res) => {
   try {
-    const { SellerInvoice: InvoiceModel, Order: OrderModel, Seller: SellerModel } = getModels(req);
-    const invoice = await InvoiceModel.findById(req.params.id)
-      .select('-invoiceImage.data')
-      .populate('sellerId', 'businessName name email storeName phone address gstNumber');
+    const { invoice, models } = req.targetInvoice 
+      ? { invoice: req.targetInvoice, models: req.models }
+      : await findInvoiceAcrossAllDBs(req.params.id, req);
+
     if (!invoice) return res.status(404).json({ message: 'Invoice not found' });
 
-    const sellerIdStr = invoice.sellerId?._id ? invoice.sellerId._id.toString() : invoice.sellerId.toString();
+    const sellerIdStr = invoice.sellerId ? (invoice.sellerId._id ? invoice.sellerId._id.toString() : invoice.sellerId.toString()) : '';
     const isOwner = req.user && req.user._id && req.user._id.toString() === sellerIdStr;
     if (!isOwner && !req.admin) {
       return res.status(403).json({ message: 'Not authorized' });
     }
 
+    const OrderModel = models.Order || Order;
     const orders = await OrderModel.find({ _id: { $in: invoice.orders } }).select('orderId totalAmount orderStatus createdAt items paymentMethod');
 
+    const invObj = invoice.toObject ? invoice.toObject() : { ...invoice };
+    if (invObj.invoiceImage && invObj.invoiceImage.data) {
+      delete invObj.invoiceImage.data;
+    }
+
     res.json({
-      ...invoice.toObject(),
+      ...invObj,
       ordersList: orders
     });
   } catch (error) {
@@ -611,8 +695,10 @@ router.put('/admin/:id/clear', protect, async (req, res) => {
     if (!req.admin) {
       return res.status(403).json({ message: 'Admin only' });
     }
-    const { SellerInvoice: InvoiceModel } = getModels(req);
-    const invoice = await InvoiceModel.findById(req.params.id);
+    const { invoice } = req.targetInvoice 
+      ? { invoice: req.targetInvoice }
+      : await findInvoiceAcrossAllDBs(req.params.id, req);
+
     if (!invoice) return res.status(404).json({ message: 'Invoice not found' });
     
     invoice.status = 'Cleared';
@@ -627,21 +713,25 @@ router.put('/admin/:id/clear', protect, async (req, res) => {
 // @desc    Download invoice PDF
 router.get('/:id/download', protect, async (req, res) => {
   try {
-    const { SellerInvoice: InvoiceModel, Seller: SellerModel, Order: OrderModel } = getModels(req);
-    const invoice = await InvoiceModel.findById(req.params.id);
+    const { invoice, models } = req.targetInvoice 
+      ? { invoice: req.targetInvoice, models: req.models }
+      : await findInvoiceAcrossAllDBs(req.params.id, req);
+
     if (!invoice) return res.status(404).json({ message: 'Invoice not found' });
 
-    const sellerIdStr = invoice.sellerId.toString();
+    const sellerIdStr = invoice.sellerId ? (invoice.sellerId._id ? invoice.sellerId._id.toString() : invoice.sellerId.toString()) : '';
 
     // Auth check
-    const isOwner = req.user && req.user._id.toString() === sellerIdStr;
+    const isOwner = req.user && req.user._id && req.user._id.toString() === sellerIdStr;
     if (!isOwner && !req.admin) {
       return res.status(403).json({ message: 'Not authorized' });
     }
 
-    // Safely fetch seller (could be deleted)
-    const seller = await SellerModel.findById(invoice.sellerId);
+    const SellerModel = models.Seller || Seller;
+    const OrderModel = models.Order || Order;
 
+    // Safely fetch seller
+    const seller = await SellerModel.findById(invoice.sellerId);
     const orders = await OrderModel.find({ _id: { $in: invoice.orders } });
 
     res.setHeader('Content-Type', 'application/pdf');
@@ -718,13 +808,15 @@ router.get('/:id/download', protect, async (req, res) => {
 // @desc    Delete an invoice (only creator seller or admin) and clean up its raw binary images
 router.delete('/:id', protect, async (req, res) => {
   try {
-    const { SellerInvoice: InvoiceModel, InvoiceImage: InvoiceImageModel } = getModels(req);
-    const invoice = await InvoiceModel.findById(req.params.id);
+    const { invoice, models } = req.targetInvoice 
+      ? { invoice: req.targetInvoice, models: req.models }
+      : await findInvoiceAcrossAllDBs(req.params.id, req);
+
     if (!invoice) {
       return res.status(404).json({ message: 'Invoice not found' });
     }
 
-    const sellerIdStr = invoice.sellerId.toString();
+    const sellerIdStr = invoice.sellerId ? (invoice.sellerId._id ? invoice.sellerId._id.toString() : invoice.sellerId.toString()) : '';
     const isOwner = req.user && req.user._id && req.user._id.toString() === sellerIdStr;
     if (!isOwner && !req.admin) {
       return res.status(403).json({ message: 'Not authorized to delete this invoice' });
@@ -732,12 +824,14 @@ router.delete('/:id', protect, async (req, res) => {
 
     // Clean up stored image in InvoiceImage collection if exists
     try {
+      const InvoiceImageModel = models.InvoiceImage || InvoiceImage;
       await InvoiceImageModel.deleteMany({ invoiceId: invoice._id });
     } catch (e) {
       console.warn('Could not clean InvoiceImage records:', e.message);
     }
 
-    await InvoiceModel.findByIdAndDelete(req.params.id);
+    const InvoiceModel = models.SellerInvoice || SellerInvoice;
+    await InvoiceModel.findByIdAndDelete(invoice._id);
 
     res.json({ 
       message: `Invoice #${invoice.invoiceNumber || invoice._id} deleted successfully`,
