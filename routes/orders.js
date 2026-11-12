@@ -1931,7 +1931,6 @@ router.post('/admin/create', protect, async (req, res) => {
         }
       }
 
-      const commRule = findCategoryCommission(commissions, productData.categoryId, productData.unit, productData.measurementUnit, shippingAddress?.pincode);
       const itemPackagingType = rawBasePriceObj?.packagingType || productData?.packagingType || productData?.unit || 'BAG';
       const itemMeasurementBasis = rawBasePriceObj?.measurementBasis || rawBasePriceObj?.measurementUnit || productData?.measurementBasis || productData?.measurementUnit || 'KG';
       const itemPriceBasis = rawBasePriceObj?.priceBasis || productData?.priceBasis || (rawBasePriceObj?.isPackagePrice ? 'per_package' : 'per_unit');
@@ -2039,9 +2038,6 @@ router.post('/admin/create', protect, async (req, res) => {
         product: {
           name: productData.name,
           image: productData.imageUrl || productData.image,
-          imageUrl: productData.imageUrl || productData.image
-        }
-      };
           imageUrl: productData.imageUrl || productData.image
         }
       };
@@ -2345,16 +2341,6 @@ router.put('/admin/:id/items', protect, async (req, res) => {
           finalCustomerPrice: breakdown.finalCustomerAmount,
           availableStock: breakdown.availableStock,
           stockTotalCommission: breakdown.stockTotalCommission,
-          image: productData.imageUrl || productData.image,
-          seller: sellerInfo,
-          product: {
-            name: productData.name,
-            image: productData.imageUrl || productData.image,
-            imageUrl: productData.imageUrl || productData.image
-          }
-        };
-          gstAmount: breakdown.unitGst,
-          totalGst: breakdown.totalGst,
           image: productData.imageUrl || productData.image,
           seller: sellerInfo,
           product: {
