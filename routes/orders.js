@@ -9,6 +9,8 @@ const Product = require('../models/Product');
 const Seller = require('../models/Seller');
 const Driver = require('../models/Driver');
 const CashCollector = require('../models/CashCollector');
+const Counter = require('../models/Counter');
+const { getNextOrderNumber } = require('../utils/orderSequence');
 const { loadCommissions } = require('./products');
 const {
   applyCommission,
@@ -84,6 +86,7 @@ const getModels = (req) => {
     Seller: req.models?.Seller || Seller,
     Driver: req.models?.Driver || Driver,
     CashCollector: req.models?.CashCollector || CashCollector,
+    Counter: req.models?.Counter || Counter,
     User: req.models?.User || require('../models/User'),
     Admin: req.models?.Admin || require('../models/Admin'),
     Notification: req.models?.Notification || require('../models/Notification')
@@ -872,9 +875,12 @@ router.post('/', protect, async (req, res) => {
     const totalCommissionCollectedRounded = round2(totalCommissionCollected);
     const totalGstCollectedRounded = round2(totalGstCollected);
 
+    const { Counter: CounterModel } = getModels(req);
+    const orderNumber = await getNextOrderNumber(CounterModel, OrderModel);
     const { invoiceSequence, orderRef, invoiceNumber } = await assignInvoiceDetails(OrderModel);
 
     const order = new OrderModel({
+      orderNumber,
       userId: targetUserId,
       type: targetUserRole === 'b2b' ? 'b2b' : 'b2c',
       items: enrichedItems,
@@ -2059,9 +2065,12 @@ router.post('/admin/create', protect, async (req, res) => {
     const totalCommissionCollectedRounded = round2(totalCommissionCollected);
     const totalGstCollectedRounded = round2(totalGstCollected);
 
+    const { Counter: CounterModel } = getModels(req);
+    const adminOrderNumber = await getNextOrderNumber(CounterModel, OrderModel);
     const { invoiceSequence: adminInvSeq, orderRef: adminOrdRef, invoiceNumber: adminInvNum } = await assignInvoiceDetails(OrderModel);
 
     const order = new OrderModel({
+      orderNumber: adminOrderNumber,
       userId,
       type: targetUser.role === 'b2b' ? 'b2b' : 'b2c',
       items: enrichedItems,

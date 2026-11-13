@@ -934,7 +934,8 @@ router.post('/clear', protect, async (req, res) => {
 // @desc    Download official payment receipt PDF for a settlement
 router.get('/receipt/:paymentId/download', protect, async (req, res) => {
   try {
-    const { SellerPaymentModel, SellerModel } = await loadPaymentContext(req);
+    const SellerPaymentModel = getModel('SellerPayment', req) || require('../models/SellerPayment');
+    const SellerModel = getModel('Seller', req) || require('../models/Seller');
     const payment = await SellerPaymentModel.findById(req.params.paymentId).lean();
     if (!payment) {
       return res.status(404).json({ message: 'Payment settlement record not found' });
@@ -964,7 +965,8 @@ router.get('/receipt/:paymentId/download', protect, async (req, res) => {
 // @desc    Download latest or combined payment receipts for a seller
 router.get('/sellers/:sellerId/receipts/download-all', protect, async (req, res) => {
   try {
-    const { SellerPaymentModel, SellerModel } = await loadPaymentContext(req);
+    const SellerPaymentModel = getModel('SellerPayment', req) || require('../models/SellerPayment');
+    const SellerModel = getModel('Seller', req) || require('../models/Seller');
     const seller = await SellerModel.findById(req.params.sellerId).lean();
     if (!seller) {
       return res.status(404).json({ message: 'Seller not found' });

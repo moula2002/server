@@ -85,6 +85,19 @@ const sellerInvoiceSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Order'
   }],
+  orderId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Order',
+    default: null
+  },
+  orderNumber: {
+    type: Number,
+    default: null
+  },
+  orderRef: {
+    type: String,
+    default: null
+  },
   generatedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Seller'
