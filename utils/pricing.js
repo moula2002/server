@@ -388,7 +388,7 @@ function calculateCustomerPrice(
     // Total Admin Commission = unitSize * adminCommissionPerUnit
     // Customer Total Price = basePrice + totalCommission
     sPricePerProductUnit = round2(basePrice);
-    sellerPricePerBaseUnit = round2(basePrice);
+    sellerPricePerBaseUnit = uSize > 0 ? round2(basePrice / uSize) : round2(basePrice);
   }
 
   let commissionPerProductUnit = 0;
@@ -1124,14 +1124,14 @@ function calculatePricingBreakdown({
     sPricePerProductUnit = round2(sellerPricePerProductUnit);
     sPricePerBaseUnit = round2(sellerPricePerBaseUnit);
   } else {
-    const rawVal = sellerPricePerProductUnit !== undefined ? sellerPricePerProductUnit : (sellerPricePerBaseUnit !== undefined ? sellerPricePerBaseUnit : (sellerPrice !== undefined ? sellerPrice : sellerUnitPrice));
-    const enteredBasePrice = parseFloat(rawVal) || 0;
     // Dynamic Unit-Based Admin Commission:
     // Seller's base price is NOT multiplied by unit size.
     // Total Admin Commission = unitSize * adminCommissionPerUnit
     // Customer Total Price = basePrice + totalCommission
-    sPricePerBaseUnit = round2(enteredBasePrice);
+    const rawVal = sellerPricePerProductUnit !== undefined ? sellerPricePerProductUnit : (sellerPricePerBaseUnit !== undefined ? sellerPricePerBaseUnit : (sellerPrice !== undefined ? sellerPrice : sellerUnitPrice));
+    const enteredBasePrice = parseFloat(rawVal) || 0;
     sPricePerProductUnit = round2(enteredBasePrice);
+    sPricePerBaseUnit = uSize > 0 ? round2(enteredBasePrice / uSize) : round2(enteredBasePrice);
   }
 
   // Step 2: Commission Per Product Unit (e.g. 20 * 30 = 600)
