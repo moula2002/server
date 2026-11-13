@@ -466,13 +466,13 @@ router.get('/custom-units', async (req, res) => {
     try {
       const prods = await Product.find(productFilter).select('unit packagingType measurementBasis measurementUnit customUnits customPackagingUnits customMeasurementUnits b2b').lean();
 
-      const BUILTIN_PKG = new Set(['BAG', 'BOX', 'TIN', 'BOTTLE', 'PACK', 'PIECE', 'bag', 'box', 'tin', 'bottle', 'pack', 'piece']);
-      const BUILTIN_MEAS = new Set(['KG', 'G', 'TON', 'LTR', 'ML', 'PCS', 'kg', 'g', 'ton', 'ltr', 'ml', 'pcs', 'gram', 'litre', 'millilitre', 'piece']);
+      const BUILTIN_PKG = new Set(['BAG', 'BOX', 'bag', 'box']);
+      const BUILTIN_MEAS = new Set(['BAG', 'BOX', 'bag', 'box']);
 
       for (const p of prods) {
         // Packaging from product fields
         const pPkg = String(p.packagingType || p.unit || '').trim().toUpperCase();
-        if (pPkg && !BUILTIN_PKG.has(pPkg) && !BUILTIN_MEAS.has(pPkg)) {
+        if (pPkg && !BUILTIN_PKG.has(pPkg)) {
           sellerPackagingCustom.push(pPkg);
         }
         if (Array.isArray(p.customPackagingUnits)) {
@@ -497,7 +497,7 @@ router.get('/custom-units', async (req, res) => {
             if (v) {
               if (v.packagingType) {
                 const vp = String(v.packagingType).trim().toUpperCase();
-                if (vp && !BUILTIN_PKG.has(vp) && !BUILTIN_MEAS.has(vp)) {
+                if (vp && !BUILTIN_PKG.has(vp)) {
                   sellerPackagingCustom.push(vp);
                 }
               }
@@ -520,11 +520,11 @@ router.get('/custom-units', async (req, res) => {
       }
     } catch (e) {}
 
-    const BUILTIN_PKG_SET = new Set(['BAG', 'BOX', 'TIN', 'BOTTLE', 'PACK', 'PIECE', 'KG', 'PCS']);
+    const BUILTIN_PKG_SET = new Set(['BAG', 'BOX']);
     const cleanPackaging = Array.from(new Set(sellerPackagingCustom))
       .filter(u => u && !BUILTIN_PKG_SET.has(u));
 
-    const BUILTIN_MEAS_SET = new Set(['KG', 'G', 'TON', 'LTR', 'ML', 'PCS', 'GRAM', 'LITRE', 'MILLILITRE', 'PIECE']);
+    const BUILTIN_MEAS_SET = new Set(['BAG', 'BOX']);
     const cleanMeasurement = Array.from(new Set(sellerMeasurementCustom))
       .filter(u => u && !BUILTIN_MEAS_SET.has(u));
 
@@ -554,12 +554,12 @@ router.post('/custom-units', async (req, res) => {
     const isPackaging = !isMeasurement;
 
     // Validate against built-in units
-    const DEFAULT_PACKAGING = ['BAG', 'BOX', 'TIN', 'BOTTLE', 'PACK', 'PIECE'];
+    const DEFAULT_PACKAGING = ['BAG', 'BOX'];
     if (isPackaging && DEFAULT_PACKAGING.includes(cleanUnit)) {
       return res.status(400).json({ message: `"${cleanUnit}" is already a default packaging type` });
     }
 
-    const DEFAULT_MEASUREMENTS = ['KG', 'G', 'TON', 'LTR', 'ML', 'PCS', 'GRAM', 'LITRE', 'MILLILITRE', 'PIECE'];
+    const DEFAULT_MEASUREMENTS = ['BAG', 'BOX'];
     if (isMeasurement && DEFAULT_MEASUREMENTS.includes(cleanUnit)) {
       return res.status(400).json({ message: `"${cleanUnit}" is already a default measurement unit` });
     }
@@ -615,13 +615,13 @@ router.delete('/custom-units', async (req, res) => {
     const cleanUnit = unit.trim().toUpperCase();
 
     // Guard against deleting permanent defaults
-    const DEFAULT_PACKAGING = ['BAG', 'BOX', 'TIN', 'BOTTLE', 'PACK', 'PIECE'];
+    const DEFAULT_PACKAGING = ['BAG', 'BOX'];
     if (DEFAULT_PACKAGING.includes(cleanUnit)) {
       return res.status(400).json({ message: `Cannot delete permanent default packaging "${cleanUnit}"` });
     }
-    const DEFAULT_MEASUREMENTS = ['KG', 'G', 'TON', 'LTR', 'ML', 'PCS', 'GRAM', 'LITRE', 'MILLILITRE', 'PIECE', 'pcs', 'g', 'kg', 'ltr', 'ml', 'bag'];
-    if (DEFAULT_MEASUREMENTS.includes(cleanUnit) || DEFAULT_MEASUREMENTS.includes(cleanUnit.toLowerCase())) {
-      return res.status(400).json({ message: `Cannot delete standard default measurement "${unit}"` });
+    const DEFAULT_MEASUREMENTS = ['BAG', 'BOX'];
+    if (DEFAULT_MEASUREMENTS.includes(cleanUnit)) {
+      return res.status(400).json({ message: `Cannot delete permanent default measurement "${cleanUnit}"` });
     }
 
     const { Product, Seller } = getModels(req);
