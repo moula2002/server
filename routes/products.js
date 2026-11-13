@@ -467,7 +467,7 @@ router.get('/custom-units', async (req, res) => {
       const prods = await Product.find(productFilter).select('unit packagingType measurementBasis measurementUnit customUnits customPackagingUnits customMeasurementUnits b2b').lean();
 
       const BUILTIN_PKG = new Set(['BAG', 'BOX', 'bag', 'box']);
-      const BUILTIN_MEAS = new Set(['BAG', 'BOX', 'bag', 'box']);
+      const BUILTIN_MEAS = new Set(['KG', 'LITRE', 'kg', 'litre', 'LTR', 'ltr', 'BAG', 'BOX', 'bag', 'box']);
 
       for (const p of prods) {
         // Packaging from product fields
@@ -520,12 +520,12 @@ router.get('/custom-units', async (req, res) => {
       }
     } catch (e) {}
 
-    const BUILTIN_PKG_SET = new Set(['BAG', 'BOX']);
-    const cleanPackaging = Array.from(new Set(sellerPackagingCustom))
+    const BUILTIN_PKG_SET = new Set(['BAG', 'BOX', 'KG', 'LITRE', 'LTR']);
+    const cleanPackaging = Array.from(new Set(sellerPackagingCustom.map(u => String(u || '').trim().toUpperCase())))
       .filter(u => u && !BUILTIN_PKG_SET.has(u));
 
-    const BUILTIN_MEAS_SET = new Set(['BAG', 'BOX']);
-    const cleanMeasurement = Array.from(new Set(sellerMeasurementCustom))
+    const BUILTIN_MEAS_SET = new Set(['KG', 'LITRE', 'LTR', 'BAG', 'BOX']);
+    const cleanMeasurement = Array.from(new Set(sellerMeasurementCustom.map(u => String(u || '').trim().toUpperCase())))
       .filter(u => u && !BUILTIN_MEAS_SET.has(u));
 
     res.json({
@@ -559,7 +559,7 @@ router.post('/custom-units', async (req, res) => {
       return res.status(400).json({ message: `"${cleanUnit}" is already a default packaging type` });
     }
 
-    const DEFAULT_MEASUREMENTS = ['BAG', 'BOX'];
+    const DEFAULT_MEASUREMENTS = ['KG', 'LITRE', 'LTR'];
     if (isMeasurement && DEFAULT_MEASUREMENTS.includes(cleanUnit)) {
       return res.status(400).json({ message: `"${cleanUnit}" is already a default measurement unit` });
     }
@@ -619,7 +619,7 @@ router.delete('/custom-units', async (req, res) => {
     if (DEFAULT_PACKAGING.includes(cleanUnit)) {
       return res.status(400).json({ message: `Cannot delete permanent default packaging "${cleanUnit}"` });
     }
-    const DEFAULT_MEASUREMENTS = ['BAG', 'BOX'];
+    const DEFAULT_MEASUREMENTS = ['KG', 'LITRE', 'LTR'];
     if (DEFAULT_MEASUREMENTS.includes(cleanUnit)) {
       return res.status(400).json({ message: `Cannot delete permanent default measurement "${cleanUnit}"` });
     }
