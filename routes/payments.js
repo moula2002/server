@@ -891,6 +891,55 @@ router.post('/settle', protect, async (req, res) => {
 
     const savedPayout = await newPayout.save();
 
+    // Settle specific orders if passed from UI
+    const { orderIds, generateSeparateInvoices } = req.body;
+    let settledInvoicesCount = 0;
+    if (Array.isArray(orderIds) && orderIds.length > 0) {
+      await OrderModel.updateMany(
+        { _id: { $in: orderIds } },
+        { $set: { sellerSettlementStatus: 'Settled', sellerSettledAt: new Date(), paymentId: savedPayout._id } }
+      );
+
+      // Optionally auto-generate separate invoices for each settled order
+      if (generateSeparateInvoices) {
+        const InvoiceModel = getModel('SellerInvoice', req) || require('../models/SellerInvoice');
+        if (InvoiceModel) {
+          const ordersToInvoice = await OrderModel.find({ _id: { $in: orderIds } });
+          for (const ord of ordersToInvoice) {
+            const exists = await InvoiceModel.findOne({
+              sellerId,
+              $or: [{ orders: ord._id }, { orderId: ord._id }],
+              status: { $nin: ['Cancelled', 'Rejected'] }
+            });
+            if (!exists) {
+              const bd = extractSellerOrderBreakdown(ord, sellerIdStr, productSellerMap);
+              const humanOrderId = ord.orderNumber ? String(ord.orderNumber).padStart(5, '0') : (ord.orderId || ord._id.toString().slice(-6).toUpperCase());
+              await InvoiceModel.create({
+                sellerId,
+                invoiceNumber: humanOrderId,
+                invoiceSequenceNumber: ord.orderNumber || 1,
+                startDate: ord.createdAt,
+                endDate: ord.deliveredAt || ord.createdAt,
+                totalAmount: round2(bd.sellerSales),
+                totalCommission: round2(bd.sellerCommission),
+                netAmount: round2(bd.sellerPayable),
+                orderCount: 1,
+                orders: [ord._id],
+                orderId: ord._id,
+                orderNumber: ord.orderNumber || null,
+                orderRef: ord.orderRef || null,
+                status: 'Cleared',
+                hasInvoiceImage: false,
+                imageIds: [],
+                generatedBy: adminInfo.id
+              });
+              settledInvoicesCount++;
+            }
+          }
+        }
+      }
+    }
+
     // Record audit log
     if (PaymentAuditLogModel) {
       await PaymentAuditLogModel.create({
