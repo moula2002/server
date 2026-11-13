@@ -268,7 +268,7 @@ const calculateSellerOrdersForRange = async ({ OrderModel, InvoiceModel, sellerI
   const orders = await OrderModel.find({
     orderStatus: { $in: ['Delivered', 'Partially Returned', 'Returned'] },
     createdAt: { $gte: start, $lte: end }
-  }).populate('items.productId');
+  }).populate('items.productId').populate('userId', 'name email phone role businessName');
 
   let totalAmount = 0;
   let totalCommission = 0;
@@ -527,7 +527,7 @@ router.post('/generate', protect, (req, res, next) => {
     const roundedTotalCommission = round2(finalTotalCommission);
     const roundedNetAmount = round2(finalTotalAmount);
 
-    // Create Invoice Record linked directly to the selected order
+    // Create Invoice Record linked directly to the selected order or date range
     const newInvoice = new InvoiceModel({
       sellerId: sellerId,
       invoiceNumber: trimmedInvoiceNumber,
@@ -537,11 +537,11 @@ router.post('/generate', protect, (req, res, next) => {
       totalAmount: roundedTotalAmount,
       totalCommission: roundedTotalCommission,
       netAmount: roundedNetAmount,
-      orderCount: 1,
-      orders: [targetOrder._id],
-      orderId: targetOrder._id,
-      orderNumber: targetOrder.orderNumber || null,
-      orderRef: targetOrder.orderRef || null,
+      orderCount: targetOrder ? 1 : finalOrderIds.length,
+      orders: targetOrder ? [targetOrder._id] : finalOrderIds,
+      orderId: targetOrder ? targetOrder._id : (finalOrderIds.length === 1 ? finalOrderIds[0] : null),
+      orderNumber: targetOrder ? (targetOrder.orderNumber || null) : null,
+      orderRef: targetOrder ? (targetOrder.orderRef || null) : null,
       status: 'Pending',
       hasInvoiceImage: uploadedFiles.length > 0,
       imageIds: [],
@@ -592,16 +592,21 @@ router.post('/generate', protect, (req, res, next) => {
 
     // Generate PDF & Email Admin in background
     try {
+      const pdfOrders = targetOrder ? [targetOrder] : finalOrders;
       const pdfBuffer = await generateSellerInvoicePDF({
         invoice: newInvoice,
         seller,
-        orders: [targetOrder],
+        orders: pdfOrders,
         images: savedImageDocs.map(img => ({
           data: img.data || img.imageData,
           mimeType: img.mimeType,
           filename: img.originalName || img.filename
         }))
       });
+
+      const orderIdentifierStr = targetOrder
+        ? (targetOrder.orderNumber ? String(targetOrder.orderNumber).padStart(5, '0') : (targetOrder.orderId || targetOrder._id.toString().slice(-6).toUpperCase()))
+        : `${finalOrderIds.length} Order(s)`;
 
       const adminEmail = process.env.EMAIL_USER;
       sendEmail({
@@ -615,7 +620,7 @@ router.post('/generate', protect, (req, res, next) => {
           <p><strong>Total Amount:</strong> ₹${roundedTotalAmount}</p>
           <p><strong>Total Commission:</strong> ₹${roundedTotalCommission}</p>
           <p><strong>Net Payable:</strong> ₹${roundedNetAmount}</p>
-          <p><strong>Order ID:</strong> #${humanOrderId}</p>
+          <p><strong>Order(s):</strong> #${orderIdentifierStr}</p>
           <p><strong>Attached Images:</strong> ${uploadedFiles.length} file(s)</p>
         `,
         attachments: [
