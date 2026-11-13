@@ -348,11 +348,10 @@ router.post('/generate', protect, (req, res, next) => {
       return res.status(400).json({ message: 'Start date and end date are required' });
     }
 
-    if (!reqOrderId) {
-      return res.status(400).json({ message: 'Order ID is required to generate invoice' });
-    }
-
     const uploadedFiles = req.files || [];
+    if (!req.admin && uploadedFiles.length === 0) {
+      return res.status(400).json({ message: 'At least one invoice image is required (minimum 1, maximum 5).' });
+    }
     if (uploadedFiles.length > 5) {
       return res.status(400).json({ message: 'Maximum 5 images allowed per invoice.' });
     }
@@ -364,79 +363,165 @@ router.post('/generate', protect, (req, res, next) => {
       return res.status(404).json({ message: 'Seller not found' });
     }
 
-    // 1. Validate that the selected order exists in MongoDB
-    const isObjectId = mongoose.Types.ObjectId.isValid(reqOrderId);
-    const parsedOrderNum = parseInt(reqOrderId, 10);
-    const orderQuery = {
-      $or: [
-        ...(isObjectId ? [{ _id: reqOrderId }] : []),
-        ...(Number.isInteger(parsedOrderNum) ? [{ orderNumber: parsedOrderNum }] : []),
-        { orderId: reqOrderId },
-        { orderRef: reqOrderId }
-      ]
-    };
-
-    const targetOrder = await OrderModel.findOne(orderQuery).populate('userId', 'name email phone role businessName');
-    if (!targetOrder) {
-      return res.status(404).json({ message: 'Selected Order was not found in the database.' });
-    }
-
-    // 2. Validate that the order belongs to this seller
-    const sellerIdStr = sellerId.toString();
-    const sellerItemsInOrder = (targetOrder.items || []).filter(item => {
-      const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerIdStr;
-      const matchesDirectSellerId = item.sellerId && item.sellerId.toString() === sellerIdStr;
-      const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerIdStr;
-      const matchesName = item.sellerName && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
-      const matchesStore = item.sellerName && seller.storeName && item.sellerName.toLowerCase() === seller.storeName.toLowerCase();
-      const matchesBusiness = item.sellerName && seller.businessName && item.sellerName.toLowerCase() === seller.businessName.toLowerCase();
-      return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName || matchesStore || matchesBusiness;
-    });
-
-    if (sellerItemsInOrder.length === 0) {
-      return res.status(403).json({ message: 'This order does not belong to your seller account.' });
-    }
-
-    // 3. Human-readable Order ID reference for invoiceNumber
-    const humanOrderId = targetOrder.orderNumber 
-      ? String(targetOrder.orderNumber).padStart(5, '0') 
-      : (targetOrder.orderId || targetOrder._id.toString().slice(-6).toUpperCase());
-    const trimmedInvoiceNumber = humanOrderId;
-    const numericInvoiceNumber = targetOrder.orderNumber || parseInt(humanOrderId, 10) || 1;
-
-    // 4. Check for duplicate invoice for this order / seller
-    const duplicate = await InvoiceModel.findOne({
-      sellerId: sellerId,
-      $or: [
-        { orders: targetOrder._id },
-        { orderId: targetOrder._id },
-        { invoiceNumber: trimmedInvoiceNumber }
-      ],
-      status: { $nin: ['Cancelled', 'Rejected'] }
-    });
-
-    if (duplicate) {
-      return res.status(400).json({ 
-        message: `An invoice (#${duplicate.invoiceNumber}) has already been generated for this Order. Duplicate invoices for the same order are not allowed.` 
-      });
-    }
-
     const start = new Date(startDate);
     const end = new Date(endDate);
     end.setHours(23, 59, 59, 999);
 
-    // Calculate actual order totals directly from database records (do not trust client)
+    let trimmedInvoiceNumber = '';
+    let numericInvoiceNumber = 1;
+    let finalOrderIds = [];
+    let finalOrders = [];
     let finalTotalAmount = 0;
     let finalTotalCommission = 0;
-    sellerItemsInOrder.forEach(item => {
-      if (item.returnStatus !== 'Returned to Seller') {
-        const qty = Number(item.quantity) || 1;
-        const itemCommission = Number(item.totalCommission) || ((Number(item.unitCommission) || 0) * qty) || 0;
-        const itemSellerPrice = (Number(item.sellerUnitPrice) || Number(item.normalPrice) || Number(item.price) || 0) * qty;
-        finalTotalAmount += itemSellerPrice;
-        finalTotalCommission += itemCommission;
+    let targetOrder = null;
+
+    if (reqOrderId) {
+      // 1. Validate that the selected order exists in MongoDB
+      const isObjectId = mongoose.Types.ObjectId.isValid(reqOrderId);
+      const parsedOrderNum = parseInt(reqOrderId, 10);
+      const orderQuery = {
+        $or: [
+          ...(isObjectId ? [{ _id: reqOrderId }] : []),
+          ...(Number.isInteger(parsedOrderNum) ? [{ orderNumber: parsedOrderNum }] : []),
+          { orderId: reqOrderId },
+          { orderRef: reqOrderId }
+        ]
+      };
+
+      targetOrder = await OrderModel.findOne(orderQuery).populate('userId', 'name email phone role businessName');
+      if (!targetOrder) {
+        return res.status(404).json({ message: 'Selected Order was not found in the database.' });
       }
-    });
+
+      // 2. Validate that the order belongs to this seller
+      const sellerIdStr = sellerId.toString();
+      const sellerItemsInOrder = (targetOrder.items || []).filter(item => {
+        const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerIdStr;
+        const matchesDirectSellerId = item.sellerId && item.sellerId.toString() === sellerIdStr;
+        const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerIdStr;
+        const matchesName = item.sellerName && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
+        const matchesStore = item.sellerName && seller.storeName && item.sellerName.toLowerCase() === seller.storeName.toLowerCase();
+        const matchesBusiness = item.sellerName && seller.businessName && item.sellerName.toLowerCase() === seller.businessName.toLowerCase();
+        return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName || matchesStore || matchesBusiness;
+      });
+
+      if (sellerItemsInOrder.length === 0) {
+        return res.status(403).json({ message: 'This order does not belong to your seller account.' });
+      }
+
+      const humanOrderId = targetOrder.orderNumber 
+        ? String(targetOrder.orderNumber).padStart(5, '0') 
+        : (targetOrder.orderId || targetOrder._id.toString().slice(-6).toUpperCase());
+      trimmedInvoiceNumber = humanOrderId;
+      numericInvoiceNumber = targetOrder.orderNumber || parseInt(humanOrderId, 10) || 1;
+
+      const duplicate = await InvoiceModel.findOne({
+        sellerId: sellerId,
+        $or: [
+          { orders: targetOrder._id },
+          { orderId: targetOrder._id },
+          { invoiceNumber: trimmedInvoiceNumber }
+        ],
+        status: { $nin: ['Cancelled', 'Rejected'] }
+      });
+
+      if (duplicate) {
+        return res.status(400).json({ 
+          message: `An invoice (#${duplicate.invoiceNumber}) has already been generated for this Order. Duplicate invoices for the same order are not allowed.` 
+        });
+      }
+
+      sellerItemsInOrder.forEach(item => {
+        if (item.returnStatus !== 'Returned to Seller') {
+          const qty = Number(item.quantity) || 1;
+          const itemCommission = Number(item.totalCommission) || ((Number(item.unitCommission) || 0) * qty) || 0;
+          const itemSellerPrice = (Number(item.sellerUnitPrice) || Number(item.normalPrice) || Number(item.price) || 0) * qty;
+          finalTotalAmount += itemSellerPrice;
+          finalTotalCommission += itemCommission;
+        }
+      });
+
+      finalOrderIds = [targetOrder._id];
+      finalOrders = [targetOrder];
+    } else {
+      // Date-range based generation (e.g. from Admin Payments settlement)
+      const rawInvoiceNumber = req.body.invoiceNumber;
+      const allSellerInvoices = await InvoiceModel.find({ sellerId }).select('invoiceNumber invoiceSequenceNumber').lean();
+      const usedNumericSequences = [];
+      (allSellerInvoices || []).forEach(inv => {
+        const numStr = (inv.invoiceNumber || '').toString().trim();
+        const p = parseInt(numStr, 10);
+        if (/^\d+$/.test(numStr) && !isNaN(p) && p > 0) {
+          usedNumericSequences.push(p);
+        } else if (inv.invoiceSequenceNumber && inv.invoiceSequenceNumber > 0) {
+          usedNumericSequences.push(inv.invoiceSequenceNumber);
+        }
+      });
+
+      const maxNumeric = usedNumericSequences.length > 0 ? Math.max(...usedNumericSequences) : 0;
+      const nextExpectedNumber = maxNumeric + 1;
+
+      trimmedInvoiceNumber = rawInvoiceNumber ? rawInvoiceNumber.toString().trim() : '';
+      if (!trimmedInvoiceNumber) {
+        trimmedInvoiceNumber = String(nextExpectedNumber);
+        numericInvoiceNumber = nextExpectedNumber;
+      } else if (/^\d+$/.test(trimmedInvoiceNumber)) {
+        numericInvoiceNumber = parseInt(trimmedInvoiceNumber, 10);
+        if (numericInvoiceNumber <= 0) {
+          return res.status(400).json({ message: 'Invoice number must be greater than 0.' });
+        }
+      } else {
+        numericInvoiceNumber = nextExpectedNumber;
+      }
+
+      const duplicate = await InvoiceModel.findOne({
+        sellerId: sellerId,
+        invoiceNumber: trimmedInvoiceNumber,
+        status: { $nin: ['Cancelled', 'Rejected'] }
+      });
+
+      if (duplicate) {
+        return res.status(400).json({ 
+          message: `Invoice number "${trimmedInvoiceNumber}" has already been used for this seller. Duplicate invoice numbers are not allowed.` 
+        });
+      }
+
+      const rangeResult = await calculateSellerOrdersForRange({ OrderModel, InvoiceModel, sellerId, seller, start, end });
+      finalOrderIds = rangeResult.orderIds;
+      finalOrders = rangeResult.validOrders;
+      finalTotalAmount = rangeResult.totalAmount;
+      finalTotalCommission = rangeResult.totalCommission;
+
+      if (finalOrderIds.length === 0) {
+        const allOrdersInRange = await OrderModel.find({
+          orderStatus: { $in: ['Delivered', 'Partially Returned', 'Returned'] },
+          createdAt: { $gte: start, $lte: end }
+        }).populate('items.productId');
+
+        (allOrdersInRange || []).forEach(order => {
+          let sellerItemsInOrder = (order.items || []).filter(item => {
+            const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerId.toString();
+            const matchesDirectSellerId = item.sellerId && item.sellerId.toString() === sellerId.toString();
+            const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerId.toString();
+            const matchesName = item.sellerName && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
+            return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName;
+          });
+          if (sellerItemsInOrder.length > 0) {
+            finalOrderIds.push(order._id);
+            finalOrders.push(order);
+            sellerItemsInOrder.forEach(item => {
+              if (item.returnStatus !== 'Returned to Seller') {
+                const qty = Number(item.quantity) || 1;
+                const itemCommission = Number(item.totalCommission) || ((Number(item.unitCommission) || 0) * qty) || 0;
+                const itemSellerPrice = (Number(item.sellerUnitPrice) || Number(item.normalPrice) || Number(item.price) || 0) * qty;
+                finalTotalAmount += itemSellerPrice;
+                finalTotalCommission += itemCommission;
+              }
+            });
+          }
+        });
+      }
+    }
 
     const roundedTotalAmount = round2(finalTotalAmount);
     const roundedTotalCommission = round2(finalTotalCommission);
