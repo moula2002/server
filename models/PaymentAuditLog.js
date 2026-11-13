@@ -80,5 +80,7 @@ const paymentAuditLogSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
+paymentAuditLogSchema.index({ sellerId: 1, date: -1 });
+
 module.exports = mongoose.model('PaymentAuditLog', paymentAuditLogSchema);
 

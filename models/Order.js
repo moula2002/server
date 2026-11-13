@@ -271,6 +271,14 @@ const orderSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  cancelledAt: {
+    type: Date,
+    default: null
+  },
+  cancellationReason: {
+    type: String,
+    default: null
+  },
   returnReason: {
     type: String,
     default: null
@@ -389,5 +397,8 @@ const orderSchema = new mongoose.Schema({
     default: Date.now
   }
 }, { timestamps: true });
+
+orderSchema.index({ 'items.seller.sellerId': 1, createdAt: -1 });
+orderSchema.index({ 'items.productId': 1, createdAt: -1 });
 
 module.exports = mongoose.model('Order', orderSchema);

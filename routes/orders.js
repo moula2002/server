@@ -28,6 +28,7 @@ const {
   verifyOrderDeliveryOtp,
   dispatchDeliveryOtpNotification
 } = require('../utils/otpService');
+const { recordSellerHistoryEvent } = require('../utils/sellerHistory');
 
 // Helper to get models from req with fallback to global imports
 
@@ -1140,6 +1141,8 @@ router.put('/:id/ship', protect, async (req, res) => {
     const { Order: OrderModel, Driver: DriverModel } = getModels(req);
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
+    const previousDriverId = order.driverId?.toString() || '';
+    const previousOrderStatus = order.orderStatus;
 
     if (['Delivered', 'Cancelled'].includes(order.orderStatus)) {
       return res.status(400).json({ message: `Cannot ship an order that is already ${order.orderStatus}.` });
@@ -1153,6 +1156,34 @@ router.put('/:id/ship', protect, async (req, res) => {
       await dispatchDeliveryOtpNotification({ order, otp, user: order.userId });
     }
     await order.save();
+    if (order.driverId && order.driverId.toString() !== previousDriverId) {
+      const assignedDriver = await DriverModel.findById(order.driverId).select('name phone').lean();
+      await recordSellerHistoryEvent(req, order, {
+        activityType: 'pickups',
+        activity: 'Driver Assigned',
+        fromStatus: previousDriverId ? 'Assigned' : 'Not Assigned',
+        status: 'Assigned',
+        occurredAt: order.updatedAt || new Date(),
+        description: assignedDriver?.name
+          ? `Pickup assigned to ${assignedDriver.name}${assignedDriver.phone ? ` (${assignedDriver.phone})` : ''}`
+          : 'Pickup assigned to the selected driver',
+        metadata: assignedDriver ? {
+          driverId: order.driverId.toString(),
+          driverName: assignedDriver.name || '',
+          driverPhone: assignedDriver.phone || ''
+        } : { driverId: order.driverId.toString() }
+      });
+    }
+    if (previousOrderStatus !== order.orderStatus && order.orderStatus === 'Out for Delivery') {
+      await recordSellerHistoryEvent(req, order, {
+        activityType: 'statusUpdates',
+        activity: 'Order Out for Delivery',
+        fromStatus: previousOrderStatus,
+        status: order.orderStatus,
+        occurredAt: order.updatedAt || new Date(),
+        description: 'Order dispatched for delivery'
+      });
+    }
     emitOrderRealtimeUpdate(order, 'update');
 
     // Populate user to check role
@@ -1229,6 +1260,7 @@ router.put('/:id/cancel', protect, async (req, res) => {
 
     order.orderStatus = 'Cancelled';
     order.cancelledAt = new Date();
+    const cancellationTimestamp = order.cancelledAt;
     if (req.body.cancellationReason) {
       order.cancellationReason = req.body.cancellationReason;
     }
@@ -1240,6 +1272,13 @@ router.put('/:id/cancel', protect, async (req, res) => {
     }
 
     await order.save();
+    await recordSellerHistoryEvent(req, order, {
+      activityType: 'statusUpdates',
+      activity: 'Order Cancelled',
+      status: order.orderStatus,
+      occurredAt: cancellationTimestamp,
+      description: req.body.cancellationReason || 'Order cancelled'
+    });
     emitOrderRealtimeUpdate(order, 'cancel');
 
     // Restore stock
@@ -1344,6 +1383,10 @@ router.all('/:id/status', protect, async (req, res) => {
     }
 
     const previousStatus = order.orderStatus;
+    const pickupSellerId = isSeller ? req.user._id : (isDriver && req.body.sellerId ? req.body.sellerId : null);
+    const previousSellerPickupStatus = pickupSellerId
+      ? order.sellerPickups?.find(sp => sp.sellerId.toString() === pickupSellerId.toString())?.status
+      : null;
 
     // Handle multi-seller pickup status logic
     let shouldUpdateGlobalStatus = true;
@@ -1478,6 +1521,48 @@ router.all('/:id/status', protect, async (req, res) => {
     }
 
     await order.save();
+    const sellerPickupStatus = pickupSellerId
+      ? order.sellerPickups?.find(sp => sp.sellerId.toString() === pickupSellerId.toString())?.status
+      : null;
+    const sellerPickupChanged = !!pickupSellerId && previousSellerPickupStatus !== sellerPickupStatus;
+    const statusChanged = previousStatus !== order.orderStatus || sellerPickupChanged;
+    if (statusChanged) {
+      const eventSellerIds = sellerPickupChanged && !shouldUpdateGlobalStatus
+        ? [pickupSellerId]
+        : undefined;
+      const effectiveStatus = sellerPickupChanged && !shouldUpdateGlobalStatus ? sellerPickupStatus : order.orderStatus;
+      const occurredAt = order.updatedAt || new Date();
+      await recordSellerHistoryEvent(req, order, {
+        sellerIds: eventSellerIds,
+        activityType: 'statusUpdates',
+        activity: `Order ${effectiveStatus}`,
+        fromStatus: previousStatus,
+        status: effectiveStatus,
+        occurredAt,
+        description: `Order status changed from ${previousStatus} to ${effectiveStatus}`
+      });
+      if (effectiveStatus === 'Packed') {
+        await recordSellerHistoryEvent(req, order, {
+          sellerIds: eventSellerIds,
+          activityType: 'pickups',
+          activity: 'Pickup Ready',
+          fromStatus: previousSellerPickupStatus || previousStatus,
+          status: effectiveStatus,
+          occurredAt,
+          description: 'Order packed and ready for pickup'
+        });
+      } else if (['Picked Up', 'Out for Delivery'].includes(effectiveStatus)) {
+        await recordSellerHistoryEvent(req, order, {
+          sellerIds: eventSellerIds,
+          activityType: 'pickups',
+          activity: 'Pickup Completed',
+          fromStatus: previousSellerPickupStatus || previousStatus,
+          status: effectiveStatus,
+          occurredAt,
+          description: 'Order collected from the seller'
+        });
+      }
+    }
     emitOrderRealtimeUpdate(order, 'update');
 
     // If status changed to Cancelled, restore stock
@@ -1501,6 +1586,7 @@ router.put('/:id/payment', protect, async (req, res) => {
     const { Order: OrderModel, Driver: DriverModel, CashCollector: CashCollectorModel } = getModels(req);
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
+    const previousPaymentStatus = order.paymentStatus;
 
     if (paymentScreenshot) order.paymentScreenshot = paymentScreenshot;
     if (paymentStatus) order.paymentStatus = paymentStatus;
@@ -1529,6 +1615,16 @@ router.put('/:id/payment', protect, async (req, res) => {
     order.paidAt = Date.now();
 
     await order.save();
+    if (previousPaymentStatus !== order.paymentStatus) {
+      await recordSellerHistoryEvent(req, order, {
+        activityType: 'payments',
+        activity: ['Paid', 'Completed'].includes(order.paymentStatus) ? 'Payment Received' : `Payment ${order.paymentStatus}`,
+        fromStatus: previousPaymentStatus,
+        status: order.paymentStatus,
+        occurredAt: order.paidAt,
+        description: `${order.paymentMethod || 'Payment'} status changed from ${previousPaymentStatus || 'Unknown'} to ${order.paymentStatus}`
+      });
+    }
     res.json(order);
   } catch (error) {
     console.error('Update payment error:', error);
@@ -1635,6 +1731,8 @@ router.post('/:id/verify-delivery-otp', protect, async (req, res) => {
     if (!isAdmin && !isDriver) {
       return res.status(403).json({ message: 'Not authorized to verify delivery for this order' });
     }
+    const previousOrderStatus = order.orderStatus;
+    const previousPaymentStatus = order.paymentStatus;
 
     if (!otp) {
       return res.status(400).json({ message: 'Please provide the 6-digit Delivery OTP collected from the customer.' });
@@ -1681,6 +1779,34 @@ router.post('/:id/verify-delivery-otp', protect, async (req, res) => {
     }
 
     await order.save();
+    if (previousOrderStatus !== order.orderStatus) {
+      await recordSellerHistoryEvent(req, order, {
+        activityType: 'statusUpdates',
+        activity: 'Order Delivered',
+        fromStatus: previousOrderStatus,
+        status: order.orderStatus,
+        occurredAt: order.deliveredAt || order.updatedAt,
+        description: 'Order delivery confirmed by delivery OTP'
+      });
+      await recordSellerHistoryEvent(req, order, {
+        activityType: 'pickups',
+        activity: 'Pickup Completed',
+        fromStatus: previousOrderStatus,
+        status: order.orderStatus,
+        occurredAt: order.deliveredAt || order.updatedAt,
+        description: 'Pickup and delivery flow completed'
+      });
+    }
+    if (previousPaymentStatus !== order.paymentStatus) {
+      await recordSellerHistoryEvent(req, order, {
+        activityType: 'payments',
+        activity: ['Paid', 'Completed'].includes(order.paymentStatus) ? 'Payment Received' : `Payment ${order.paymentStatus}`,
+        fromStatus: previousPaymentStatus,
+        status: order.paymentStatus,
+        occurredAt: order.paidAt || order.updatedAt,
+        description: `${order.paymentMethod || 'Payment'} status changed to ${order.paymentStatus}`
+      });
+    }
     emitOrderRealtimeUpdate(order, 'update');
 
     // Emit Socket.IO delivery event
@@ -2423,7 +2549,17 @@ router.post('/:id/items/:itemId/return', protect, async (req, res) => {
       order.orderStatus = 'Return Requested';
     }
 
+    const returnRequestedAt = new Date();
     await order.save();
+    await recordSellerHistoryEvent(req, order, {
+      sellerIds: item.seller?.sellerId ? [item.seller.sellerId] : undefined,
+      activityType: 'returns',
+      activity: 'Return Requested',
+      status: item.returnStatus,
+      occurredAt: returnRequestedAt,
+      description: item.returnReason || 'Return requested for an order item',
+      metadata: { itemId: item._id?.toString(), itemName: item.name || '' }
+    });
     res.json(order);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -2479,6 +2615,13 @@ router.post('/:id/return-request', protect, async (req, res) => {
     }
 
     await order.save();
+    await recordSellerHistoryEvent(req, order, {
+      activityType: 'returns',
+      activity: 'Return Requested',
+      status: order.returnStatus,
+      occurredAt: order.returnRequestedAt,
+      description: order.returnReason || 'Return requested by customer'
+    });
     emitOrderRealtimeUpdate(order, 'update');
 
     res.json({
@@ -2560,6 +2703,13 @@ router.put('/:id/return-approve', protect, async (req, res) => {
         throw saveErr;
       }
     }
+    await recordSellerHistoryEvent(req, order, {
+      activityType: 'returns',
+      activity: 'Return Approved',
+      status: order.returnStatus,
+      occurredAt: order.returnApprovedAt,
+      description: 'Return request approved'
+    });
     emitOrderRealtimeUpdate(order, 'update');
 
     // Notify customer via email if available
@@ -2674,6 +2824,13 @@ router.put('/:id/return-reject', protect, async (req, res) => {
         throw saveErr;
       }
     }
+    await recordSellerHistoryEvent(req, order, {
+      activityType: 'returns',
+      activity: 'Return Rejected',
+      status: order.returnStatus,
+      occurredAt: order.returnRejectedAt,
+      description: finalReason
+    });
     emitOrderRealtimeUpdate(order, 'update');
 
     // Notify customer via email if available
@@ -2730,6 +2887,7 @@ router.put('/:id/items/:itemId/return-status', protect, async (req, res) => {
       return res.status(400).json({ message: 'Item is not awaiting return approval' });
     }
 
+    const previousReturnStatus = item.returnStatus;
     item.returnStatus = status;
 
     const validOrderStatuses = OrderModel.schema?.path('orderStatus')?.enumValues || [];
@@ -2756,6 +2914,18 @@ router.put('/:id/items/:itemId/return-status', protect, async (req, res) => {
       } else {
         throw saveErr;
       }
+    }
+    if (previousReturnStatus !== item.returnStatus) {
+      await recordSellerHistoryEvent(req, order, {
+        sellerIds: item.seller?.sellerId ? [item.seller.sellerId] : undefined,
+        activityType: 'returns',
+        activity: item.returnStatus,
+        fromStatus: previousReturnStatus,
+        status: item.returnStatus,
+        occurredAt: order.updatedAt || new Date(),
+        description: item.returnReason || `Return item status changed to ${item.returnStatus}`,
+        metadata: { itemId: item._id?.toString(), itemName: item.name || '' }
+      });
     }
     emitOrderRealtimeUpdate(order, 'update');
     res.json(order);
@@ -2827,6 +2997,15 @@ router.put('/:id/return-pickup', protect, async (req, res) => {
     }
 
     await order.save();
+    if (updatedCount > 0) {
+      await recordSellerHistoryEvent(req, order, {
+        activityType: 'returns',
+        activity: 'Return Pickup Completed',
+        status: order.orderStatus,
+        occurredAt: order.updatedAt || new Date(),
+        description: `${updatedCount} return item${updatedCount === 1 ? '' : 's'} collected from customer`
+      });
+    }
     res.json(order);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -2879,6 +3058,14 @@ router.put('/:id/return-delivery', protect, async (req, res) => {
     }
 
     await order.save();
+    await recordSellerHistoryEvent(req, order, {
+      sellerIds: [sellerId],
+      activityType: 'returns',
+      activity: 'Returned to Seller',
+      status: sellerPickup.status,
+      occurredAt: order.updatedAt || new Date(),
+      description: 'Returned items delivered to seller'
+    });
     res.json(order);
   } catch (error) {
     res.status(500).json({ message: error.message });
