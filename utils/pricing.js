@@ -388,7 +388,7 @@ function calculateCustomerPrice(
     // Total Admin Commission = unitSize * adminCommissionPerUnit
     // Customer Total Price = basePrice + totalCommission
     sPricePerProductUnit = round2(basePrice);
-    sellerPricePerBaseUnit = uSize > 0 ? round2(basePrice / uSize) : round2(basePrice);
+    sellerPricePerBaseUnit = round2(basePrice);
   }
 
   let commissionPerProductUnit = 0;
@@ -508,56 +508,29 @@ function processProductPricing(payload, commissions = []) {
     }
   }
 
-  let sellerB2bPrice = 0;
-  let sellerPrice = 0;
-
-  if (priceBasis === 'per_unit') {
-    if (payload.sellerPricePerBaseUnit !== undefined && payload.sellerPricePerBaseUnit !== '' && payload.sellerPricePerBaseUnit !== null) {
-      sellerPrice = parseFloat(payload.sellerPricePerBaseUnit) || 0;
-    }
-  } else {
-    if (payload.sellerPricePerProductUnit !== undefined && payload.sellerPricePerProductUnit !== '' && payload.sellerPricePerProductUnit !== null) {
-      sellerPrice = parseFloat(payload.sellerPricePerProductUnit) || 0;
-    }
+  // Extract base wholesale seller price
+  let rawSellerPrice = null;
+  if (payload.sellerB2bPrice !== undefined && payload.sellerB2bPrice !== '' && payload.sellerB2bPrice !== null) {
+    rawSellerPrice = payload.sellerB2bPrice;
+  } else if (payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null) {
+    rawSellerPrice = payload.sellerPrice;
+  } else if (payload.sellerPricePerBaseUnit !== undefined && payload.sellerPricePerBaseUnit !== '' && payload.sellerPricePerBaseUnit !== null) {
+    rawSellerPrice = payload.sellerPricePerBaseUnit;
+  } else if (payload.sellerPricePerProductUnit !== undefined && payload.sellerPricePerProductUnit !== '' && payload.sellerPricePerProductUnit !== null) {
+    rawSellerPrice = payload.sellerPricePerProductUnit;
+  } else if (payload.b2bPrice !== undefined && payload.b2bPrice !== '' && payload.b2bPrice !== null) {
+    rawSellerPrice = payload.b2bPrice;
+  } else if (payload.price !== undefined && payload.price !== '' && payload.price !== null) {
+    rawSellerPrice = payload.price;
   }
 
-  if (sellerPrice <= 0) {
-    sellerB2bPrice = payload.sellerB2bPrice !== undefined && payload.sellerB2bPrice !== '' && payload.sellerB2bPrice !== null
-      ? parseFloat(payload.sellerB2bPrice) || 0
-      : (payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null
-          ? parseFloat(payload.sellerPrice) || 0
-          : (parseFloat(payload.b2bPrice) || parseFloat(payload.price) || 0));
-
-    sellerPrice = payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null
-      ? parseFloat(payload.sellerPrice) || 0
-      : (sellerB2bPrice > 0 ? sellerB2bPrice : (parseFloat(payload.price) || parseFloat(payload.b2bPrice) || 0));
-
-    if (sellerPrice <= 0 && sellerB2bPrice > 0) {
-      sellerPrice = sellerB2bPrice;
-    }
-    if (sellerB2bPrice <= 0 && sellerPrice > 0) {
-      sellerB2bPrice = sellerPrice;
-    }
-  } else {
-    sellerB2bPrice = sellerPrice;
-  }
+  let sellerPrice = parseFloat(rawSellerPrice) || 0;
+  let sellerB2bPrice = sellerPrice;
 
   // If still 0, check B2B variants
   if (sellerPrice <= 0 && Array.isArray(payload.b2b) && payload.b2b.length > 0) {
     const firstB2b = payload.b2b[0];
-    if (priceBasis === 'per_unit') {
-      const b2bBasePrice = parseFloat(firstB2b.sellerPricePerBaseUnit) || 0;
-      if (b2bBasePrice > 0) {
-        sellerPrice = b2bBasePrice;
-      } else {
-        const b2bPkg = parseFloat(firstB2b.sellerPrice || firstB2b.price) || 0;
-        const b2bSize = extractUnitSize(firstB2b.unitSize, unitSize);
-        sellerPrice = b2bSize > 0 ? Math.round((b2bPkg / b2bSize) * 100) / 100 : b2bPkg;
-      }
-    } else {
-      const b2bPkg = parseFloat(firstB2b.sellerPricePerProductUnit || firstB2b.sellerPrice || firstB2b.price) || 0;
-      sellerPrice = b2bPkg;
-    }
+    sellerPrice = parseFloat(firstB2b.sellerPrice || firstB2b.sellerPricePerBaseUnit || firstB2b.price) || 0;
     sellerB2bPrice = sellerPrice;
   }
 
@@ -824,26 +797,22 @@ function applyCommission(product, commissions = [], pincode = null) {
     commissionValue = Number(product.commissionValue) || 0;
   }
 
-  // Idempotent seller price extraction
-  let sellerB2bPrice = 0;
-  let sellerPrice = 0;
-
-  if (priceBasis === 'per_package') {
-    sellerB2bPrice = product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null
-      ? product.sellerB2bPrice
-      : (product.sellerPricePerProductUnit !== undefined ? product.sellerPricePerProductUnit : (product.b2bPrice || product.price || 0));
-    sellerPrice = product.sellerPrice !== undefined && product.sellerPrice !== null
-      ? product.sellerPrice
-      : (product.sellerPricePerProductUnit !== undefined ? product.sellerPricePerProductUnit : (product.price || product.b2bPrice || 0));
+  // Idempotent seller base price extraction
+  let rawSeller = null;
+  if (product.sellerPricePerBaseUnit !== undefined && product.sellerPricePerBaseUnit !== null && Number(product.sellerPricePerBaseUnit) > 0) {
+    rawSeller = product.sellerPricePerBaseUnit;
+  } else if (product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null && Number(product.sellerB2bPrice) > 0) {
+    rawSeller = product.sellerB2bPrice;
+  } else if (product.sellerPrice !== undefined && product.sellerPrice !== null && Number(product.sellerPrice) > 0) {
+    rawSeller = product.sellerPrice;
+  } else if (product.sellerPricePerProductUnit !== undefined && product.sellerPricePerProductUnit !== null && Number(product.sellerPricePerProductUnit) > 0) {
+    rawSeller = product.sellerPricePerProductUnit;
   } else {
-    // per_unit
-    sellerB2bPrice = product.sellerPricePerBaseUnit !== undefined && product.sellerPricePerBaseUnit > 0
-      ? product.sellerPricePerBaseUnit
-      : (product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null ? product.sellerB2bPrice : (product.sellerPrice || product.b2bPrice || product.price || 0));
-    sellerPrice = product.sellerPricePerBaseUnit !== undefined && product.sellerPricePerBaseUnit > 0
-      ? product.sellerPricePerBaseUnit
-      : (product.sellerPrice !== undefined && product.sellerPrice !== null ? product.sellerPrice : (product.price || product.b2bPrice || 0));
+    rawSeller = product.b2bPrice || product.price || 0;
   }
+
+  let sellerPrice = parseFloat(rawSeller) || 0;
+  let sellerB2bPrice = sellerPrice;
 
   const extraOpts = { unit, packagingType, measurementUnit, measurementBasis, commissionRule: adminRule, priceBasis };
   const { customerPrice, commissionAmount } = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, 0, false, extraOpts);
@@ -858,14 +827,12 @@ function applyCommission(product, commissions = [], pincode = null) {
     const vStock = v.stock !== undefined && v.stock !== '' && v.stock !== null ? parseInt(v.stock, 10) || 0 : 0;
 
     let vSellerPrice = 0;
-    if (vPriceBasis === 'per_package') {
-      vSellerPrice = v.sellerPricePerProductUnit !== undefined && v.sellerPricePerProductUnit > 0
-        ? v.sellerPricePerProductUnit
-        : (v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0));
-    } else {
-      vSellerPrice = v.sellerPricePerBaseUnit !== undefined && v.sellerPricePerBaseUnit > 0
-        ? v.sellerPricePerBaseUnit
-        : (v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0));
+    if (v.sellerPricePerBaseUnit !== undefined && v.sellerPricePerBaseUnit !== null && Number(v.sellerPricePerBaseUnit) > 0) {
+      vSellerPrice = Number(v.sellerPricePerBaseUnit);
+    } else if (v.sellerPrice !== undefined && v.sellerPrice !== null && Number(v.sellerPrice) > 0) {
+      vSellerPrice = Number(v.sellerPrice);
+    } else if (v.price !== undefined && v.price !== null && Number(v.price) > 0) {
+      vSellerPrice = Number(v.price);
     }
 
     const vExtraOpts = {
@@ -911,14 +878,12 @@ function applyCommission(product, commissions = [], pincode = null) {
     const vStock = v.stock !== undefined && v.stock !== '' && v.stock !== null ? parseInt(v.stock, 10) || 0 : 0;
 
     let vSellerPrice = 0;
-    if (vPriceBasis === 'per_package') {
-      vSellerPrice = v.sellerPricePerProductUnit !== undefined && v.sellerPricePerProductUnit > 0
-        ? v.sellerPricePerProductUnit
-        : (v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0));
-    } else {
-      vSellerPrice = v.sellerPricePerBaseUnit !== undefined && v.sellerPricePerBaseUnit > 0
-        ? v.sellerPricePerBaseUnit
-        : (v.sellerPrice !== undefined && v.sellerPrice !== null ? v.sellerPrice : (v.price || 0));
+    if (v.sellerPricePerBaseUnit !== undefined && v.sellerPricePerBaseUnit !== null && Number(v.sellerPricePerBaseUnit) > 0) {
+      vSellerPrice = Number(v.sellerPricePerBaseUnit);
+    } else if (v.sellerPrice !== undefined && v.sellerPrice !== null && Number(v.sellerPrice) > 0) {
+      vSellerPrice = Number(v.sellerPrice);
+    } else if (v.price !== undefined && v.price !== null && Number(v.price) > 0) {
+      vSellerPrice = Number(v.price);
     }
 
     const vExtraOpts = {
@@ -985,8 +950,8 @@ function applyCommission(product, commissions = [], pincode = null) {
     });
   }
 
-  const finalCustomerB2bPrice = (customerB2bPrice === 0 && newB2b.length > 0) ? newB2b[0].price : (customerB2bPrice || customerPrice);
-  const finalCustomerPrice = (customerPrice === 0 && newB2c.length > 0) ? newB2c[0].price : (customerPrice || customerB2bPrice || finalCustomerB2bPrice);
+  const finalCustomerB2bPrice = primaryB2bPricing.customerFinalPricePerProductUnit || primaryPricing.customerFinalPricePerProductUnit || ((newB2b.length > 0) ? newB2b[0].price : 0);
+  const finalCustomerPrice = primaryPricing.customerFinalPricePerProductUnit || finalCustomerB2bPrice;
 
   const availableStock = typeof product.stock === 'number' ? product.stock : (parseInt(product.stock, 10) || 0);
   const gstRate = typeof product.gstPercent === 'number' ? product.gstPercent : (parseFloat(product.gstPercent) || 0);
@@ -1038,6 +1003,8 @@ function applyCommission(product, commissions = [], pincode = null) {
     customerPricePerPackage: primaryPricing.customerFinalPricePerProductUnit,
     sellerUnitPrice: primaryPricing.sellerPricePerProductUnit,
     sellerB2bPrice: primaryB2bPricing.sellerPricePerProductUnit,
+    sellerPricePerBaseUnit: primaryPricing.sellerPricePerBaseUnit,
+    sellerPricePerProductUnit: primaryPricing.sellerPricePerProductUnit,
     commissionType,
     commissionValue,
     commissionRate: commissionValue,
@@ -1141,7 +1108,7 @@ function calculatePricingBreakdown({
 
     const enteredBasePrice = parseFloat(rawVal) || 0;
     sPricePerProductUnit = round2(enteredBasePrice);
-    sPricePerBaseUnit = uSize > 0 ? round2(enteredBasePrice / uSize) : round2(enteredBasePrice);
+    sPricePerBaseUnit = round2(enteredBasePrice);
   }
 
   // Step 2: Commission Per Product Unit (e.g. 20 * 30 = 600)

@@ -788,6 +788,7 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
     const measurementBasis = req.body.measurementBasis || req.body.measurementUnit || 'KG';
     const priceBasis = req.body.priceBasis || (req.body.isPackagePrice ? 'per_package' : 'per_unit');
 
+    const baseSellerEntered = req.body.sellerB2bPrice || req.body.sellerPrice || b2bPrice || price;
     const pricingPayload = processProductPricing({
       name,
       categoryId,
@@ -797,10 +798,13 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       measurementUnit: measurementBasis,
       priceBasis,
       unitSize: req.body.unitSize !== undefined ? req.body.unitSize : 1,
-      sellerPrice: req.body.sellerPrice || req.body.sellerB2bPrice || price,
-      sellerB2bPrice: req.body.sellerB2bPrice || req.body.sellerPrice || b2bPrice || price,
-      price,
-      b2bPrice,
+      sellerPrice: baseSellerEntered,
+      sellerB2bPrice: baseSellerEntered,
+      sellerPricePerBaseUnit: baseSellerEntered,
+      sellerPricePerProductUnit: baseSellerEntered,
+      sellerUnitPrice: baseSellerEntered,
+      price: baseSellerEntered,
+      b2bPrice: baseSellerEntered,
       commissionType: req.body.commissionType,
       commissionValue: req.body.commissionValue,
       commissionAmount: req.body.commissionAmount,
@@ -1477,6 +1481,14 @@ router.put('/:id', protect, async (req, res) => {
       name: req.body.name || existingProd.name,
       b2b: req.body.b2b !== undefined ? req.body.b2b : existingProd.b2b
     };
+    if (req.body.sellerB2bPrice !== undefined || req.body.sellerPrice !== undefined) {
+      const explicitSellerPrice = req.body.sellerB2bPrice !== undefined ? req.body.sellerB2bPrice : req.body.sellerPrice;
+      pricingInput.sellerB2bPrice = explicitSellerPrice;
+      pricingInput.sellerPrice = explicitSellerPrice;
+      pricingInput.sellerPricePerBaseUnit = explicitSellerPrice;
+      pricingInput.sellerPricePerProductUnit = explicitSellerPrice;
+      pricingInput.sellerUnitPrice = explicitSellerPrice;
+    }
 
     const updatedPayload = processProductPricing(pricingInput, comms);
     if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
