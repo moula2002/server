@@ -804,14 +804,17 @@ function applyCommission(product, commissions = [], pincode = null) {
 
   // Idempotent seller base price extraction
   let rawSeller = null;
-  if (product.sellerPricePerBaseUnit !== undefined && product.sellerPricePerBaseUnit !== null && Number(product.sellerPricePerBaseUnit) > 0) {
-    rawSeller = product.sellerPricePerBaseUnit;
-  } else if (product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null && Number(product.sellerB2bPrice) > 0) {
-    rawSeller = product.sellerB2bPrice;
-  } else if (product.sellerPrice !== undefined && product.sellerPrice !== null && Number(product.sellerPrice) > 0) {
+  if (product.sellerPrice !== undefined && product.sellerPrice !== null && Number(product.sellerPrice) > 0) {
     rawSeller = product.sellerPrice;
+  } else if (product.sellerUnitPrice !== undefined && product.sellerUnitPrice !== null && Number(product.sellerUnitPrice) > 0) {
+    rawSeller = product.sellerUnitPrice;
   } else if (product.sellerPricePerProductUnit !== undefined && product.sellerPricePerProductUnit !== null && Number(product.sellerPricePerProductUnit) > 0) {
     rawSeller = product.sellerPricePerProductUnit;
+  } else if (product.sellerB2bPrice !== undefined && product.sellerB2bPrice !== null && Number(product.sellerB2bPrice) > 0) {
+    rawSeller = product.sellerB2bPrice;
+  } else if (product.sellerPricePerBaseUnit !== undefined && product.sellerPricePerBaseUnit !== null && Number(product.sellerPricePerBaseUnit) > 0) {
+    const perBase = Number(product.sellerPricePerBaseUnit);
+    rawSeller = (priceBasis === 'per_package' && unitSize > 1) ? (perBase * unitSize) : perBase;
   } else {
     rawSeller = product.b2bPrice || product.price || 0;
   }
@@ -838,10 +841,13 @@ function applyCommission(product, commissions = [], pincode = null) {
     const vStock = v.stock !== undefined && v.stock !== '' && v.stock !== null ? parseInt(v.stock, 10) || 0 : 0;
 
     let vSellerPrice = 0;
-    if (v.sellerPricePerBaseUnit !== undefined && v.sellerPricePerBaseUnit !== null && Number(v.sellerPricePerBaseUnit) > 0) {
-      vSellerPrice = Number(v.sellerPricePerBaseUnit);
-    } else if (v.sellerPrice !== undefined && v.sellerPrice !== null && Number(v.sellerPrice) > 0) {
+    if (v.sellerPrice !== undefined && v.sellerPrice !== null && Number(v.sellerPrice) > 0) {
       vSellerPrice = Number(v.sellerPrice);
+    } else if (v.sellerPricePerProductUnit !== undefined && v.sellerPricePerProductUnit !== null && Number(v.sellerPricePerProductUnit) > 0) {
+      vSellerPrice = Number(v.sellerPricePerProductUnit);
+    } else if (v.sellerPricePerBaseUnit !== undefined && v.sellerPricePerBaseUnit !== null && Number(v.sellerPricePerBaseUnit) > 0) {
+      const perBase = Number(v.sellerPricePerBaseUnit);
+      vSellerPrice = (vPriceBasis === 'per_package' && vUnitSize > 1) ? (perBase * vUnitSize) : perBase;
     } else if (v.price !== undefined && v.price !== null && Number(v.price) > 0) {
       vSellerPrice = Number(v.price);
     }
@@ -901,10 +907,13 @@ function applyCommission(product, commissions = [], pincode = null) {
     const vStock = v.stock !== undefined && v.stock !== '' && v.stock !== null ? parseInt(v.stock, 10) || 0 : 0;
 
     let vSellerPrice = 0;
-    if (v.sellerPricePerBaseUnit !== undefined && v.sellerPricePerBaseUnit !== null && Number(v.sellerPricePerBaseUnit) > 0) {
-      vSellerPrice = Number(v.sellerPricePerBaseUnit);
-    } else if (v.sellerPrice !== undefined && v.sellerPrice !== null && Number(v.sellerPrice) > 0) {
+    if (v.sellerPrice !== undefined && v.sellerPrice !== null && Number(v.sellerPrice) > 0) {
       vSellerPrice = Number(v.sellerPrice);
+    } else if (v.sellerPricePerProductUnit !== undefined && v.sellerPricePerProductUnit !== null && Number(v.sellerPricePerProductUnit) > 0) {
+      vSellerPrice = Number(v.sellerPricePerProductUnit);
+    } else if (v.sellerPricePerBaseUnit !== undefined && v.sellerPricePerBaseUnit !== null && Number(v.sellerPricePerBaseUnit) > 0) {
+      const perBase = Number(v.sellerPricePerBaseUnit);
+      vSellerPrice = (vPriceBasis === 'per_package' && vUnitSize > 1) ? (perBase * vUnitSize) : perBase;
     } else if (v.price !== undefined && v.price !== null && Number(v.price) > 0) {
       vSellerPrice = Number(v.price);
     }
