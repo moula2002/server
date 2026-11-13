@@ -382,12 +382,11 @@ function calculateCustomerPrice(
   if (typeof arg1 === 'object' && arg1 !== null && arg1.sellerPricePerProductUnit !== undefined && arg1.sellerPricePerBaseUnit !== undefined && arg1.sellerPricePerProductUnit > 0 && arg1.sellerPricePerBaseUnit > 0) {
     sellerPricePerBaseUnit = round2(arg1.sellerPricePerBaseUnit);
     sPricePerProductUnit = round2(arg1.sellerPricePerProductUnit);
-  } else if (isPackagePrice) {
+  } else {
+    // New simplified pricing: Seller Unit Price is the configured selling price for one customer-purchasable package/unit.
+    // Do not multiply it by product unit size again.
     sPricePerProductUnit = round2(basePrice);
     sellerPricePerBaseUnit = uSize > 0 ? round2(basePrice / uSize) : round2(basePrice);
-  } else {
-    sellerPricePerBaseUnit = round2(basePrice);
-    sPricePerProductUnit = round2(basePrice * uSize);
   }
 
   let commissionPerProductUnit = 0;
@@ -1122,16 +1121,13 @@ function calculatePricingBreakdown({
   if (sellerPricePerProductUnit !== undefined && sellerPricePerBaseUnit !== undefined && Number(sellerPricePerProductUnit) > 0 && Number(sellerPricePerBaseUnit) > 0) {
     sPricePerProductUnit = round2(sellerPricePerProductUnit);
     sPricePerBaseUnit = round2(sellerPricePerBaseUnit);
-  } else if (isPackage) {
+  } else {
+    // New simplified pricing: Seller Unit Price is the configured selling price for one customer-purchasable package/unit.
+    // Do not multiply it by product unit size again.
     const rawVal = sellerPricePerProductUnit !== undefined ? sellerPricePerProductUnit : (sellerPrice !== undefined ? sellerPrice : sellerUnitPrice);
     const enteredPkgPrice = parseFloat(rawVal) || 0;
     sPricePerProductUnit = round2(enteredPkgPrice);
     sPricePerBaseUnit = uSize > 0 ? round2(enteredPkgPrice / uSize) : round2(enteredPkgPrice);
-  } else {
-    const rawVal = sellerPricePerBaseUnit !== undefined ? sellerPricePerBaseUnit : (sellerPrice !== undefined ? sellerPrice : sellerUnitPrice);
-    const enteredBasePrice = parseFloat(rawVal) || 0;
-    sPricePerBaseUnit = round2(enteredBasePrice);
-    sPricePerProductUnit = round2(enteredBasePrice * uSize);
   }
 
   // Step 2: Commission Per Product Unit (e.g. 20 * 30 = 600)
