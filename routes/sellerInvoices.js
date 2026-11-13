@@ -523,6 +523,58 @@ router.post('/generate', protect, (req, res, next) => {
       }
     }
 
+    const { generateSeparateInvoices } = req.body;
+    if (generateSeparateInvoices && finalOrders.length > 0) {
+      const createdInvoices = [];
+      for (const ord of finalOrders) {
+        const humanOrderId = ord.orderNumber 
+          ? String(ord.orderNumber).padStart(5, '0') 
+          : (ord.orderId || ord._id.toString().slice(-6).toUpperCase());
+        const trimmedInvoiceNum = humanOrderId;
+        const exists = await InvoiceModel.findOne({
+          sellerId,
+          $or: [{ orders: ord._id }, { orderId: ord._id }, { invoiceNumber: trimmedInvoiceNum }],
+          status: { $nin: ['Cancelled', 'Rejected'] }
+        });
+        if (!exists) {
+          let ordAmount = 0;
+          let ordCommission = 0;
+          (ord.items || []).forEach(it => {
+            const qty = Number(it.quantity) || 1;
+            const itemCommission = Number(it.totalCommission) || ((Number(it.unitCommission) || 0) * qty) || 0;
+            const itemSellerPrice = (Number(it.sellerUnitPrice) || Number(it.normalPrice) || Number(it.price) || 0) * qty;
+            ordAmount += itemSellerPrice;
+            ordCommission += itemCommission;
+          });
+          const newSepInvoice = await InvoiceModel.create({
+            sellerId,
+            invoiceNumber: trimmedInvoiceNum,
+            invoiceSequenceNumber: ord.orderNumber || 1,
+            startDate: ord.createdAt,
+            endDate: ord.deliveredAt || ord.createdAt,
+            totalAmount: round2(ordAmount),
+            totalCommission: round2(ordCommission),
+            netAmount: round2(ordAmount),
+            orderCount: 1,
+            orders: [ord._id],
+            orderId: ord._id,
+            orderNumber: ord.orderNumber || null,
+            orderRef: ord.orderRef || null,
+            status: 'Pending',
+            hasInvoiceImage: false,
+            imageIds: [],
+            generatedBy: req.user ? req.user._id : sellerId
+          });
+          createdInvoices.push(newSepInvoice);
+        }
+      }
+      return res.status(201).json({
+        message: `Successfully generated ${createdInvoices.length} separate invoice(s)!`,
+        invoices: createdInvoices,
+        invoiceCount: createdInvoices.length
+      });
+    }
+
     const roundedTotalAmount = round2(finalTotalAmount);
     const roundedTotalCommission = round2(finalTotalCommission);
     const roundedNetAmount = round2(finalTotalAmount);
