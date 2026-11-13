@@ -950,15 +950,15 @@ function applyCommission(product, commissions = [], pincode = null) {
     });
   }
 
-  const finalCustomerB2bPrice = primaryB2bPricing.customerFinalPricePerProductUnit || primaryPricing.customerFinalPricePerProductUnit || ((newB2b.length > 0) ? newB2b[0].price : 0);
-  const finalCustomerPrice = primaryPricing.customerFinalPricePerProductUnit || finalCustomerB2bPrice;
-
   const availableStock = typeof product.stock === 'number' ? product.stock : (parseInt(product.stock, 10) || 0);
   const gstRate = typeof product.gstPercent === 'number' ? product.gstPercent : (parseFloat(product.gstPercent) || 0);
   const isGstInclusive = Boolean(product.isGstInclusive);
 
   const primaryPricing = calculateCustomerPrice(sellerPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive, extraOpts);
   const primaryB2bPricing = calculateCustomerPrice(sellerB2bPrice, commissionType, commissionValue, unitSize, gstRate, isGstInclusive, extraOpts);
+
+  const finalCustomerB2bPrice = primaryB2bPricing.customerFinalPricePerProductUnit || primaryPricing.customerFinalPricePerProductUnit || ((newB2b.length > 0) ? newB2b[0].price : 0);
+  const finalCustomerPrice = primaryPricing.customerFinalPricePerProductUnit || finalCustomerB2bPrice;
 
   // New Separate Inventory Valuation (Section 6)
   const totalStockWeight = round2(unitSize * Math.max(0, availableStock));
