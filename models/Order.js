@@ -67,8 +67,6 @@ const orderSchema = new mongoose.Schema({
     totalMeasurement: { type: Number, default: null },
     totalSellerAmount: { type: Number, default: 0 },
     totalSellerPrice: { type: Number, default: 0 },
-    subtotal: { type: Number, default: 0 },
-    customerBasePrice: { type: Number, default: 0 },
     gstRate: { type: Number, default: 0 },
     gstPercent: { type: Number, default: 0 },
     gstAmount: { type: Number, default: 0 },
