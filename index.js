@@ -64,7 +64,17 @@ mongoose.plugin(socketPlugin);
 
 // Connect to MongoDB
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('Connected to MongoDB'))
+  .then(async () => {
+    console.log('Connected to MongoDB');
+    try {
+      const Order = require('./models/Order');
+      const Counter = require('./models/Counter');
+      const { migrateExistingOrders } = require('./utils/migrateOrderNumbers');
+      await migrateExistingOrders(Order, Counter);
+    } catch (migErr) {
+      console.error('Order sequence migration check error:', migErr);
+    }
+  })
   .catch(err => console.error('MongoDB connection error:', err));
 
 // Routes

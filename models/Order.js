@@ -366,6 +366,12 @@ const orderSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  orderNumber: {
+    type: Number,
+    unique: true,
+    sparse: true,
+    index: true
+  },
   orderRef: {
     type: String,
     default: null

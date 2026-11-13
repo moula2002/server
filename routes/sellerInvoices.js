@@ -334,8 +334,7 @@ router.post('/generate', protect, (req, res, next) => {
       return res.status(403).json({ message: 'Not authorized to generate invoices' });
     }
 
-    const { startDate, endDate } = req.body;
-    const rawInvoiceNumber = req.body.invoiceNumber;
+    const { startDate, endDate, orderId: reqOrderId } = req.body;
     let sellerId = req.user?._id;
 
     if (req.admin) {
@@ -349,10 +348,11 @@ router.post('/generate', protect, (req, res, next) => {
       return res.status(400).json({ message: 'Start date and end date are required' });
     }
 
-    const uploadedFiles = req.files || [];
-    if (uploadedFiles.length === 0) {
-      return res.status(400).json({ message: 'At least one invoice image is required (minimum 1, maximum 5).' });
+    if (!reqOrderId) {
+      return res.status(400).json({ message: 'Order ID is required to generate invoice' });
     }
+
+    const uploadedFiles = req.files || [];
     if (uploadedFiles.length > 5) {
       return res.status(400).json({ message: 'Maximum 5 images allowed per invoice.' });
     }
@@ -364,47 +364,60 @@ router.post('/generate', protect, (req, res, next) => {
       return res.status(404).json({ message: 'Seller not found' });
     }
 
-    // 1. Calculate next sequential invoice number
-    const allSellerInvoices = await InvoiceModel.find({ sellerId }).select('invoiceNumber invoiceSequenceNumber').lean();
-    const usedNumericSequences = [];
-    (allSellerInvoices || []).forEach(inv => {
-      const numStr = (inv.invoiceNumber || '').toString().trim();
-      const p = parseInt(numStr, 10);
-      if (/^\d+$/.test(numStr) && !isNaN(p) && p > 0) {
-        usedNumericSequences.push(p);
-      } else if (inv.invoiceSequenceNumber && inv.invoiceSequenceNumber > 0) {
-        usedNumericSequences.push(inv.invoiceSequenceNumber);
-      }
-    });
+    // 1. Validate that the selected order exists in MongoDB
+    const isObjectId = mongoose.Types.ObjectId.isValid(reqOrderId);
+    const parsedOrderNum = parseInt(reqOrderId, 10);
+    const orderQuery = {
+      $or: [
+        ...(isObjectId ? [{ _id: reqOrderId }] : []),
+        ...(Number.isInteger(parsedOrderNum) ? [{ orderNumber: parsedOrderNum }] : []),
+        { orderId: reqOrderId },
+        { orderRef: reqOrderId }
+      ]
+    };
 
-    const maxNumeric = usedNumericSequences.length > 0 ? Math.max(...usedNumericSequences) : 0;
-    const nextExpectedNumber = maxNumeric + 1;
-
-    let trimmedInvoiceNumber = rawInvoiceNumber ? rawInvoiceNumber.toString().trim() : '';
-    let numericInvoiceNumber = parseInt(trimmedInvoiceNumber, 10);
-
-    if (!trimmedInvoiceNumber) {
-      trimmedInvoiceNumber = String(nextExpectedNumber);
-      numericInvoiceNumber = nextExpectedNumber;
-    } else if (/^\d+$/.test(trimmedInvoiceNumber)) {
-      numericInvoiceNumber = parseInt(trimmedInvoiceNumber, 10);
-      if (numericInvoiceNumber <= 0) {
-        return res.status(400).json({ message: 'Invoice number must be greater than 0.' });
-      }
-    } else {
-      numericInvoiceNumber = nextExpectedNumber;
+    const targetOrder = await OrderModel.findOne(orderQuery).populate('userId', 'name email phone role businessName');
+    if (!targetOrder) {
+      return res.status(404).json({ message: 'Selected Order was not found in the database.' });
     }
 
-    // Check for duplicate invoice number for this seller
+    // 2. Validate that the order belongs to this seller
+    const sellerIdStr = sellerId.toString();
+    const sellerItemsInOrder = (targetOrder.items || []).filter(item => {
+      const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerIdStr;
+      const matchesDirectSellerId = item.sellerId && item.sellerId.toString() === sellerIdStr;
+      const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerIdStr;
+      const matchesName = item.sellerName && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
+      const matchesStore = item.sellerName && seller.storeName && item.sellerName.toLowerCase() === seller.storeName.toLowerCase();
+      const matchesBusiness = item.sellerName && seller.businessName && item.sellerName.toLowerCase() === seller.businessName.toLowerCase();
+      return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName || matchesStore || matchesBusiness;
+    });
+
+    if (sellerItemsInOrder.length === 0) {
+      return res.status(403).json({ message: 'This order does not belong to your seller account.' });
+    }
+
+    // 3. Human-readable Order ID reference for invoiceNumber
+    const humanOrderId = targetOrder.orderNumber 
+      ? String(targetOrder.orderNumber).padStart(5, '0') 
+      : (targetOrder.orderId || targetOrder._id.toString().slice(-6).toUpperCase());
+    const trimmedInvoiceNumber = humanOrderId;
+    const numericInvoiceNumber = targetOrder.orderNumber || parseInt(humanOrderId, 10) || 1;
+
+    // 4. Check for duplicate invoice for this order / seller
     const duplicate = await InvoiceModel.findOne({
       sellerId: sellerId,
-      invoiceNumber: trimmedInvoiceNumber,
+      $or: [
+        { orders: targetOrder._id },
+        { orderId: targetOrder._id },
+        { invoiceNumber: trimmedInvoiceNumber }
+      ],
       status: { $nin: ['Cancelled', 'Rejected'] }
     });
 
     if (duplicate) {
       return res.status(400).json({ 
-        message: `Invoice number "${trimmedInvoiceNumber}" has already been used for this seller. Duplicate invoice numbers are not allowed.` 
+        message: `An invoice (#${duplicate.invoiceNumber}) has already been generated for this Order. Duplicate invoices for the same order are not allowed.` 
       });
     }
 
@@ -412,53 +425,24 @@ router.post('/generate', protect, (req, res, next) => {
     const end = new Date(endDate);
     end.setHours(23, 59, 59, 999);
 
-    const {
-      orderIds,
-      validOrders,
-      totalAmount,
-      totalCommission
-    } = await calculateSellerOrdersForRange({ OrderModel, InvoiceModel, sellerId, seller, start, end });
-
-    let finalOrderIds = orderIds;
-    let finalOrders = validOrders;
-    let finalTotalAmount = totalAmount;
-    let finalTotalCommission = totalCommission;
-
-    if (finalOrderIds.length === 0) {
-      const allOrdersInRange = await OrderModel.find({
-        orderStatus: { $in: ['Delivered', 'Partially Returned', 'Returned'] },
-        createdAt: { $gte: start, $lte: end }
-      }).populate('items.productId');
-
-      (allOrdersInRange || []).forEach(order => {
-        let sellerItemsInOrder = (order.items || []).filter(item => {
-          const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerId.toString();
-          const matchesDirectSellerId = item.sellerId && item.sellerId.toString() === sellerId.toString();
-          const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerId.toString();
-          const matchesName = item.sellerName && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
-          return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName;
-        });
-        if (sellerItemsInOrder.length > 0) {
-          finalOrderIds.push(order._id);
-          finalOrders.push(order);
-          sellerItemsInOrder.forEach(item => {
-            if (item.returnStatus !== 'Returned to Seller') {
-              const qty = Number(item.quantity) || 1;
-              const itemCommission = Number(item.totalCommission) || ((Number(item.unitCommission) || 0) * qty) || 0;
-              const itemSellerPrice = (Number(item.sellerUnitPrice) || Number(item.normalPrice) || Number(item.price) || 0) * qty;
-              finalTotalAmount += itemSellerPrice;
-              finalTotalCommission += itemCommission;
-            }
-          });
-        }
-      });
-    }
+    // Calculate actual order totals directly from database records (do not trust client)
+    let finalTotalAmount = 0;
+    let finalTotalCommission = 0;
+    sellerItemsInOrder.forEach(item => {
+      if (item.returnStatus !== 'Returned to Seller') {
+        const qty = Number(item.quantity) || 1;
+        const itemCommission = Number(item.totalCommission) || ((Number(item.unitCommission) || 0) * qty) || 0;
+        const itemSellerPrice = (Number(item.sellerUnitPrice) || Number(item.normalPrice) || Number(item.price) || 0) * qty;
+        finalTotalAmount += itemSellerPrice;
+        finalTotalCommission += itemCommission;
+      }
+    });
 
     const roundedTotalAmount = round2(finalTotalAmount);
     const roundedTotalCommission = round2(finalTotalCommission);
     const roundedNetAmount = round2(finalTotalAmount);
 
-    // Create Invoice Record
+    // Create Invoice Record linked directly to the selected order
     const newInvoice = new InvoiceModel({
       sellerId: sellerId,
       invoiceNumber: trimmedInvoiceNumber,
@@ -468,8 +452,11 @@ router.post('/generate', protect, (req, res, next) => {
       totalAmount: roundedTotalAmount,
       totalCommission: roundedTotalCommission,
       netAmount: roundedNetAmount,
-      orderCount: finalOrderIds.length,
-      orders: finalOrderIds,
+      orderCount: 1,
+      orders: [targetOrder._id],
+      orderId: targetOrder._id,
+      orderNumber: targetOrder.orderNumber || null,
+      orderRef: targetOrder.orderRef || null,
       status: 'Pending',
       hasInvoiceImage: uploadedFiles.length > 0,
       imageIds: [],
@@ -523,7 +510,7 @@ router.post('/generate', protect, (req, res, next) => {
       const pdfBuffer = await generateSellerInvoicePDF({
         invoice: newInvoice,
         seller,
-        orders: finalOrders,
+        orders: [targetOrder],
         images: savedImageDocs.map(img => ({
           data: img.data || img.imageData,
           mimeType: img.mimeType,
@@ -538,12 +525,12 @@ router.post('/generate', protect, (req, res, next) => {
         html: `
           <h3>New Invoice Generated</h3>
           <p><strong>Seller:</strong> ${seller.businessName || seller.name}</p>
-          <p><strong>Invoice Number:</strong> ${trimmedInvoiceNumber}</p>
+          <p><strong>Invoice / Order ID:</strong> #${trimmedInvoiceNumber}</p>
           <p><strong>Date Range:</strong> ${start.toDateString()} to ${end.toDateString()}</p>
           <p><strong>Total Amount:</strong> ₹${roundedTotalAmount}</p>
           <p><strong>Total Commission:</strong> ₹${roundedTotalCommission}</p>
           <p><strong>Net Payable:</strong> ₹${roundedNetAmount}</p>
-          <p><strong>Total Orders:</strong> ${finalOrderIds.length}</p>
+          <p><strong>Order ID:</strong> #${humanOrderId}</p>
           <p><strong>Attached Images:</strong> ${uploadedFiles.length} file(s)</p>
         `,
         attachments: [
@@ -640,21 +627,57 @@ router.post('/generate-batch', protect, (req, res, next) => {
     const batchNumbers = new Set();
     for (let i = 0; i < invoicesMetadata.length; i++) {
       const item = invoicesMetadata[i];
-      const trimmed = (item.invoiceNumber || '').toString().trim();
-      if (!trimmed) {
-        return res.status(400).json({ message: `Invoice #${i + 1} has an empty invoice number.` });
+      const reqOrderId = item.orderId || item.orderNumber || item.invoiceNumber;
+      if (!reqOrderId) {
+        return res.status(400).json({ message: `Entry #${i + 1} has no Order ID specified.` });
       }
-      if (batchNumbers.has(trimmed)) {
-        return res.status(400).json({ message: `Duplicate invoice number "${trimmed}" within this submission.` });
+
+      const isObjectId = mongoose.Types.ObjectId.isValid(reqOrderId);
+      const parsedOrderNum = parseInt(reqOrderId, 10);
+      const orderQuery = {
+        $or: [
+          ...(isObjectId ? [{ _id: reqOrderId }] : []),
+          ...(Number.isInteger(parsedOrderNum) ? [{ orderNumber: parsedOrderNum }] : []),
+          { orderId: reqOrderId },
+          { orderRef: reqOrderId }
+        ]
+      };
+
+      const targetOrder = await OrderModel.findOne(orderQuery).populate('userId', 'name email phone role businessName');
+      if (!targetOrder) {
+        return res.status(404).json({ message: `Order for entry #${i + 1} was not found.` });
       }
-      batchNumbers.add(trimmed);
+
+      // Check seller ownership
+      const sellerIdStr = sellerId.toString();
+      const sellerItems = (targetOrder.items || []).filter(it => {
+        const matchesSellerObj = it.seller && it.seller.sellerId && it.seller.sellerId.toString() === sellerIdStr;
+        const matchesDirectSellerId = it.sellerId && it.sellerId.toString() === sellerIdStr;
+        const matchesProductRef = it.productId && it.productId.sellerId && it.productId.sellerId.toString() === sellerIdStr;
+        const matchesName = it.sellerName && seller.name && it.sellerName.toLowerCase() === seller.name.toLowerCase();
+        const matchesStore = it.sellerName && seller.storeName && it.sellerName.toLowerCase() === seller.storeName.toLowerCase();
+        const matchesBusiness = it.sellerName && seller.businessName && it.sellerName.toLowerCase() === seller.businessName.toLowerCase();
+        return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName || matchesStore || matchesBusiness;
+      });
+
+      if (sellerItems.length === 0) {
+        return res.status(403).json({ message: `Order #${reqOrderId} does not belong to this seller.` });
+      }
+
+      const humanOrderId = targetOrder.orderNumber 
+        ? String(targetOrder.orderNumber).padStart(5, '0') 
+        : (targetOrder.orderId || targetOrder._id.toString().slice(-6).toUpperCase());
+      const trimmedInvNum = humanOrderId;
+      const numSeq = targetOrder.orderNumber || parseInt(humanOrderId, 10) || (i + 1);
+
+      if (batchNumbers.has(trimmedInvNum)) {
+        return res.status(400).json({ message: `Duplicate Order #${trimmedInvNum} within this submission.` });
+      }
+      batchNumbers.add(trimmedInvNum);
 
       const itemFiles = filesByInvoiceIndex[i] || [];
-      if (itemFiles.length === 0) {
-        return res.status(400).json({ message: `Invoice #${trimmed} must have at least 1 image uploaded.` });
-      }
       if (itemFiles.length > 5) {
-        return res.status(400).json({ message: `Invoice #${trimmed} exceeds the maximum of 5 images.` });
+        return res.status(400).json({ message: `Order #${trimmedInvNum} exceeds the maximum of 5 images.` });
       }
     }
 
@@ -675,55 +698,53 @@ router.post('/generate-batch', protect, (req, res, next) => {
 
     for (let i = 0; i < invoicesMetadata.length; i++) {
       const item = invoicesMetadata[i];
-      const trimmedInvNum = (item.invoiceNumber || '').toString().trim();
-      const numSeq = /^\d+$/.test(trimmedInvNum) ? parseInt(trimmedInvNum, 10) : i + 1;
+      const reqOrderId = item.orderId || item.orderNumber || item.invoiceNumber;
+      const isObjectId = mongoose.Types.ObjectId.isValid(reqOrderId);
+      const parsedOrderNum = parseInt(reqOrderId, 10);
+      const orderQuery = {
+        $or: [
+          ...(isObjectId ? [{ _id: reqOrderId }] : []),
+          ...(Number.isInteger(parsedOrderNum) ? [{ orderNumber: parsedOrderNum }] : []),
+          { orderId: reqOrderId },
+          { orderRef: reqOrderId }
+        ]
+      };
+
+      const targetOrder = await OrderModel.findOne(orderQuery).populate('userId', 'name email phone role businessName');
+      const sellerIdStr = sellerId.toString();
+      const sellerItems = (targetOrder.items || []).filter(it => {
+        const matchesSellerObj = it.seller && it.seller.sellerId && it.seller.sellerId.toString() === sellerIdStr;
+        const matchesDirectSellerId = it.sellerId && it.sellerId.toString() === sellerIdStr;
+        const matchesProductRef = it.productId && it.productId.sellerId && it.productId.sellerId.toString() === sellerIdStr;
+        const matchesName = it.sellerName && seller.name && it.sellerName.toLowerCase() === seller.name.toLowerCase();
+        const matchesStore = it.sellerName && seller.storeName && it.sellerName.toLowerCase() === seller.storeName.toLowerCase();
+        const matchesBusiness = it.sellerName && seller.businessName && it.sellerName.toLowerCase() === seller.businessName.toLowerCase();
+        return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName || matchesStore || matchesBusiness;
+      });
+
+      const humanOrderId = targetOrder.orderNumber 
+        ? String(targetOrder.orderNumber).padStart(5, '0') 
+        : (targetOrder.orderId || targetOrder._id.toString().slice(-6).toUpperCase());
+      const trimmedInvNum = humanOrderId;
+      const numSeq = targetOrder.orderNumber || parseInt(humanOrderId, 10) || (i + 1);
+
       const start = new Date(item.startDate);
       const end = new Date(item.endDate);
       end.setHours(23, 59, 59, 999);
 
       const itemFiles = filesByInvoiceIndex[i] || [];
 
-      const {
-        orderIds,
-        validOrders,
-        totalAmount,
-        totalCommission
-      } = await calculateSellerOrdersForRange({ OrderModel, InvoiceModel, sellerId, seller, start, end });
-
-      let finalOrderIds = orderIds;
-      let finalOrders = validOrders;
-      let finalTotalAmount = totalAmount;
-      let finalTotalCommission = totalCommission;
-
-      if (finalOrderIds.length === 0) {
-        const allOrdersInRange = await OrderModel.find({
-          orderStatus: { $in: ['Delivered', 'Partially Returned', 'Returned'] },
-          createdAt: { $gte: start, $lte: end }
-        }).populate('items.productId');
-
-        (allOrdersInRange || []).forEach(order => {
-          let sellerItemsInOrder = (order.items || []).filter(it => {
-            const matchesSellerObj = it.seller && it.seller.sellerId && it.seller.sellerId.toString() === sellerId.toString();
-            const matchesDirectSellerId = it.sellerId && it.sellerId.toString() === sellerId.toString();
-            const matchesProductRef = it.productId && it.productId.sellerId && it.productId.sellerId.toString() === sellerId.toString();
-            const matchesName = it.sellerName && seller.name && it.sellerName.toLowerCase() === seller.name.toLowerCase();
-            return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName;
-          });
-          if (sellerItemsInOrder.length > 0) {
-            finalOrderIds.push(order._id);
-            finalOrders.push(order);
-            sellerItemsInOrder.forEach(it => {
-              if (it.returnStatus !== 'Returned to Seller') {
-                const qty = Number(it.quantity) || 1;
-                const itemCommission = Number(it.totalCommission) || ((Number(it.unitCommission) || 0) * qty) || 0;
-                const itemSellerPrice = (Number(it.sellerUnitPrice) || Number(it.normalPrice) || Number(it.price) || 0) * qty;
-                finalTotalAmount += itemSellerPrice;
-                finalTotalCommission += itemCommission;
-              }
-            });
-          }
-        });
-      }
+      let finalTotalAmount = 0;
+      let finalTotalCommission = 0;
+      sellerItems.forEach(it => {
+        if (it.returnStatus !== 'Returned to Seller') {
+          const qty = Number(it.quantity) || 1;
+          const itemCommission = Number(it.totalCommission) || ((Number(it.unitCommission) || 0) * qty) || 0;
+          const itemSellerPrice = (Number(it.sellerUnitPrice) || Number(it.normalPrice) || Number(it.price) || 0) * qty;
+          finalTotalAmount += itemSellerPrice;
+          finalTotalCommission += itemCommission;
+        }
+      });
 
       const roundedTotalAmount = round2(finalTotalAmount);
       const roundedTotalCommission = round2(finalTotalCommission);
@@ -738,8 +759,11 @@ router.post('/generate-batch', protect, (req, res, next) => {
         totalAmount: roundedTotalAmount,
         totalCommission: roundedTotalCommission,
         netAmount: roundedNetAmount,
-        orderCount: finalOrderIds.length,
-        orders: finalOrderIds,
+        orderCount: 1,
+        orders: [targetOrder._id],
+        orderId: targetOrder._id,
+        orderNumber: targetOrder.orderNumber || null,
+        orderRef: targetOrder.orderRef || null,
         status: 'Pending',
         hasInvoiceImage: itemFiles.length > 0,
         imageIds: [],
