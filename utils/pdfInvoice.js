@@ -113,7 +113,9 @@ const generateSellerInvoicePDF = async ({
 
       const sellerIdStr = invoice.sellerId ? (invoice.sellerId._id ? invoice.sellerId._id.toString() : invoice.sellerId.toString()) : '';
       const sellerBusiness = seller ? (seller.businessName || seller.storeName || seller.name || 'Seller') : 'Seller';
-      const invoiceNumStr = invoice.invoiceNumber || (invoice._id ? invoice._id.toString().substring(0, 8).toUpperCase() : 'INV-001');
+      const invoiceNumStr = invoice.orderNumber
+        ? String(invoice.orderNumber).padStart(5, '0')
+        : (invoice.invoiceNumber || (invoice._id ? invoice._id.toString().substring(0, 8).toUpperCase() : 'INV-001'));
       const generatedDateStr = new Date(invoice.createdAt || Date.now()).toLocaleDateString('en-IN', {
         day: '2-digit', month: 'short', year: 'numeric'
       });
@@ -195,7 +197,7 @@ const generateSellerInvoicePDF = async ({
 
       const cellWidth = CONTENT_WIDTH / 4;
       const metaLabels = [
-        { label: 'INVOICE NUMBER', val: `#${invoiceNumStr}` },
+        { label: 'ORDER / INVOICE REFERENCE', val: `#${invoiceNumStr}` },
         { label: 'BILLING PERIOD', val: `${startDateStr} - ${endDateStr}` },
         { label: 'SETTLEMENT STATUS', val: (invoice.status || 'Pending').toUpperCase() },
         { label: 'TOTAL ORDERS', val: `${invoice.orderCount || orders.length || 0} Orders` }
@@ -218,7 +220,9 @@ const generateSellerInvoicePDF = async ({
       const tableRows = [];
 
       orders.forEach(order => {
-        const orderIdShort = order.orderId || (order._id ? order._id.toString().slice(-6).toUpperCase() : 'ORD');
+        const orderIdShort = order.orderNumber
+          ? String(order.orderNumber).padStart(5, '0')
+          : (order.orderId || order.orderRef || (order._id ? order._id.toString().slice(-6).toUpperCase() : 'ORD'));
         const orderDateStr = new Date(order.createdAt || Date.now()).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
         const customerName = order.userId?.name || 'Customer';
 
