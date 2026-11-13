@@ -816,12 +816,6 @@ router.post('/', protect, upload.fields([{ name: 'image', maxCount: 1 }, { name:
       priceTiers: parsedPriceTiers
     }, comms);
 
-    if (pricingPayload.isCompatible === false) {
-      return res.status(400).json({
-        message: pricingPayload.validationMessage || 'Incompatible measurement units for commission calculation.'
-      });
-    }
-
     let isProductVisible = true;
     if (sellerId) {
       try {
@@ -1497,13 +1491,6 @@ router.put('/:id', protect, async (req, res) => {
     }
 
     const updatedPayload = processProductPricing(pricingInput, comms);
-
-    if (updatedPayload.isCompatible === false) {
-      return res.status(400).json({
-        message: updatedPayload.validationMessage || 'Incompatible measurement units for commission calculation.'
-      });
-    }
-
     if (!updatedPayload.subCategoryId || updatedPayload.subCategoryId === '' || updatedPayload.subCategoryId === 'null' || updatedPayload.subCategoryId === 'undefined') {
       updatedPayload.subCategoryId = null;
     }
