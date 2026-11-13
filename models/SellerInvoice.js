@@ -106,5 +106,6 @@ const sellerInvoiceSchema = new mongoose.Schema({
 
 // Prevent duplicate invoice number for the same seller
 sellerInvoiceSchema.index({ sellerId: 1, invoiceNumber: 1 }, { unique: true });
+sellerInvoiceSchema.index({ sellerId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('SellerInvoice', sellerInvoiceSchema);

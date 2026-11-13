@@ -89,6 +89,7 @@ app.use('/api/reviews', require('./routes/reviews'));
 app.use('/api/deliveries', require('./routes/deliveries'));
 app.use('/api/deliveryslots', require('./routes/deliverySlots'));
 app.use('/api/sellers', require('./routes/sellers'));
+app.use('/api/sellers', require('./routes/sellerHistory'));
 app.use('/api/cash', require('./routes/cash'));
 app.use('/api/cashcollectors', require('./routes/cashCollectors'));
 app.use('/api/contact', require('./routes/contact'));

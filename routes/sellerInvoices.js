@@ -45,6 +45,19 @@ const getModels = (req) => {
   };
 };
 
+const getSellerOrderItems = (order, sellerId) => {
+  const sellerIdStr = sellerId.toString();
+  return (order.items || []).filter(item => {
+    const sellerIds = [item.seller?.sellerId, item.sellerId, item.productId?.sellerId];
+    return sellerIds.some(itemSellerId => itemSellerId && itemSellerId.toString() === sellerIdStr);
+  });
+};
+
+const getOrderDisplayId = (order) => {
+  if (order.orderNumber) return String(order.orderNumber).padStart(5, '0');
+  return order.orderId || order.orderRef || order._id.toString().slice(-6).toUpperCase();
+};
+
 /**
  * Universal helper to find an invoice across active DB, Global DB, and all Tenant DBs.
  * Returns { invoice, models, db }
@@ -249,6 +262,47 @@ router.get('/next-number', protect, async (req, res) => {
   }
 });
 
+// @route   GET /api/seller-invoices/orders
+// @desc    Get orders belonging to the logged-in seller that are not invoiced
+router.get('/orders', protect, async (req, res) => {
+  try {
+    if (req.user?.role !== 'seller') {
+      return res.status(403).json({ message: 'Not authorized to view seller orders' });
+    }
+
+    const sellerId = req.user._id;
+    const { Order: OrderModel, SellerInvoice: InvoiceModel } = getModels(req);
+    const orders = await OrderModel.find({})
+      .select('_id orderNumber orderId orderRef createdAt userId items')
+      .populate('userId', 'name businessName')
+      .populate('items.productId', 'sellerId')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const invoices = await InvoiceModel.find({ sellerId }).select('orders orderId').lean();
+    const invoicedOrderIds = new Set();
+    invoices.forEach(invoice => {
+      if (invoice.orderId) invoicedOrderIds.add(invoice.orderId.toString());
+      (invoice.orders || []).forEach(orderId => invoicedOrderIds.add(orderId.toString()));
+    });
+
+    const sellerOrders = orders
+      .filter(order => getSellerOrderItems(order, sellerId).length > 0 && !invoicedOrderIds.has(order._id.toString()))
+      .map(order => ({
+        _id: order._id,
+        orderNumber: order.orderNumber || null,
+        displayId: getOrderDisplayId(order),
+        createdAt: order.createdAt,
+        customerName: order.userId?.businessName || order.userId?.name || 'Customer'
+      }));
+
+    res.json(sellerOrders);
+  } catch (error) {
+    console.error('Error fetching seller invoice orders:', error);
+    res.status(500).json({ message: error.message || 'Internal server error' });
+  }
+});
+
 /**
  * Helper to calculate un-invoiced orders and totals for a given seller and date range.
  */
@@ -320,7 +374,7 @@ const calculateSellerOrdersForRange = async ({ OrderModel, InvoiceModel, sellerI
 };
 
 // @route   POST /api/seller-invoices/generate
-// @desc    Generate a single invoice (supporting multiple images: 1-5)
+// @desc    Generate a single order-linked invoice with optional images
 router.post('/generate', protect, (req, res, next) => {
   upload.any()(req, res, (err) => {
     if (err) {
@@ -348,10 +402,19 @@ router.post('/generate', protect, (req, res, next) => {
       return res.status(400).json({ message: 'Start date and end date are required' });
     }
 
-    const uploadedFiles = req.files || [];
-    if (!req.admin && uploadedFiles.length === 0) {
-      return res.status(400).json({ message: 'At least one invoice image is required (minimum 1, maximum 5).' });
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return res.status(400).json({ message: 'Start date and end date must be valid dates.' });
     }
+    if (start > end) {
+      return res.status(400).json({ message: 'Start date cannot be after end date.' });
+    }
+    if (req.user?.role === 'seller' && !reqOrderId) {
+      return res.status(400).json({ message: 'Order ID is required.' });
+    }
+
+    const uploadedFiles = req.files || [];
     if (uploadedFiles.length > 5) {
       return res.status(400).json({ message: 'Maximum 5 images allowed per invoice.' });
     }
@@ -363,8 +426,6 @@ router.post('/generate', protect, (req, res, next) => {
       return res.status(404).json({ message: 'Seller not found' });
     }
 
-    const start = new Date(startDate);
-    const end = new Date(endDate);
     end.setHours(23, 59, 59, 999);
 
     let trimmedInvoiceNumber = '';
@@ -376,42 +437,25 @@ router.post('/generate', protect, (req, res, next) => {
     let targetOrder = null;
 
     if (reqOrderId) {
-      // 1. Validate that the selected order exists in MongoDB
-      const isObjectId = mongoose.Types.ObjectId.isValid(reqOrderId);
-      const parsedOrderNum = parseInt(reqOrderId, 10);
-      const orderQuery = {
-        $or: [
-          ...(isObjectId ? [{ _id: reqOrderId }] : []),
-          ...(Number.isInteger(parsedOrderNum) ? [{ orderNumber: parsedOrderNum }] : []),
-          { orderId: reqOrderId },
-          { orderRef: reqOrderId }
-        ]
-      };
+      if (!mongoose.Types.ObjectId.isValid(reqOrderId)) {
+        return res.status(400).json({ message: 'A valid Order ID is required.' });
+      }
 
-      targetOrder = await OrderModel.findOne(orderQuery).populate('userId', 'name email phone role businessName');
+      targetOrder = await OrderModel.findById(reqOrderId)
+        .populate('userId', 'name email phone role businessName')
+        .populate('items.productId');
       if (!targetOrder) {
         return res.status(404).json({ message: 'Selected Order was not found in the database.' });
       }
 
       // 2. Validate that the order belongs to this seller
-      const sellerIdStr = sellerId.toString();
-      const sellerItemsInOrder = (targetOrder.items || []).filter(item => {
-        const matchesSellerObj = item.seller && item.seller.sellerId && item.seller.sellerId.toString() === sellerIdStr;
-        const matchesDirectSellerId = item.sellerId && item.sellerId.toString() === sellerIdStr;
-        const matchesProductRef = item.productId && item.productId.sellerId && item.productId.sellerId.toString() === sellerIdStr;
-        const matchesName = item.sellerName && seller.name && item.sellerName.toLowerCase() === seller.name.toLowerCase();
-        const matchesStore = item.sellerName && seller.storeName && item.sellerName.toLowerCase() === seller.storeName.toLowerCase();
-        const matchesBusiness = item.sellerName && seller.businessName && item.sellerName.toLowerCase() === seller.businessName.toLowerCase();
-        return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName || matchesStore || matchesBusiness;
-      });
+      const sellerItemsInOrder = getSellerOrderItems(targetOrder, sellerId);
 
       if (sellerItemsInOrder.length === 0) {
         return res.status(403).json({ message: 'This order does not belong to your seller account.' });
       }
 
-      const humanOrderId = targetOrder.orderNumber 
-        ? String(targetOrder.orderNumber).padStart(5, '0') 
-        : (targetOrder.orderId || targetOrder._id.toString().slice(-6).toUpperCase());
+      const humanOrderId = getOrderDisplayId(targetOrder);
       trimmedInvoiceNumber = humanOrderId;
       numericInvoiceNumber = targetOrder.orderNumber || parseInt(humanOrderId, 10) || 1;
 
@@ -419,15 +463,13 @@ router.post('/generate', protect, (req, res, next) => {
         sellerId: sellerId,
         $or: [
           { orders: targetOrder._id },
-          { orderId: targetOrder._id },
-          { invoiceNumber: trimmedInvoiceNumber }
-        ],
-        status: { $nin: ['Cancelled', 'Rejected'] }
+          { orderId: targetOrder._id }
+        ]
       });
 
       if (duplicate) {
         return res.status(400).json({ 
-          message: `An invoice (#${duplicate.invoiceNumber}) has already been generated for this Order. Duplicate invoices for the same order are not allowed.` 
+          message: `An invoice for order #${humanOrderId} has already been generated. Duplicate invoices for the same order are not allowed.` 
         });
       }
 
@@ -524,7 +566,7 @@ router.post('/generate', protect, (req, res, next) => {
     }
 
     const { generateSeparateInvoices } = req.body;
-    if (generateSeparateInvoices && finalOrders.length > 0) {
+    if (req.admin && generateSeparateInvoices && finalOrders.length > 0) {
       const createdInvoices = [];
       for (const ord of finalOrders) {
         const humanOrderId = ord.orderNumber 
@@ -600,7 +642,16 @@ router.post('/generate', protect, (req, res, next) => {
       generatedBy: req.user ? req.user._id : sellerId
     });
 
-    await newInvoice.save();
+    try {
+      await newInvoice.save();
+    } catch (error) {
+      if (targetOrder && error.code === 11000) {
+        return res.status(400).json({
+          message: `An invoice for order #${getOrderDisplayId(targetOrder)} has already been generated. Duplicate invoices for the same order are not allowed.`
+        });
+      }
+      throw error;
+    }
 
     // Store raw binary images in MongoDB
     const savedImageDocs = [];
@@ -767,6 +818,7 @@ router.post('/generate-batch', protect, (req, res, next) => {
     });
 
     const batchNumbers = new Set();
+    const batchOrderIds = new Set();
     for (let i = 0; i < invoicesMetadata.length; i++) {
       const item = invoicesMetadata[i];
       const reqOrderId = item.orderId || item.orderNumber || item.invoiceNumber;
@@ -774,7 +826,19 @@ router.post('/generate-batch', protect, (req, res, next) => {
         return res.status(400).json({ message: `Entry #${i + 1} has no Order ID specified.` });
       }
 
+      const start = new Date(item.startDate);
+      const end = new Date(item.endDate);
+      if (!item.startDate || !item.endDate || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+        return res.status(400).json({ message: `Entry #${i + 1} must have valid Start Date and End Date values.` });
+      }
+      if (start > end) {
+        return res.status(400).json({ message: `Entry #${i + 1} Start Date cannot be after End Date.` });
+      }
+
       const isObjectId = mongoose.Types.ObjectId.isValid(reqOrderId);
+      if (req.user?.role === 'seller' && !isObjectId) {
+        return res.status(400).json({ message: `Entry #${i + 1} must use a valid Order ID.` });
+      }
       const parsedOrderNum = parseInt(reqOrderId, 10);
       const orderQuery = {
         $or: [
@@ -785,26 +849,27 @@ router.post('/generate-batch', protect, (req, res, next) => {
         ]
       };
 
-      const targetOrder = await OrderModel.findOne(orderQuery).populate('userId', 'name email phone role businessName');
+      const targetOrderQuery = req.user?.role === 'seller'
+        ? OrderModel.findById(reqOrderId)
+        : OrderModel.findOne(orderQuery);
+      const targetOrder = await targetOrderQuery
+        .populate('userId', 'name email phone role businessName')
+        .populate('items.productId');
       if (!targetOrder) {
         return res.status(404).json({ message: `Order for entry #${i + 1} was not found.` });
       }
 
       // Check seller ownership
-      const sellerIdStr = sellerId.toString();
-      const sellerItems = (targetOrder.items || []).filter(it => {
-        const matchesSellerObj = it.seller && it.seller.sellerId && it.seller.sellerId.toString() === sellerIdStr;
-        const matchesDirectSellerId = it.sellerId && it.sellerId.toString() === sellerIdStr;
-        const matchesProductRef = it.productId && it.productId.sellerId && it.productId.sellerId.toString() === sellerIdStr;
-        const matchesName = it.sellerName && seller.name && it.sellerName.toLowerCase() === seller.name.toLowerCase();
-        const matchesStore = it.sellerName && seller.storeName && it.sellerName.toLowerCase() === seller.storeName.toLowerCase();
-        const matchesBusiness = it.sellerName && seller.businessName && it.sellerName.toLowerCase() === seller.businessName.toLowerCase();
-        return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName || matchesStore || matchesBusiness;
-      });
+      const sellerItems = getSellerOrderItems(targetOrder, sellerId);
 
       if (sellerItems.length === 0) {
         return res.status(403).json({ message: `Order #${reqOrderId} does not belong to this seller.` });
       }
+
+      if (batchOrderIds.has(targetOrder._id.toString())) {
+        return res.status(400).json({ message: `Order #${getOrderDisplayId(targetOrder)} is selected more than once.` });
+      }
+      batchOrderIds.add(targetOrder._id.toString());
 
       const humanOrderId = targetOrder.orderNumber 
         ? String(targetOrder.orderNumber).padStart(5, '0') 
@@ -823,16 +888,19 @@ router.post('/generate-batch', protect, (req, res, next) => {
       }
     }
 
+    const selectedOrderIds = Array.from(batchOrderIds);
     const existingDuplicates = await InvoiceModel.find({
-      sellerId: sellerId,
-      invoiceNumber: { $in: Array.from(batchNumbers) },
-      status: { $nin: ['Cancelled', 'Rejected'] }
+      sellerId,
+      $or: [
+        { orderId: { $in: selectedOrderIds } },
+        { orders: { $in: selectedOrderIds } }
+      ]
     }).select('invoiceNumber');
 
     if (existingDuplicates && existingDuplicates.length > 0) {
-      const dupList = existingDuplicates.map(d => d.invoiceNumber).join(', ');
+      const dupList = existingDuplicates.map(d => `#${d.invoiceNumber}`).join(', ');
       return res.status(400).json({ 
-        message: `Invoice number(s) "${dupList}" have already been used for this seller.` 
+        message: `An invoice has already been generated for order(s) ${dupList}. Duplicate invoices are not allowed.` 
       });
     }
 
@@ -852,17 +920,13 @@ router.post('/generate-batch', protect, (req, res, next) => {
         ]
       };
 
-      const targetOrder = await OrderModel.findOne(orderQuery).populate('userId', 'name email phone role businessName');
-      const sellerIdStr = sellerId.toString();
-      const sellerItems = (targetOrder.items || []).filter(it => {
-        const matchesSellerObj = it.seller && it.seller.sellerId && it.seller.sellerId.toString() === sellerIdStr;
-        const matchesDirectSellerId = it.sellerId && it.sellerId.toString() === sellerIdStr;
-        const matchesProductRef = it.productId && it.productId.sellerId && it.productId.sellerId.toString() === sellerIdStr;
-        const matchesName = it.sellerName && seller.name && it.sellerName.toLowerCase() === seller.name.toLowerCase();
-        const matchesStore = it.sellerName && seller.storeName && it.sellerName.toLowerCase() === seller.storeName.toLowerCase();
-        const matchesBusiness = it.sellerName && seller.businessName && it.sellerName.toLowerCase() === seller.businessName.toLowerCase();
-        return matchesSellerObj || matchesDirectSellerId || matchesProductRef || matchesName || matchesStore || matchesBusiness;
-      });
+      const targetOrderQuery = req.user?.role === 'seller'
+        ? OrderModel.findById(reqOrderId)
+        : OrderModel.findOne(orderQuery);
+      const targetOrder = await targetOrderQuery
+        .populate('userId', 'name email phone role businessName')
+        .populate('items.productId');
+      const sellerItems = getSellerOrderItems(targetOrder, sellerId);
 
       const humanOrderId = targetOrder.orderNumber 
         ? String(targetOrder.orderNumber).padStart(5, '0') 
@@ -955,7 +1019,7 @@ router.post('/generate-batch', protect, (req, res, next) => {
         const pdfBuffer = await generateSellerInvoicePDF({
           invoice: newInvoice,
           seller,
-          orders: finalOrders,
+          orders: [targetOrder],
           images: savedDocs.map(img => ({
             data: img.data || img.imageData,
             mimeType: img.mimeType,
@@ -973,7 +1037,7 @@ router.post('/generate-batch', protect, (req, res, next) => {
             <p><strong>Invoice Number:</strong> ${trimmedInvNum}</p>
             <p><strong>Date Range:</strong> ${start.toDateString()} to ${end.toDateString()}</p>
             <p><strong>Net Payable:</strong> ₹${roundedNetAmount}</p>
-            <p><strong>Total Orders:</strong> ${finalOrderIds.length}</p>
+            <p><strong>Total Orders:</strong> 1</p>
             <p><strong>Attached Images:</strong> ${itemFiles.length} file(s)</p>
           `,
           attachments: [

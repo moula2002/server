@@ -5,6 +5,15 @@ const { protect } = require('../middleware/auth');
 const { getModel } = require('../utils/model_loader');
 const { round2 } = require('../utils/pricing');
 const { generatePaymentReceiptPDF } = require('../utils/pdfPaymentReceipt');
+const { recordSellerHistoryEvent } = require('../utils/sellerHistory');
+
+const getPaymentHistoryActivity = (action, updatedStatus) => {
+  if (['COD_COLLECTED', 'COD_VERIFIED', 'ONLINE_VERIFIED'].includes(action)) return 'Payment Received';
+  if (action === 'COD_NOT_COLLECTED') return 'Payment Pending';
+  if (action.includes('SETTLEMENT_APPROVED')) return 'Settlement Approved';
+  if (action.includes('SETTLEMENT_REJECTED')) return 'Settlement Rejected';
+  return `Payment ${updatedStatus || 'Status Updated'}`;
+};
 
 /**
  * Helper to determine if an order is Cash on Delivery (COD)
@@ -567,6 +576,22 @@ router.put('/cod-orders/:orderId/status', protect, async (req, res) => {
       });
     }
 
+    const sellerIds = [...new Set((order.items || [])
+      .map(item => item.seller?.sellerId || item.sellerId)
+      .filter(Boolean)
+      .map(id => id.toString()))];
+    if (sellerIds.length > 1) {
+      await recordSellerHistoryEvent(req, order, {
+        sellerIds: sellerIds.filter(id => id !== primarySellerId?.toString()),
+        activityType: 'payments',
+        activity: getPaymentHistoryActivity(auditAction, updatedStatus || order.codCollectionStatus),
+        fromStatus: prevCollectionStatus,
+        status: updatedStatus || order.codCollectionStatus,
+        occurredAt: order.updatedAt,
+        description: `${order.paymentMethod || 'COD'} payment status changed to ${updatedStatus || order.codCollectionStatus}`
+      });
+    }
+
     res.json({
       message: 'COD order status updated successfully',
       order
@@ -755,6 +780,22 @@ router.put('/online-orders/:orderId/status', protect, async (req, res) => {
         adminId: adminInfo.id,
         adminName: adminInfo.name,
         remarks: remarks || order.onlineRemarks || ''
+      });
+    }
+
+    const sellerIds = [...new Set((order.items || [])
+      .map(item => item.seller?.sellerId || item.sellerId)
+      .filter(Boolean)
+      .map(id => id.toString()))];
+    if (sellerIds.length > 1) {
+      await recordSellerHistoryEvent(req, order, {
+        sellerIds: sellerIds.filter(id => id !== primarySellerId?.toString()),
+        activityType: 'payments',
+        activity: getPaymentHistoryActivity(auditAction, updatedStatus || order.onlinePaymentStatus),
+        fromStatus: prevVerificationStatus,
+        status: updatedStatus || order.onlinePaymentStatus,
+        occurredAt: order.updatedAt,
+        description: `${order.paymentMethod || 'Online'} payment status changed to ${updatedStatus || order.onlinePaymentStatus}`
       });
     }
 

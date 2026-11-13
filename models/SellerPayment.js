@@ -4,7 +4,8 @@ const sellerPaymentSchema = new mongoose.Schema({
   sellerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Seller',
-    required: true
+    required: true,
+    index: true
   },
   amount: {
     type: Number,

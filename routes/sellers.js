@@ -530,12 +530,14 @@ router.get('/pickups', protect, async (req, res) => {
       'orderStatus': { $in: ['Pending', 'Packed', 'Confirmed', 'Accepted', 'Processing', 'Assigned', 'Out for Delivery'] }
     })
     .populate('userId', 'name email phone')
-    .populate('driverId', 'name phone')
-    .sort({ createdAt: -1 });
+    .populate('driverId', 'name phone vehicleNo vehicleDetails')
+    .sort({ createdAt: -1 })
+    .lean();
 
     const modifiedOrders = orders.map(order => {
-      const orderObj = order.toObject();
-      const sellerPickup = orderObj.sellerPickups?.find(sp => sp.sellerId.toString() === sellerId.toString());
+      const orderObj = order;
+      const originalOrderStatus = orderObj.orderStatus;
+      const sellerPickup = orderObj.sellerPickups?.find(sp => sp.sellerId?.toString() === sellerId.toString());
       if (sellerPickup) {
         orderObj.pickupCode = sellerPickup.pickupCode;
         orderObj.orderStatus = sellerPickup.status;
@@ -543,6 +545,88 @@ router.get('/pickups', protect, async (req, res) => {
       } else {
         orderObj.status = orderObj.orderStatus;
       }
+
+      const shippingAddress = orderObj.shippingAddress || {};
+      const customer = orderObj.userId || {};
+      const driver = orderObj.driverId || null;
+      const items = (orderObj.items || []).map(item => {
+        const quantity = Number(item.quantity) || 0;
+        const unitPrice = Number(item.price ?? item.unitCustomerPrice) || 0;
+        const savedAmount = Number(
+          item.finalCustomerAmount ??
+          item.finalCustomerPrice
+        );
+        const amount = Number.isFinite(savedAmount) && savedAmount > 0
+          ? savedAmount
+          : unitPrice * quantity;
+
+        return {
+          ...item,
+          name: item.name || item.product?.name || '',
+          price: unitPrice,
+          amount,
+          unitLabel: [
+            item.variantSize,
+            item.productUnitSize && item.productUnitSize !== 1
+              ? `${item.productUnitSize} ${item.measurementBasis || item.measurementUnit || ''}`.trim()
+              : null,
+            item.packagingType || item.unit || item.sellingUnit
+          ].filter(Boolean).join(' · ')
+        };
+      });
+
+      const savedTaxAmount = Number(orderObj.totalGstAmount);
+      const taxAmount = Number.isFinite(savedTaxAmount) && savedTaxAmount > 0
+        ? savedTaxAmount
+        : items.reduce((sum, item) => {
+          const itemTax = Number(item.gstAmount) || Number(item.totalGst) || 0;
+          return sum + itemTax;
+        }, 0);
+      const itemAmounts = items.reduce((sum, item) => sum + item.amount, 0);
+      const totalAmount = Number(orderObj.totalAmount ?? itemAmounts);
+      const itemSubtotals = items.reduce((sum, item) => {
+        const lineAmount = Number(item.amount) || 0;
+        const lineTax = Number(item.gstAmount) || Number(item.totalGst) || 0;
+        return sum + Number(item.subtotal ?? (lineAmount - lineTax));
+      }, 0);
+      const subtotal = orderObj.totalAmount !== undefined
+        ? Math.max(0, totalAmount - taxAmount)
+        : itemSubtotals;
+      const assignmentStatus = driver
+        ? 'Assigned'
+        : originalOrderStatus === 'Assigned' || orderObj.orderStatus === 'Assigned'
+          ? 'Assignment Pending'
+          : 'Not Assigned';
+      const pickupReference = sellerPickup?._id || orderObj._id;
+
+      orderObj.pickupId = pickupReference?.toString() || '';
+      orderObj.orderId = orderObj._id?.toString() || '';
+      orderObj.customer = {
+        name: shippingAddress.name?.trim() || customer.name?.trim() || '',
+        phone: shippingAddress.phone?.trim() || customer.phone?.trim() || '',
+        address: shippingAddress.address || '',
+        city: shippingAddress.city || '',
+        state: shippingAddress.state || '',
+        pincode: shippingAddress.pincode || ''
+      };
+      orderObj.address = [
+        orderObj.customer.address,
+        orderObj.customer.city,
+        orderObj.customer.state,
+        orderObj.customer.pincode
+      ].filter(Boolean).join(', ');
+      orderObj.driver = driver;
+      orderObj.assignmentStatus = assignmentStatus;
+      orderObj.scheduledDate = sellerPickup?.scheduledDate ||
+        sellerPickup?.pickupDate ||
+        orderObj.scheduledDate ||
+        orderObj.pickupDate ||
+        null;
+      orderObj.items = items;
+      orderObj.subtotal = subtotal;
+      orderObj.taxAmount = taxAmount;
+      orderObj.totalAmount = totalAmount;
+
       return orderObj;
     });
 
