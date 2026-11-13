@@ -1120,7 +1120,12 @@ function calculatePricingBreakdown({
   let sPricePerBaseUnit = 0;
   let sPricePerProductUnit = 0;
 
-  if (sellerPricePerProductUnit !== undefined && sellerPricePerBaseUnit !== undefined && Number(sellerPricePerProductUnit) > 0 && Number(sellerPricePerBaseUnit) > 0) {
+  if (
+    sellerPricePerProductUnit !== undefined &&
+    sellerPricePerBaseUnit !== undefined &&
+    Number(sellerPricePerProductUnit) > 0 &&
+    Number(sellerPricePerBaseUnit) > 0
+  ) {
     sPricePerProductUnit = round2(sellerPricePerProductUnit);
     sPricePerBaseUnit = round2(sellerPricePerBaseUnit);
   } else {
@@ -1128,7 +1133,12 @@ function calculatePricingBreakdown({
     // Seller's base price is NOT multiplied by unit size.
     // Total Admin Commission = unitSize * adminCommissionPerUnit
     // Customer Total Price = basePrice + totalCommission
-    const rawVal = sellerPricePerProductUnit !== undefined ? sellerPricePerProductUnit : (sellerPricePerBaseUnit !== undefined ? sellerPricePerBaseUnit : (sellerPrice !== undefined ? sellerPrice : sellerUnitPrice));
+    const rawVal = sellerPricePerProductUnit !== undefined
+      ? sellerPricePerProductUnit
+      : (sellerPricePerBaseUnit !== undefined
+          ? sellerPricePerBaseUnit
+          : (sellerPrice !== undefined ? sellerPrice : sellerUnitPrice));
+
     const enteredBasePrice = parseFloat(rawVal) || 0;
     sPricePerProductUnit = round2(enteredBasePrice);
     sPricePerBaseUnit = uSize > 0 ? round2(enteredBasePrice / uSize) : round2(enteredBasePrice);
