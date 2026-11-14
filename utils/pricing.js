@@ -139,9 +139,9 @@ function resolveMeasurementBasis(unit, measurementUnit, unitSizeStr) {
  */
 function checkCommissionCompatibility(productBasis, commissionRuleOrUnit) {
   if (!commissionRuleOrUnit) return { isCompatible: true, conversionFactor: 1 };
-  
-  const commUnit = typeof commissionRuleOrUnit === 'object' 
-    ? normalizeUnit(commissionRuleOrUnit.unit) 
+
+  const commUnit = typeof commissionRuleOrUnit === 'object'
+    ? normalizeUnit(commissionRuleOrUnit.unit)
     : normalizeUnit(commissionRuleOrUnit);
 
   const commType = typeof commissionRuleOrUnit === 'object' ? commissionRuleOrUnit.commissionType : 'flat';
@@ -499,8 +499,8 @@ function processProductPricing(payload, commissions = []) {
     const directComm = payload.adminCommissionPerBaseUnit !== undefined && payload.adminCommissionPerBaseUnit !== null
       ? payload.adminCommissionPerBaseUnit
       : (payload.commissionRate !== undefined && payload.commissionRate !== null
-          ? payload.commissionRate
-          : payload.commissionValue);
+        ? payload.commissionRate
+        : payload.commissionValue);
     if (directComm !== undefined && directComm !== null && directComm !== '') {
       commissionValue = parseFloat(directComm) || 0;
       commissionType = payload.commissionType === 'percentage' ? 'percentage' : 'flat';
@@ -555,9 +555,9 @@ function processProductPricing(payload, commissions = []) {
       ? parseFloat(v.sellerPrice) || 0
       : (parseFloat(v.price) || 0);
 
-    // If variant matches the primary package (same packaging and unit size), ensure exact synchronization with primary pricing
+    // Only fallback to primary pricing if variant seller price is not explicitly set
     const isPrimaryPackageMatch = (vUnitSize === unitSize && vPkgType.toUpperCase() === packagingType.toUpperCase());
-    if (isPrimaryPackageMatch && primaryPricing.sellerPricePerProductUnit > 0) {
+    if (vSellerPrice <= 0 && isPrimaryPackageMatch && primaryPricing.sellerPricePerProductUnit > 0) {
       if (priceBasis === 'per_unit' && primaryPricing.sellerPricePerBaseUnit > 0) {
         vSellerPrice = vPriceBasis === 'per_unit' ? primaryPricing.sellerPricePerBaseUnit : primaryPricing.sellerPricePerProductUnit;
       } else {
@@ -614,9 +614,9 @@ function processProductPricing(payload, commissions = []) {
       ? parseFloat(v.sellerPrice) || 0
       : (parseFloat(v.price) || 0);
 
-    // If variant matches the primary package (same packaging and unit size), ensure exact synchronization with primary pricing
+    // Only fallback to primary pricing if variant seller price is not explicitly set
     const isPrimaryPackageMatch = (vUnitSize === unitSize && vPkgType.toUpperCase() === packagingType.toUpperCase());
-    if (isPrimaryPackageMatch && primaryB2bPricing.sellerPricePerProductUnit > 0) {
+    if (vSellerPrice <= 0 && isPrimaryPackageMatch && primaryB2bPricing.sellerPricePerProductUnit > 0) {
       if (priceBasis === 'per_unit' && primaryB2bPricing.sellerPricePerBaseUnit > 0) {
         vSellerPrice = vPriceBasis === 'per_unit' ? primaryB2bPricing.sellerPricePerBaseUnit : primaryB2bPricing.sellerPricePerProductUnit;
       } else {
@@ -852,8 +852,9 @@ function applyCommission(product, commissions = [], pincode = null) {
       vSellerPrice = Number(v.price);
     }
 
+    // Only fallback to primary pricing if variant seller price is not explicitly set
     const isPrimaryPackageMatch = (vUnitSize === unitSize && vPkgType.toUpperCase() === packagingType.toUpperCase());
-    if (isPrimaryPackageMatch && primaryPricing.sellerPricePerProductUnit > 0) {
+    if (vSellerPrice <= 0 && isPrimaryPackageMatch && primaryPricing.sellerPricePerProductUnit > 0) {
       if (priceBasis === 'per_unit' && primaryPricing.sellerPricePerBaseUnit > 0) {
         vSellerPrice = vPriceBasis === 'per_unit' ? primaryPricing.sellerPricePerBaseUnit : primaryPricing.sellerPricePerProductUnit;
       } else {
@@ -918,8 +919,9 @@ function applyCommission(product, commissions = [], pincode = null) {
       vSellerPrice = Number(v.price);
     }
 
+    // Only fallback to primary pricing if variant seller price is not explicitly set
     const isPrimaryPackageMatch = (vUnitSize === unitSize && vPkgType.toUpperCase() === packagingType.toUpperCase());
-    if (isPrimaryPackageMatch && primaryB2bPricing.sellerPricePerProductUnit > 0) {
+    if (vSellerPrice <= 0 && isPrimaryPackageMatch && primaryB2bPricing.sellerPricePerProductUnit > 0) {
       if (priceBasis === 'per_unit' && primaryB2bPricing.sellerPricePerBaseUnit > 0) {
         vSellerPrice = vPriceBasis === 'per_unit' ? primaryB2bPricing.sellerPricePerBaseUnit : primaryB2bPricing.sellerPricePerProductUnit;
       } else {
