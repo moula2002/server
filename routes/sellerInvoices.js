@@ -590,6 +590,7 @@ router.post('/generate', protect, (req, res, next) => {
           });
           const newSepInvoice = await InvoiceModel.create({
             sellerId,
+            sellerName: seller.businessName || seller.storeName || seller.name,
             invoiceNumber: trimmedInvoiceNum,
             invoiceSequenceNumber: ord.orderNumber || 1,
             startDate: ord.createdAt,
@@ -624,6 +625,7 @@ router.post('/generate', protect, (req, res, next) => {
     // Create Invoice Record linked directly to the selected order or date range
     const newInvoice = new InvoiceModel({
       sellerId: sellerId,
+      sellerName: seller.businessName || seller.storeName || seller.name,
       invoiceNumber: trimmedInvoiceNumber,
       invoiceSequenceNumber: numericInvoiceNumber,
       startDate: start,
@@ -958,6 +960,7 @@ router.post('/generate-batch', protect, (req, res, next) => {
 
       const newInvoice = new InvoiceModel({
         sellerId: sellerId,
+        sellerName: seller.businessName || seller.storeName || seller.name,
         invoiceNumber: trimmedInvNum,
         invoiceSequenceNumber: numSeq,
         startDate: start,
@@ -1071,6 +1074,11 @@ router.post('/generate-batch', protect, (req, res, next) => {
     });
   } catch (error) {
     console.error('Error generating batch invoices:', error);
+    if (error.code === 11000) {
+      return res.status(409).json({
+        message: 'An invoice for one or more selected orders has already been generated.'
+      });
+    }
     res.status(500).json({ message: error.message || 'Internal server error' });
   }
 });
@@ -1313,7 +1321,14 @@ router.get('/admin/all', protect, async (req, res) => {
         'SellerInvoice', 
         req, 
         {}, 
-        [{ path: 'sellerId', select: 'businessName name email storeName phone' }], 
+        [
+          { path: 'sellerId', select: 'businessName name email storeName phone' },
+          {
+            path: 'orderId',
+            select: 'orderNumber orderId orderRef userId shippingAddress',
+            populate: { path: 'userId', select: 'name businessName companyName email' }
+          }
+        ], 
         '-invoiceImage.data', 
         { createdAt: -1 }
       );
@@ -1323,6 +1338,11 @@ router.get('/admin/all', protect, async (req, res) => {
       const invoices = await InvoiceModel.find()
         .select('-invoiceImage.data')
         .populate('sellerId', 'businessName name email storeName phone')
+        .populate({
+          path: 'orderId',
+          select: 'orderNumber orderId orderRef userId shippingAddress',
+          populate: { path: 'userId', select: 'name businessName companyName email' }
+        })
         .sort({ createdAt: -1 });
       return res.json(invoices || []);
     }
