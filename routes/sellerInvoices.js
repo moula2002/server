@@ -1315,9 +1315,10 @@ router.get('/admin/all', protect, async (req, res) => {
       return res.status(403).json({ message: 'Admin only' });
     }
     
+    let invoices = [];
     if (!req.locationId) {
       const { aggregateGET } = require('../utils/aggregator');
-      const invoices = await aggregateGET(
+      invoices = await aggregateGET(
         'SellerInvoice', 
         req, 
         {}, 
@@ -1326,26 +1327,82 @@ router.get('/admin/all', protect, async (req, res) => {
           {
             path: 'orderId',
             select: 'orderNumber orderId orderRef userId shippingAddress',
-            populate: { path: 'userId', select: 'name businessName companyName email' }
+            populate: { path: 'userId', select: 'name businessName companyName email role' }
+          },
+          {
+            path: 'orders',
+            select: 'orderNumber orderId orderRef userId shippingAddress items',
+            populate: { path: 'userId', select: 'name businessName companyName email role' }
           }
         ], 
         '-invoiceImage.data', 
         { createdAt: -1 }
       );
-      return res.json(invoices || []);
     } else {
       const { SellerInvoice: InvoiceModel } = getModels(req);
-      const invoices = await InvoiceModel.find()
+      invoices = await InvoiceModel.find()
         .select('-invoiceImage.data')
         .populate('sellerId', 'businessName name email storeName phone')
         .populate({
           path: 'orderId',
           select: 'orderNumber orderId orderRef userId shippingAddress',
-          populate: { path: 'userId', select: 'name businessName companyName email' }
+          populate: { path: 'userId', select: 'name businessName companyName email role' }
+        })
+        .populate({
+          path: 'orders',
+          select: 'orderNumber orderId orderRef userId shippingAddress items',
+          populate: { path: 'userId', select: 'name businessName companyName email role' }
         })
         .sort({ createdAt: -1 });
-      return res.json(invoices || []);
     }
+
+    // Enrich with image metadata count and list
+    const { InvoiceImage: InvoiceImageModel } = getModels(req);
+    const invoiceList = Array.isArray(invoices) ? invoices : [];
+    if (invoiceList.length > 0 && InvoiceImageModel) {
+      const invoiceIds = invoiceList.map(i => i._id);
+      let allImages = [];
+      try {
+        allImages = await InvoiceImageModel.find({ invoiceId: { $in: invoiceIds } })
+          .select('_id invoiceId filename originalName mimeType size fileSize createdAt')
+          .sort({ createdAt: 1 })
+          .lean();
+      } catch (imgErr) {
+        console.warn('Could not query InvoiceImageModel for admin:', imgErr.message);
+      }
+
+      const imagesByInvoice = {};
+      (allImages || []).forEach(img => {
+        const invId = img.invoiceId?.toString();
+        if (invId) {
+          if (!imagesByInvoice[invId]) imagesByInvoice[invId] = [];
+          imagesByInvoice[invId].push({
+            _id: img._id,
+            filename: img.filename,
+            originalName: img.originalName,
+            mimeType: img.mimeType,
+            size: img.fileSize || img.size
+          });
+        }
+      });
+
+      const enrichedInvoices = invoiceList.map(inv => {
+        const invObj = inv.toObject ? inv.toObject() : { ...inv };
+        const invIdStr = invObj._id.toString();
+        const imgs = imagesByInvoice[invIdStr] || [];
+        const hasImg = imgs.length > 0 || invObj.hasInvoiceImage || Boolean(invObj.invoiceImage);
+        return {
+          ...invObj,
+          hasInvoiceImage: hasImg,
+          imageCount: imgs.length || (hasImg ? 1 : 0),
+          images: imgs
+        };
+      });
+
+      return res.json(enrichedInvoices);
+    }
+
+    return res.json(invoiceList);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
