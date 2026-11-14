@@ -1485,8 +1485,14 @@ router.put('/:id', protect, async (req, res) => {
       const explicitSellerPrice = req.body.sellerB2bPrice !== undefined ? req.body.sellerB2bPrice : req.body.sellerPrice;
       pricingInput.sellerB2bPrice = explicitSellerPrice;
       pricingInput.sellerPrice = explicitSellerPrice;
-      pricingInput.sellerPricePerBaseUnit = explicitSellerPrice;
-      pricingInput.sellerPricePerProductUnit = explicitSellerPrice;
+      if (req.body.sellerPricePerBaseUnit !== undefined) {
+        pricingInput.sellerPricePerBaseUnit = req.body.sellerPricePerBaseUnit;
+      }
+      if (req.body.sellerPricePerProductUnit !== undefined) {
+        pricingInput.sellerPricePerProductUnit = req.body.sellerPricePerProductUnit;
+      } else {
+        pricingInput.sellerPricePerProductUnit = explicitSellerPrice;
+      }
       pricingInput.sellerUnitPrice = explicitSellerPrice;
     }
 

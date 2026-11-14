@@ -509,18 +509,34 @@ function processProductPricing(payload, commissions = []) {
 
   // Extract base wholesale seller price
   let rawSellerPrice = null;
-  if (payload.sellerB2bPrice !== undefined && payload.sellerB2bPrice !== '' && payload.sellerB2bPrice !== null) {
-    rawSellerPrice = payload.sellerB2bPrice;
-  } else if (payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null) {
-    rawSellerPrice = payload.sellerPrice;
-  } else if (payload.sellerPricePerBaseUnit !== undefined && payload.sellerPricePerBaseUnit !== '' && payload.sellerPricePerBaseUnit !== null) {
-    rawSellerPrice = payload.sellerPricePerBaseUnit;
-  } else if (payload.sellerPricePerProductUnit !== undefined && payload.sellerPricePerProductUnit !== '' && payload.sellerPricePerProductUnit !== null) {
-    rawSellerPrice = payload.sellerPricePerProductUnit;
-  } else if (payload.b2bPrice !== undefined && payload.b2bPrice !== '' && payload.b2bPrice !== null) {
-    rawSellerPrice = payload.b2bPrice;
-  } else if (payload.price !== undefined && payload.price !== '' && payload.price !== null) {
-    rawSellerPrice = payload.price;
+  if (priceBasis === 'per_package') {
+    if (payload.sellerPricePerProductUnit !== undefined && payload.sellerPricePerProductUnit !== '' && payload.sellerPricePerProductUnit !== null) {
+      rawSellerPrice = payload.sellerPricePerProductUnit;
+    } else if (payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null) {
+      rawSellerPrice = payload.sellerPrice;
+    } else if (payload.sellerB2bPrice !== undefined && payload.sellerB2bPrice !== '' && payload.sellerB2bPrice !== null) {
+      rawSellerPrice = payload.sellerB2bPrice;
+    } else if (payload.sellerPricePerBaseUnit !== undefined && payload.sellerPricePerBaseUnit !== '' && payload.sellerPricePerBaseUnit !== null) {
+      rawSellerPrice = unitSize > 0 ? Number(payload.sellerPricePerBaseUnit) * unitSize : payload.sellerPricePerBaseUnit;
+    } else if (payload.b2bPrice !== undefined && payload.b2bPrice !== '' && payload.b2bPrice !== null) {
+      rawSellerPrice = payload.b2bPrice;
+    } else if (payload.price !== undefined && payload.price !== '' && payload.price !== null) {
+      rawSellerPrice = payload.price;
+    }
+  } else {
+    if (payload.sellerPricePerBaseUnit !== undefined && payload.sellerPricePerBaseUnit !== '' && payload.sellerPricePerBaseUnit !== null) {
+      rawSellerPrice = payload.sellerPricePerBaseUnit;
+    } else if (payload.sellerB2bPrice !== undefined && payload.sellerB2bPrice !== '' && payload.sellerB2bPrice !== null) {
+      rawSellerPrice = payload.sellerB2bPrice;
+    } else if (payload.sellerPrice !== undefined && payload.sellerPrice !== '' && payload.sellerPrice !== null) {
+      rawSellerPrice = payload.sellerPrice;
+    } else if (payload.sellerPricePerProductUnit !== undefined && payload.sellerPricePerProductUnit !== '' && payload.sellerPricePerProductUnit !== null) {
+      rawSellerPrice = payload.sellerPricePerProductUnit;
+    } else if (payload.b2bPrice !== undefined && payload.b2bPrice !== '' && payload.b2bPrice !== null) {
+      rawSellerPrice = payload.b2bPrice;
+    } else if (payload.price !== undefined && payload.price !== '' && payload.price !== null) {
+      rawSellerPrice = payload.price;
+    }
   }
 
   let sellerPrice = parseFloat(rawSellerPrice) || 0;
