@@ -511,23 +511,26 @@ router.get('/pickups', protect, async (req, res) => {
     const { Product: ProductModel, Order: OrderModel } = getModels(req);
 
     // 1. Find all products belonging to this seller
-    const sellerProducts = await ProductModel.find({ 
+    const sellerProducts = await ProductModel.find({
         $or: [
             { sellerId: sellerId.toString() },
             { seller: sellerId }
         ]
     }).select('_id');
-    
-    if (!sellerProducts || sellerProducts.length === 0) {
-      return res.json([]);
-    }
 
-    const productIds = sellerProducts.map(p => p._id);
+    const productIds = (sellerProducts || []).map(product => product._id);
+    const sellerProductIds = new Set(productIds.map(id => id.toString()));
 
-    // 2. Find orders that contain ANY of these product IDs AND are in a status awaiting pickup
+    // Include orders linked directly to this seller as well as older product-only records.
     const orders = await OrderModel.find({
-      'items.productId': { $in: productIds },
-      'orderStatus': { $in: ['Pending', 'Packed', 'Confirmed', 'Accepted', 'Processing', 'Assigned', 'Out for Delivery'] }
+      orderStatus: {
+        $in: ['Pending', 'Packed', 'Confirmed', 'Accepted', 'Processing', 'Assigned', 'Out for Delivery', 'Picked Up', 'Shipped', 'Delivered', 'Partially Returned', 'Returned']
+      },
+      $or: [
+        { 'sellerPickups.sellerId': sellerId },
+        { 'items.seller.sellerId': sellerId },
+        ...(productIds.length ? [{ 'items.productId': { $in: productIds } }] : [])
+      ]
     })
     .populate('userId', 'name email phone')
     .populate('driverId', 'name phone vehicleNo vehicleDetails')
@@ -538,18 +541,23 @@ router.get('/pickups', protect, async (req, res) => {
       const orderObj = order;
       const originalOrderStatus = orderObj.orderStatus;
       const sellerPickup = orderObj.sellerPickups?.find(sp => sp.sellerId?.toString() === sellerId.toString());
-      if (sellerPickup) {
-        orderObj.pickupCode = sellerPickup.pickupCode;
-        orderObj.orderStatus = sellerPickup.status;
-        orderObj.status = sellerPickup.status;
-      } else {
-        orderObj.status = orderObj.orderStatus;
-      }
+      const pickupStatus = sellerPickup?.status || orderObj.orderStatus;
+      if (['Cancelled', 'Rejected by Seller'].includes(pickupStatus)) return null;
+      orderObj.pickupCode = sellerPickup?.pickupCode || orderObj.pickupCode;
+      orderObj.orderStatus = pickupStatus;
+      orderObj.status = pickupStatus;
 
       const shippingAddress = orderObj.shippingAddress || {};
       const customer = orderObj.userId || {};
       const driver = orderObj.driverId || null;
-      const items = (orderObj.items || []).map(item => {
+      const sellerItems = (orderObj.items || []).filter(item => {
+        const itemSellerId = item.seller?.sellerId || item.sellerId;
+        return itemSellerId?.toString() === sellerId.toString() ||
+          sellerProductIds.has(item.productId?.toString());
+      });
+      if (!sellerItems.length) return null;
+
+      const items = sellerItems.map(item => {
         const quantity = Number(item.quantity) || 0;
         const unitPrice = Number(item.price ?? item.unitCustomerPrice) || 0;
         const savedAmount = Number(
@@ -575,26 +583,16 @@ router.get('/pickups', protect, async (req, res) => {
         };
       });
 
-      const savedTaxAmount = Number(orderObj.totalGstAmount);
-      const taxAmount = Number.isFinite(savedTaxAmount) && savedTaxAmount > 0
-        ? savedTaxAmount
-        : items.reduce((sum, item) => {
-          const itemTax = Number(item.gstAmount) || Number(item.totalGst) || 0;
-          return sum + itemTax;
-        }, 0);
-      const itemAmounts = items.reduce((sum, item) => sum + item.amount, 0);
-      const totalAmount = Number(orderObj.totalAmount ?? itemAmounts);
-      const itemSubtotals = items.reduce((sum, item) => {
-        const lineAmount = Number(item.amount) || 0;
-        const lineTax = Number(item.gstAmount) || Number(item.totalGst) || 0;
-        return sum + Number(item.subtotal ?? (lineAmount - lineTax));
+      const taxAmount = items.reduce((sum, item) => {
+        const itemTax = Number(item.gstAmount) || Number(item.totalGst) || 0;
+        return sum + itemTax;
       }, 0);
-      const subtotal = orderObj.totalAmount !== undefined
-        ? Math.max(0, totalAmount - taxAmount)
-        : itemSubtotals;
+      const itemAmounts = items.reduce((sum, item) => sum + item.amount, 0);
+      const totalAmount = itemAmounts;
+      const subtotal = Math.max(0, totalAmount - taxAmount);
       const assignmentStatus = driver
         ? 'Assigned'
-        : originalOrderStatus === 'Assigned' || orderObj.orderStatus === 'Assigned'
+        : originalOrderStatus === 'Assigned' || pickupStatus === 'Assigned'
           ? 'Assignment Pending'
           : 'Not Assigned';
       const pickupReference = sellerPickup?._id || orderObj._id;
@@ -628,7 +626,7 @@ router.get('/pickups', protect, async (req, res) => {
       orderObj.totalAmount = totalAmount;
 
       return orderObj;
-    });
+    }).filter(Boolean);
 
     res.json(modifiedOrders);
   } catch (error) {
