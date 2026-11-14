@@ -843,44 +843,74 @@ router.put('/:id', protect, async (req, res) => {
 router.get('/returns', protect, async (req, res) => {
   try {
     const sellerId = req.user._id;
+    const sellerIdStr = sellerId.toString();
     const { Product: ProductModel, Order: OrderModel } = getModels(req);
 
-    // 1. Find all products belonging to this seller
+    // 1. Find all products belonging to this seller (try both ObjectId and string)
     const sellerProducts = await ProductModel.find({ 
-        $or: [
-            { sellerId: sellerId.toString() },
-            { seller: sellerId }
-        ]
-    }).select('_id');
-    
-    if (!sellerProducts || sellerProducts.length === 0) {
-      return res.json([]);
-    }
+      $or: [
+        { sellerId: sellerId },
+        { sellerId: sellerIdStr },
+        { seller: sellerId }
+      ]
+    }).select('_id').lean();
+
+    console.log(`[Seller Returns] sellerId=${sellerIdStr}, products found=${sellerProducts.length}`);
 
     const productIds = sellerProducts.map(p => p._id);
+    const productIdsStr = productIds.map(id => id.toString());
 
-    // 2. Find orders that contain ANY of these product IDs and have items with returnStatus != 'None'
-    const orders = await OrderModel.find({
+    // 2. Find orders with return requests — search by:
+    //    a) Item productId matching seller's products
+    //    b) OR item.seller.sellerId matching this seller directly
+    const RETURN_STATUSES = ['Return Requested', 'Return Approved', 'Return Rejected', 'Picked Up from Customer', 'Returned to Seller'];
+
+    const orQuery = [
+      {
+        'items': {
+          $elemMatch: {
+            returnStatus: { $in: RETURN_STATUSES }
+          }
+        },
+        ...(productIds.length > 0 ? {
+          'items.productId': { $in: productIds }
+        } : {})
+      }
+    ];
+
+    // Also match by seller ID embedded in order items
+    orQuery.push({
       'items': {
         $elemMatch: {
-          productId: { $in: productIds },
-          returnStatus: { $ne: 'None' }
+          'seller.sellerId': sellerId,
+          returnStatus: { $in: RETURN_STATUSES }
         }
       }
-    })
-    .populate('userId', 'name email phone bankDetails')
-    .sort({ updatedAt: -1 })
-    .lean();
-
-    const productIdsStr = productIds.map(id => id.toString());
-    const filteredOrders = orders.map(order => {
-      order.items = order.items.filter(item => 
-        item.returnStatus && 
-        item.returnStatus !== 'None' && 
-        productIdsStr.includes(item.productId.toString())
-      );
-      return order;
     });
+
+    const orders = await OrderModel.find({ $or: orQuery })
+      .populate('userId', 'name email phone bankDetails')
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    console.log(`[Seller Returns] orders with returns found=${orders.length}`);
+
+    // Filter order items to only show returned items belonging to this seller
+    const filteredOrders = orders
+      .map(order => {
+        order.items = order.items.filter(item => {
+          if (!item.returnStatus || item.returnStatus === 'None') return false;
+          if (!RETURN_STATUSES.includes(item.returnStatus)) return false;
+
+          // Match by productId OR by seller.sellerId embedded in item
+          const itemProductIdStr = item.productId ? item.productId.toString() : '';
+          const itemSellerIdStr = item.seller?.sellerId ? item.seller.sellerId.toString() : '';
+
+          return productIdsStr.includes(itemProductIdStr) || itemSellerIdStr === sellerIdStr;
+        });
+        return order;
+      })
+      .filter(order => order.items.length > 0); // Remove orders with no matching items
 
     res.json(filteredOrders);
   } catch (error) {
