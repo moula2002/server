@@ -151,7 +151,7 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
 
   let [orders, invoices, payments, paymentAudits, historyEvents] = await Promise.all([
     OrderModel.find(orderQuery)
-      .select('_id orderNumber orderRef invoiceNumber userId shippingAddress items totalAmount totalGstAmount paymentStatus paymentMethod paidAt orderStatus createdAt updatedAt deliveredAt cancelledAt cancellationReason returnStatus returnReason returnRequestedAt returnApprovedAt returnRejectedAt sellerPickups pickupCode driverId sellerSettlementStatus sellerSettledAt deliverySlot')
+      .select('_id orderNumber orderRef invoiceNumber userId shippingAddress items totalAmount totalAmountWithoutCommissions sellerItemsNetTotal totalGstAmount paymentStatus paymentMethod paidAt orderStatus createdAt updatedAt deliveredAt cancelledAt cancellationReason returnStatus returnReason returnRequestedAt returnApprovedAt returnRejectedAt sellerPickups pickupCode driverId sellerSettlementStatus sellerSettledAt deliverySlot')
       .populate('userId', 'name phone')
       .populate('driverId', 'name phone')
       .sort({ createdAt: -1 })
@@ -189,7 +189,7 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
       _id: { $in: linkedOrderIds },
       $or: orderSellerClauses
     })
-      .select('_id orderNumber orderRef invoiceNumber userId shippingAddress items totalAmount totalGstAmount paymentStatus paymentMethod paidAt orderStatus createdAt updatedAt deliveredAt cancelledAt cancellationReason returnStatus returnReason returnRequestedAt returnApprovedAt returnRejectedAt sellerPickups pickupCode driverId sellerSettlementStatus sellerSettledAt deliverySlot')
+      .select('_id orderNumber orderRef invoiceNumber userId shippingAddress items totalAmount totalAmountWithoutCommissions sellerItemsNetTotal totalGstAmount paymentStatus paymentMethod paidAt orderStatus createdAt updatedAt deliveredAt cancelledAt cancellationReason returnStatus returnReason returnRequestedAt returnApprovedAt returnRejectedAt sellerPickups pickupCode driverId sellerSettlementStatus sellerSettledAt deliverySlot')
       .populate('userId', 'name phone')
       .populate('driverId', 'name phone')
       .lean();
@@ -222,7 +222,14 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
     const orderId = order._id.toString();
     const referenceId = getOrderReference(order);
     const itemDetails = order.sellerItems.map(toItemDetail);
-    const orderTotal = itemDetails.reduce((sum, item) => sum + item.amount, 0);
+    // Strict alignment with Seller Orders page: use seller's items total (finalCustomerAmount or price * quantity)
+    const calculatedSellerCustomerTotal = itemDetails.reduce((sum, item) => sum + item.amount, 0);
+    const orderTotal = calculatedSellerCustomerTotal > 0
+      ? calculatedSellerCustomerTotal
+      : ((order.totalAmountWithoutCommissions !== undefined && order.totalAmountWithoutCommissions !== null)
+          ? Number(order.totalAmountWithoutCommissions)
+          : Number(order.totalAmount || 0));
+    order.sellerTotalAmount = orderTotal;
     const customer = order.customer;
     const orderDetails = {
       orderId,
@@ -234,6 +241,7 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
       paymentStatus: order.paymentStatus || '',
       paymentMethod: order.paymentMethod || '',
       paymentAmount: orderTotal,
+      orderTotal,
       driver: order.driverId ? {
         name: order.driverId.name || '',
         phone: order.driverId.phone || ''
@@ -608,7 +616,7 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
       referenceId: order ? getOrderReference(order) : '',
       customer: order?.customer || {},
       description: event.description,
-      amount: event.amount,
+      amount: order?.sellerTotalAmount !== undefined ? order.sellerTotalAmount : event.amount,
       status: event.status,
       source: 'event',
       recordId: event._id,
@@ -791,6 +799,14 @@ const consolidateSellerHistory = (rows) => {
       }
       if (row.details?.paymentMethod) {
         entry.paymentMethod = row.details.paymentMethod;
+      }
+      // Ensure the canonical order total is preserved across all activities
+      if (row.details?.orderTotal !== undefined && row.details.orderTotal !== null) {
+        entry.amount = row.details.orderTotal;
+      } else if (row.activityType === 'orders' && row.amount !== null && row.amount !== undefined) {
+        entry.amount = row.amount;
+      } else if (entry.amount === null || entry.amount === undefined) {
+        entry.amount = row.amount;
       }
     } else {
       // Non-order records must have a valid reference and cannot be orphaned order activities (status updates / pickups)
