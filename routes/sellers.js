@@ -361,41 +361,58 @@ router.get('/:id/products', protect, async (req, res) => {
 });
 
 // @route   GET /api/sellers/orders
-// @desc    Get seller's orders
+// @desc    Get seller's orders (Strict Isolation: Only this seller's products & pickup details)
 router.get('/orders', protect, async (req, res) => {
   try {
     const sellerId = req.user._id;
+    const sellerIdStr = sellerId.toString();
     const { Product: ProductModel, Order: OrderModel } = getModels(req);
 
     // 1. Find all products belonging to this seller
     const sellerProducts = await ProductModel.find({ 
         $or: [
-            { sellerId: sellerId.toString() },
+            { sellerId: sellerId },
+            { sellerId: sellerIdStr },
             { seller: sellerId }
         ]
     }).select('_id');
     
-    if (!sellerProducts || sellerProducts.length === 0) {
-      return res.json([]);
+    const productIds = (sellerProducts || []).map(p => p._id);
+    const sellerProductIds = new Set(productIds.map(p => p.toString()));
+
+    // 2. Find orders containing ANY of this seller's products or pickups
+    const orConditions = [
+      { 'sellerPickups.sellerId': sellerId },
+      { 'items.seller.sellerId': sellerId },
+      { 'items.sellerId': sellerId }
+    ];
+    if (productIds.length > 0) {
+      orConditions.push({ 'items.productId': { $in: productIds } });
     }
 
-    const productIds = sellerProducts.map(p => p._id);
-
-    // 2. Find orders that contain ANY of these product IDs
-    const orders = await OrderModel.find({
-      'items': {
-        $elemMatch: {
-          productId: { $in: productIds }
-        }
-      }
-    })
-    .populate('userId', 'name email phone') // Populate customer info
-    .populate('driverId', 'name phone email') // Populate driver info
-    .sort({ createdAt: -1 });
+    const orders = await OrderModel.find({ $or: orConditions })
+      .populate('userId', 'name email phone') // Populate customer info
+      .populate('driverId', 'name phone email') // Populate driver info
+      .sort({ createdAt: -1 });
 
     const modifiedOrders = orders.map(order => {
       const orderObj = order.toObject();
-      const sellerPickup = orderObj.sellerPickups?.find(sp => sp.sellerId.toString() === sellerId.toString());
+
+      // STRICT MULTI-SELLER ISOLATION: Keep ONLY the items belonging to THIS seller
+      const sellerItems = (orderObj.items || []).filter(item => {
+        const itemSellerId = item.seller?.sellerId || item.sellerId;
+        const itemPid = item.productId?._id ? item.productId._id.toString() : item.productId?.toString();
+        return (itemSellerId && itemSellerId.toString() === sellerIdStr) ||
+               (itemPid && sellerProductIds.has(itemPid));
+      });
+
+      // If this order contains no items belonging to this seller, exclude it completely
+      if (sellerItems.length === 0) {
+        return null;
+      }
+
+      // Isolate seller pickup details (do not expose other sellers' pickup codes or statuses)
+      const sellerPickup = orderObj.sellerPickups?.find(sp => sp.sellerId?.toString() === sellerIdStr);
       if (sellerPickup) {
         orderObj.pickupCode = sellerPickup.pickupCode;
         orderObj.orderStatus = sellerPickup.status;
@@ -403,8 +420,38 @@ router.get('/orders', protect, async (req, res) => {
       } else {
         orderObj.status = orderObj.orderStatus;
       }
+      if (orderObj.sellerPickups) {
+        orderObj.sellerPickups = orderObj.sellerPickups.filter(sp => sp.sellerId?.toString() === sellerIdStr);
+      }
+
+      // Recalculate financial totals specifically for THIS seller's items only
+      let sellerItemsNetTotal = 0;
+      let sellerTotalCustomerAmount = 0;
+
+      sellerItems.forEach(item => {
+        const normalPrice = item.normalPrice !== undefined && item.normalPrice !== null
+          ? Number(item.normalPrice)
+          : (item.netPrice !== undefined && item.netPrice !== null ? Number(item.netPrice) : Number(item.price || 0));
+        const qty = Number(item.quantity) || 1;
+        
+        const lineSellerTotal = item.totalSellerAmount !== undefined && item.totalSellerAmount !== null
+          ? Number(item.totalSellerAmount)
+          : (normalPrice * qty);
+        sellerItemsNetTotal += lineSellerTotal;
+
+        const lineCustomerTotal = item.finalCustomerAmount !== undefined && item.finalCustomerAmount !== null
+          ? Number(item.finalCustomerAmount)
+          : (Number(item.price || 0) * qty);
+        sellerTotalCustomerAmount += lineCustomerTotal;
+      });
+
+      orderObj.items = sellerItems;
+      orderObj.sellerItemsNetTotal = sellerItemsNetTotal;
+      orderObj.totalAmountWithoutCommissions = sellerItemsNetTotal;
+      orderObj.totalAmount = sellerItemsNetTotal;
+
       return orderObj;
-    });
+    }).filter(Boolean);
 
     res.json(modifiedOrders);
   } catch (error) {
@@ -456,16 +503,23 @@ router.get('/stats', protect, async (req, res) => {
       }))
       .filter(p => p.stock <= 5);
 
-    // Orders stats
-    const orders = await OrderModel.find({
-      'items.productId': { $in: productIds }
-    });
+    // Orders stats (Include orders matching this seller's products, pickups or items)
+    const statsOrConditions = [
+      { 'sellerPickups.sellerId': sellerId },
+      { 'items.seller.sellerId': sellerId },
+      { 'items.sellerId': sellerId }
+    ];
+    if (productIds.length > 0) {
+      statsOrConditions.push({ 'items.productId': { $in: productIds } });
+    }
+
+    const orders = await OrderModel.find({ $or: statsOrConditions });
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
     const todayOrders = orders.filter(o => o.createdAt && new Date(o.createdAt) >= today).length;
-    const activeOrders = orders.filter(o => ['Pending', 'Processing', 'Shipped'].includes(o.orderStatus)).length;
+    const activeOrders = orders.filter(o => ['Pending', 'Processing', 'Shipped', 'Packed'].includes(o.orderStatus)).length;
 
     let totalSales = 0;
     let outstandingPayments = 0;
@@ -474,9 +528,12 @@ router.get('/stats', protect, async (req, res) => {
       const isCancelled = curr.orderStatus === 'Cancelled';
       const isPaid = curr.isSellerPaid || curr.paymentStatus === 'Paid';
 
-      const sellerItems = curr.items.filter(item => 
-        item.productId && productIds.some(pid => pid.equals(item.productId))
-      );
+      const sellerItems = (curr.items || []).filter(item => {
+        const itemSellerId = item.seller?.sellerId || item.sellerId;
+        const itemPid = item.productId?._id ? item.productId._id.toString() : item.productId?.toString();
+        return (itemSellerId && itemSellerId.toString() === sellerId.toString()) ||
+               (itemPid && productIds.some(pid => pid.toString() === itemPid));
+      });
 
       const sellerOrderTotal = sellerItems.reduce((s, i) => s + ((i.normalPrice || i.price || 0) * (i.quantity || 1)), 0);
       

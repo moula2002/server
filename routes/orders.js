@@ -692,8 +692,9 @@ router.post('/', protect, async (req, res) => {
           }
         }
 
-        if (productData.sellerId) {
-          const seller = await SellerModel.findById(productData.sellerId);
+        const effectiveSellerId = productData.sellerId || productData.seller;
+        if (effectiveSellerId) {
+          const seller = await SellerModel.findById(effectiveSellerId);
           if (seller) {
             sellerInfo = {
               sellerId: seller._id,
@@ -1370,10 +1371,40 @@ router.all('/:id/status', protect, async (req, res) => {
       });
     }
 
-    // 6. Sellers can only mark Packed or Rejected by Seller for their items
+    // 6. Sellers can only mark Packed or Rejected by Seller for orders containing their own items
     if (isSeller && !isAdmin && !isCustomer && !isDriver) {
+      const sellerIdStr = req.user._id.toString();
+      const hasSellerProducts = (order.items || []).some(item => {
+        const itemSellerId = item.seller?.sellerId || item.sellerId;
+        return itemSellerId && itemSellerId.toString() === sellerIdStr;
+      }) || (order.sellerPickups || []).some(sp => sp.sellerId && sp.sellerId.toString() === sellerIdStr);
+
+      if (!hasSellerProducts) {
+        const sellerProductCount = await ProductModel.countDocuments({
+          _id: { $in: (order.items || []).map(i => i.productId).filter(Boolean) },
+          $or: [{ sellerId: req.user._id }, { seller: req.user._id }]
+        });
+        if (sellerProductCount === 0) {
+          return res.status(403).json({ message: '403 Forbidden: You do not have products in this order' });
+        }
+      }
+
       if (!['Packed', 'Rejected by Seller'].includes(status)) {
         return res.status(403).json({ message: `403 Forbidden: Sellers are not permitted to set status to '${status}'.` });
+      }
+
+      // Ensure seller's specific pickup status is tracked
+      if (!order.sellerPickups) order.sellerPickups = [];
+      let currentSellerPickup = order.sellerPickups.find(sp => sp.sellerId?.toString() === sellerIdStr);
+      if (!currentSellerPickup) {
+        currentSellerPickup = {
+          sellerId: req.user._id,
+          status: status,
+          pickupCode: order.pickupCode || generateOTP(6)
+        };
+        order.sellerPickups.push(currentSellerPickup);
+      } else {
+        currentSellerPickup.status = status;
       }
     }
 
