@@ -106,6 +106,7 @@ const createActivity = ({
 
 const loadSellerHistory = async (req, { startDate, endDate }) => {
   const sellerId = req.user._id;
+  const sellerIdStr = sellerId.toString();
   const ProductModel = getModel(req, 'Product', '../models/Product');
   const OrderModel = getModel(req, 'Order', '../models/Order');
   const InvoiceModel = getModel(req, 'SellerInvoice', '../models/SellerInvoice');
@@ -114,12 +115,19 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
   const HistoryEventModel = getModel(req, 'SellerHistoryEvent', '../models/SellerHistoryEvent');
 
   const products = await ProductModel.find({
-    $or: [{ sellerId }, { sellerId: sellerId.toString() }, { seller: sellerId }]
+    $or: [{ sellerId }, { sellerId: sellerIdStr }, { seller: sellerId }]
   }).select('_id').lean();
   const productIds = products.map(product => product._id);
   const productIdSet = new Set(productIds.map(id => id.toString()));
 
-  const orderSellerClauses = [{ 'items.seller.sellerId': sellerId }];
+  const orderSellerClauses = [
+    { 'sellerPickups.sellerId': sellerId },
+    { 'sellerPickups.sellerId': sellerIdStr },
+    { 'items.seller.sellerId': sellerId },
+    { 'items.seller.sellerId': sellerIdStr },
+    { 'items.sellerId': sellerId },
+    { 'items.sellerId': sellerIdStr }
+  ];
   if (productIds.length) orderSellerClauses.push({ 'items.productId': { $in: productIds } });
 
   const orderQuery = { $or: orderSellerClauses };
@@ -149,22 +157,22 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
       .sort({ createdAt: -1 })
       .lean(),
     InvoiceModel.find({
-      sellerId,
+      $or: [{ sellerId }, { sellerId: sellerIdStr }, { seller: sellerId }],
       ...(startDate || endDate ? { createdAt: dateRange } : {})
     })
       .select('-invoiceImage.data')
       .sort({ createdAt: -1 })
       .lean(),
     PaymentModel.find({
-      sellerId,
+      $or: [{ sellerId }, { sellerId: sellerIdStr }, { seller: sellerId }],
       ...(startDate || endDate ? { $or: [{ date: dateRange }, { createdAt: dateRange }] } : {})
     }).sort({ date: -1, createdAt: -1 }).lean(),
     PaymentAuditModel.find({
-      sellerId,
+      $or: [{ sellerId }, { sellerId: sellerIdStr }, { seller: sellerId }],
       ...(startDate || endDate ? { $or: [{ date: dateRange }, { createdAt: dateRange }] } : {})
     }).sort({ date: -1, createdAt: -1 }).lean(),
     HistoryEventModel.find({
-      sellerId,
+      $or: [{ sellerId }, { sellerId: sellerIdStr }, { seller: sellerId }],
       ...(startDate || endDate ? { occurredAt: dateRange } : {})
     }).sort({ occurredAt: -1 }).lean()
   ]);
@@ -189,10 +197,12 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
   }
 
   const sellerOrders = orders.map(order => {
-    const items = (order.items || []).filter(item =>
-      (item.seller?.sellerId && item.seller.sellerId.toString() === sellerId.toString()) ||
-      (item.productId && productIdSet.has(item.productId.toString()))
-    );
+    const items = (order.items || []).filter(item => {
+      const itemSellerId = item.seller?.sellerId || item.sellerId || item.seller?._id;
+      const itemPid = item.productId?._id ? item.productId._id.toString() : item.productId?.toString();
+      return (itemSellerId && itemSellerId.toString() === sellerIdStr) ||
+             (itemPid && productIdSet.has(itemPid));
+    });
     if (!items.length) return null;
     return { ...order, sellerItems: items, customer: getOrderCustomer(order) };
   }).filter(Boolean);
@@ -260,19 +270,44 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
     }));
 
     const sellerPickup = (order.sellerPickups || []).find(
-      pickup => pickup.sellerId?.toString() === sellerId.toString()
+      pickup => pickup.sellerId?.toString() === sellerIdStr
     );
     if (sellerPickup) {
+      const isPickedUp = sellerPickup.status === 'Picked Up' || order.orderStatus === 'Picked Up';
+      const isOutForDelivery = sellerPickup.status === 'Out for Delivery' || order.orderStatus === 'Out for Delivery';
+      const pickupTitle = isPickedUp
+        ? 'Order Picked Up'
+        : isOutForDelivery
+          ? 'Pickup Dispatched'
+          : sellerPickup.scheduledDate ? 'Pickup Scheduled' : 'Pickup Record Created';
+      const pickupDate = sellerPickup.scheduledDate || sellerPickup.pickupDate || order.updatedAt || order.createdAt;
+
       add(createActivity({
-        id: `pickup:${orderId}:${sellerPickup._id?.toString() || sellerId}`,
+        id: `pickup:${orderId}:${sellerPickup._id?.toString() || sellerIdStr}`,
         activityType: 'pickups',
-        activity: 'Pickup Record Created',
-        occurredAt: order.createdAt,
+        activity: pickupTitle,
+        occurredAt: pickupDate,
         referenceId,
         customer,
-        description: `Pickup record created with order${sellerPickup.status ? `; current status: ${sellerPickup.status}` : ''}`,
+        description: `Pickup record${sellerPickup.status ? `; current status: ${sellerPickup.status}` : ''}${sellerPickup.pickupCode ? `; Code: ${sellerPickup.pickupCode}` : ''}`,
         amount: orderTotal,
-        status: sellerPickup.status,
+        status: sellerPickup.status || order.orderStatus,
+        source: 'order',
+        recordId: orderId,
+        orderId,
+        details: orderDetails
+      }));
+    } else if ((!order.sellerPickups || order.sellerPickups.length === 0) && (order.pickupCode || order.orderStatus === 'Picked Up')) {
+      add(createActivity({
+        id: `pickup:${orderId}:${sellerIdStr}`,
+        activityType: 'pickups',
+        activity: order.orderStatus === 'Picked Up' ? 'Order Picked Up' : 'Pickup Record Created',
+        occurredAt: order.updatedAt || order.createdAt,
+        referenceId,
+        customer,
+        description: `Pickup record${order.orderStatus ? `; current status: ${order.orderStatus}` : ''}${order.pickupCode ? `; Code: ${order.pickupCode}` : ''}`,
+        amount: orderTotal,
+        status: order.orderStatus,
         source: 'order',
         recordId: orderId,
         orderId,
@@ -323,6 +358,7 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
       ['Return Approved', order.returnApprovedAt],
       ['Return Rejected', order.returnRejectedAt]
     ];
+    let returnEventAdded = false;
     for (const [activity, occurredAt] of returnDates) {
       if (!occurredAt || hasHistoryEvent(orderId, 'returns', activity)) continue;
       add(createActivity({
@@ -340,19 +376,42 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
         orderId,
         details: { ...orderDetails, returnItems: returnItems.map(toItemDetail), returnReason: order.returnReason || '' }
       }));
+      returnEventAdded = true;
+    }
+    // Fallback if return status exists on order or item without timestamped event
+    if (!returnEventAdded && (returnItems.length > 0 || ['Return Requested', 'Return Approved', 'Return Rejected', 'Returned', 'Partially Returned'].includes(order.orderStatus) || order.returnStatus)) {
+      if (!hasHistoryEvent(orderId, 'returns', 'Return Requested') && !hasHistoryEvent(orderId, 'returns', order.returnStatus)) {
+        const retActivity = order.returnStatus || (returnItems[0] && returnItems[0].returnStatus) || 'Return Requested';
+        add(createActivity({
+          id: `return:${orderId}:current`,
+          activityType: 'returns',
+          activity: retActivity,
+          occurredAt: order.updatedAt || order.createdAt,
+          referenceId,
+          customer,
+          description: `${returnItems.length || order.sellerItems.length} return item${(returnItems.length || order.sellerItems.length) === 1 ? '' : 's'}${order.returnReason ? `; ${order.returnReason}` : ''}`,
+          amount: returnAmount || orderTotal,
+          status: order.returnStatus || (returnItems[0] && returnItems[0].returnStatus) || order.orderStatus,
+          source: 'order',
+          recordId: orderId,
+          orderId,
+          details: { ...orderDetails, returnItems: returnItems.map(toItemDetail), returnReason: order.returnReason || '' }
+        }));
+      }
     }
 
-    if (order.deliveredAt && !hasHistoryEvent(orderId, 'statusUpdates', 'Order Delivered')) {
+    const deliveryDate = order.deliveredAt || (order.orderStatus === 'Delivered' ? (order.updatedAt || order.createdAt) : null);
+    if (deliveryDate && !hasHistoryEvent(orderId, 'delivered', 'Order Delivered') && !hasHistoryEvent(orderId, 'statusUpdates', 'Order Delivered')) {
       add(createActivity({
-        id: `delivery:${orderId}:${new Date(order.deliveredAt).getTime()}`,
-        activityType: 'statusUpdates',
+        id: `delivery:${orderId}:${new Date(deliveryDate).getTime()}`,
+        activityType: 'delivered',
         activity: 'Order Delivered',
-        occurredAt: order.deliveredAt,
+        occurredAt: deliveryDate,
         referenceId,
         customer,
         description: 'Order delivery confirmed',
         amount: orderTotal,
-        status: order.orderStatus,
+        status: order.orderStatus || 'Delivered',
         source: 'order',
         recordId: orderId,
         orderId,
@@ -534,9 +593,13 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
     const occurredAt = event.occurredAt;
     const orderId = event.orderId?.toString() || '';
     const order = ordersById.get(orderId);
+    let eventActivityType = event.activityType;
+    if (event.activity === 'Order Delivered' || event.status === 'Delivered') {
+      eventActivityType = 'delivered';
+    }
     add(createActivity({
       id: `event:${event._id.toString()}`,
-      activityType: event.activityType,
+      activityType: eventActivityType,
       activity: event.activity,
       occurredAt,
       referenceId: order ? getOrderReference(order) : '',
@@ -617,8 +680,21 @@ router.get('/history', protect, async (req, res) => {
 
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-    const activityType = String(req.query.activityType || 'all');
-    const allowedTypes = ['all', 'orders', 'payments', 'invoices', 'returns', 'pickups', 'statusUpdates'];
+    
+    // Normalize activityType and support common aliases
+    let rawType = String(req.query.activityType || 'all').trim();
+    let activityType = rawType;
+    const typeLower = rawType.toLowerCase();
+    if (typeLower === 'all') activityType = 'all';
+    else if (typeLower === 'orders' || typeLower === 'order') activityType = 'orders';
+    else if (typeLower === 'delivered' || typeLower === 'deliveries') activityType = 'delivered';
+    else if (typeLower === 'pickups' || typeLower === 'pickup') activityType = 'pickups';
+    else if (typeLower === 'returns' || typeLower === 'return' || typeLower === 'returned') activityType = 'returns';
+    else if (typeLower === 'payments' || typeLower === 'payment') activityType = 'payments';
+    else if (typeLower === 'invoices' || typeLower === 'invoice') activityType = 'invoices';
+    else if (typeLower === 'statusupdates' || typeLower === 'status_updates' || typeLower === 'statusupdate') activityType = 'statusUpdates';
+
+    const allowedTypes = ['all', 'orders', 'delivered', 'pickups', 'returns', 'payments', 'invoices', 'statusUpdates'];
     if (!allowedTypes.includes(activityType)) {
       return res.status(400).json({ message: 'Invalid activity type' });
     }
@@ -641,10 +717,11 @@ router.get('/history', protect, async (req, res) => {
     const counts = {
       all: filteredRows.length,
       orders: 0,
+      delivered: 0,
+      pickups: 0,
+      returns: 0,
       payments: 0,
       invoices: 0,
-      returns: 0,
-      pickups: 0,
       statusUpdates: 0
     };
     for (const row of filteredRows) {
