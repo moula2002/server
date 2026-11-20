@@ -229,15 +229,12 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
     const orderId = order._id.toString();
     const referenceId = getOrderReference(order);
     const itemDetails = order.sellerItems.map(toItemDetail);
-    // Strict alignment with Seller Orders page: use seller's order total without commissions
-    const calculatedSellerOrderTotal = itemDetails.reduce((sum, item) => sum + item.amount, 0);
-    const orderTotal = calculatedSellerOrderTotal > 0
-      ? calculatedSellerOrderTotal
-      : ((order.totalAmountWithoutCommissions !== undefined && order.totalAmountWithoutCommissions !== null)
-          ? safeNumber(order.totalAmountWithoutCommissions)
-          : (order.sellerItemsNetTotal !== undefined && order.sellerItemsNetTotal !== null
-              ? safeNumber(order.sellerItemsNetTotal)
-              : safeNumber(order.totalAmount)));
+    // Strict alignment with Seller Orders page: use seller's order total without commissions (including GST when applicable)
+    const orderTotal = (order.totalAmountWithoutCommissions !== undefined && order.totalAmountWithoutCommissions !== null && safeNumber(order.totalAmountWithoutCommissions) > 0)
+      ? safeNumber(order.totalAmountWithoutCommissions)
+      : ((order.sellerItemsNetTotal !== undefined && order.sellerItemsNetTotal !== null && safeNumber(order.sellerItemsNetTotal) > 0)
+          ? safeNumber(order.sellerItemsNetTotal)
+          : itemDetails.reduce((sum, item) => sum + item.amount, 0));
     order.sellerTotalAmount = orderTotal;
     const customer = order.customer;
     const orderDetails = {
@@ -851,16 +848,18 @@ const consolidateSellerHistory = (rows) => {
   for (const entry of validOrderRows) {
     entry.activities.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
     entry.categories = Array.from(entry.categories);
-    // Strict safeguard: recalculate canonical seller total without commission
-    const itemsList = entry.details?.items || [];
-    if (itemsList.length > 0) {
-      const itemSum = itemsList.reduce((sum, it) => sum + safeNumber(it.amount), 0);
-      if (itemSum > 0) {
-        entry.amount = itemSum;
-        entry.details.orderTotal = itemSum;
-        entry.details.paymentAmount = itemSum;
-        entry.activities.forEach(a => { a.amount = itemSum; });
+    // Strict safeguard: preserve canonical seller order total from Seller Orders
+    const targetOrderTotal = (entry.details?.orderTotal !== undefined && entry.details.orderTotal !== null && safeNumber(entry.details.orderTotal) > 0)
+      ? safeNumber(entry.details.orderTotal)
+      : (entry.amount !== null && entry.amount !== undefined ? safeNumber(entry.amount) : 0);
+
+    if (targetOrderTotal > 0) {
+      entry.amount = targetOrderTotal;
+      if (entry.details) {
+        entry.details.orderTotal = targetOrderTotal;
+        entry.details.paymentAmount = targetOrderTotal;
       }
+      entry.activities.forEach(a => { a.amount = targetOrderTotal; });
     }
   }
   for (const entry of nonOrderRows) {

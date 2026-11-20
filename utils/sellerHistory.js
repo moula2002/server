@@ -17,20 +17,23 @@ const getSellerIdsFromOrder = (order) => [...new Set(
 )];
 
 const getSellerAmount = (order, sellerId) => {
+  if (order.totalAmountWithoutCommissions !== undefined && order.totalAmountWithoutCommissions !== null && Number(order.totalAmountWithoutCommissions) > 0) {
+    return Number(order.totalAmountWithoutCommissions);
+  }
+  if (order.sellerItemsNetTotal !== undefined && order.sellerItemsNetTotal !== null && Number(order.sellerItemsNetTotal) > 0) {
+    return Number(order.sellerItemsNetTotal);
+  }
   const sellerItems = (order.items || [])
     .filter(item => item.seller?.sellerId?.toString() === sellerId || item.sellerId?.toString() === sellerId);
   if (!sellerItems.length) return 0;
 
-  // Strict alignment with Seller Orders page: sum of seller items without commissions
+  // Strict alignment with Seller Orders page: seller items without commissions (including GST when applicable)
   return sellerItems.reduce((total, item) => {
-    if (item.totalSellerAmount !== undefined && item.totalSellerAmount !== null && Number(item.totalSellerAmount) > 0) {
-      return total + Number(item.totalSellerAmount);
-    }
-    const normalPrice = item.normalPrice !== undefined && item.normalPrice !== null
-      ? Number(item.normalPrice)
-      : (item.netPrice !== undefined && item.netPrice !== null ? Number(item.netPrice) : Number(item.price || 0));
-    const qty = Number(item.quantity) || 1;
-    return total + (normalPrice * qty);
+    const lineTotal = item.totalSellerAmount !== undefined && item.totalSellerAmount !== null && Number(item.totalSellerAmount) > 0
+      ? Number(item.totalSellerAmount)
+      : ((Number(item.normalPrice ?? item.netPrice ?? item.price ?? 0)) * (Number(item.quantity) || 1));
+    const lineGst = Number(item.gstAmount ?? item.totalGst ?? 0);
+    return total + lineTotal + lineGst;
   }, 0);
 };
 
