@@ -16,15 +16,23 @@ const getSellerIdsFromOrder = (order) => [...new Set(
     .map(id => id.toString())
 )];
 
-const getSellerAmount = (order, sellerId) => (order.items || [])
-  .filter(item => item.seller?.sellerId?.toString() === sellerId)
-  .reduce((total, item) => {
-    const savedAmount = Number(item.finalCustomerAmount ?? item.finalCustomerPrice);
-    const amount = Number.isFinite(savedAmount) && savedAmount > 0
-      ? savedAmount
-      : (Number(item.price ?? item.unitCustomerPrice) || 0) * (Number(item.quantity) || 0);
-    return total + amount;
+const getSellerAmount = (order, sellerId) => {
+  const sellerItems = (order.items || [])
+    .filter(item => item.seller?.sellerId?.toString() === sellerId || item.sellerId?.toString() === sellerId);
+  if (!sellerItems.length) return 0;
+
+  // Strict alignment with Seller Orders page: sum of seller items without commissions
+  return sellerItems.reduce((total, item) => {
+    if (item.totalSellerAmount !== undefined && item.totalSellerAmount !== null && Number(item.totalSellerAmount) > 0) {
+      return total + Number(item.totalSellerAmount);
+    }
+    const normalPrice = item.normalPrice !== undefined && item.normalPrice !== null
+      ? Number(item.normalPrice)
+      : (item.netPrice !== undefined && item.netPrice !== null ? Number(item.netPrice) : Number(item.price || 0));
+    const qty = Number(item.quantity) || 1;
+    return total + (normalPrice * qty);
   }, 0);
+};
 
 const recordSellerHistoryEvent = async (req, order, event) => {
   try {
