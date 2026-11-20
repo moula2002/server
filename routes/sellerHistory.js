@@ -636,19 +636,158 @@ const matchesSearch = (row, search) => {
   return [
     row.referenceId,
     row.activity,
-    row.customer.name,
-    row.customer.phone,
+    row.customer?.name,
+    row.customer?.phone,
     row.description,
     row.status,
     row.orderId,
+    row.paymentMethod,
+    row.paymentStatus,
     row.details?.transactionId,
     row.details?.transactionReference,
     row.details?.invoiceNumber,
-    row.details?.receiptNumber
+    row.details?.receiptNumber,
+    ...(row.activities || []).map(a => `${a.activity} ${a.description} ${a.status}`)
   ].filter(Boolean).join(' ').toLowerCase().includes(needle);
 };
 
-const publicActivity = ({ details, ...activity }) => activity;
+const publicActivity = (activity) => {
+  if (!activity) return null;
+  const { details, ...rest } = activity;
+  return {
+    ...rest,
+    items: details?.items || rest.items || [],
+    pickup: details?.pickup || rest.pickup || [],
+    driver: details?.driver || rest.driver || null,
+    paymentMethod: details?.paymentMethod || rest.paymentMethod || '',
+    paymentStatus: details?.paymentStatus || rest.paymentStatus || '',
+    invoiceReferences: details?.invoiceReferences || rest.invoiceReferences || [],
+    returnItems: details?.returnItems || rest.returnItems || [],
+    returnReason: details?.returnReason || rest.returnReason || '',
+    deliverySlot: details?.deliverySlot || rest.deliverySlot || null
+  };
+};
+
+const consolidateSellerHistory = (rows) => {
+  const orderMap = new Map();
+  const nonOrderRows = [];
+
+  for (const row of rows) {
+    if (row.orderId) {
+      if (!orderMap.has(row.orderId)) {
+        orderMap.set(row.orderId, {
+          id: `order:${row.orderId}`,
+          orderId: row.orderId,
+          referenceId: row.referenceId,
+          customer: row.customer || {},
+          occurredAt: row.occurredAt,
+          createdAt: row.details?.createdAt || row.occurredAt,
+          description: row.description,
+          amount: row.amount,
+          status: row.status,
+          paymentStatus: row.details?.paymentStatus || '',
+          paymentMethod: row.details?.paymentMethod || '',
+          activityType: 'orders',
+          activity: 'Order Record',
+          source: 'order',
+          recordId: row.orderId,
+          details: { ...(row.details || {}) },
+          activities: [],
+          categories: new Set(['orders'])
+        });
+      }
+      const entry = orderMap.get(row.orderId);
+
+      // Register activity in chronological timeline
+      entry.activities.push({
+        id: row.id,
+        activity: row.activity,
+        activityType: row.activityType,
+        occurredAt: row.occurredAt,
+        status: row.status,
+        description: row.description,
+        amount: row.amount
+      });
+
+      // Track categories this order qualifies for
+      if (row.activityType) entry.categories.add(row.activityType);
+      if (row.status === 'Delivered' || row.activity === 'Order Delivered' || row.activityType === 'delivered') {
+        entry.categories.add('delivered');
+      }
+      if (row.activityType === 'pickups' || (row.activity && row.activity.toLowerCase().includes('pickup'))) {
+        entry.categories.add('pickups');
+      }
+      if (row.activityType === 'returns' || (row.activity && row.activity.toLowerCase().includes('return'))) {
+        entry.categories.add('returns');
+      }
+      if (row.activityType === 'payments' || ['Paid', 'Completed'].includes(row.details?.paymentStatus)) {
+        entry.categories.add('payments');
+      }
+      if (row.activityType === 'invoices' || row.details?.invoiceReferences?.length) {
+        entry.categories.add('invoices');
+      }
+      if (row.activityType === 'statusUpdates' || ['Cancelled', 'Rejected by Seller'].includes(row.status)) {
+        entry.categories.add('statusUpdates');
+      }
+
+      // Keep latest occurredAt
+      if (new Date(row.occurredAt).getTime() > new Date(entry.occurredAt).getTime()) {
+        entry.occurredAt = row.occurredAt;
+      }
+      // If row has rich details or latest order status, keep them updated
+      if (row.details?.items?.length) {
+        entry.details.items = row.details.items;
+      }
+      if (row.details?.orderStatus) {
+        entry.status = row.details.orderStatus;
+      } else if (row.status && row.activityType === 'orders') {
+        entry.status = row.status;
+      }
+      if (row.details?.pickup?.length) {
+        entry.details.pickup = row.details.pickup;
+      }
+      if (row.details?.driver) {
+        entry.details.driver = row.details.driver;
+      }
+      if (row.details?.invoiceReferences?.length) {
+        entry.details.invoiceReferences = row.details.invoiceReferences;
+      }
+      if (row.details?.returnItems?.length) {
+        entry.details.returnItems = row.details.returnItems;
+      }
+      if (row.details?.paymentStatus) {
+        entry.paymentStatus = row.details.paymentStatus;
+      }
+      if (row.details?.paymentMethod) {
+        entry.paymentMethod = row.details.paymentMethod;
+      }
+    } else {
+      nonOrderRows.push({
+        ...row,
+        activities: [{
+          id: row.id,
+          activity: row.activity,
+          activityType: row.activityType,
+          occurredAt: row.occurredAt,
+          status: row.status,
+          description: row.description,
+          amount: row.amount
+        }],
+        categories: new Set([row.activityType || 'all'])
+      });
+    }
+  }
+
+  for (const entry of orderMap.values()) {
+    entry.activities.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
+    entry.categories = Array.from(entry.categories);
+  }
+  for (const entry of nonOrderRows) {
+    entry.categories = Array.from(entry.categories);
+  }
+
+  return [...orderMap.values(), ...nonOrderRows];
+};
 
 router.get('/history', protect, async (req, res) => {
   try {
@@ -697,7 +836,9 @@ router.get('/history', protect, async (req, res) => {
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
     const search = String(req.query.search || '').trim().slice(0, 100);
     const status = String(req.query.status || '').trim().slice(0, 80).toLowerCase();
-    const rows = await loadSellerHistory(req, { startDate, endDate });
+    const rawRows = await loadSellerHistory(req, { startDate, endDate });
+    const shouldConsolidate = req.query.consolidate !== 'false';
+    const rows = shouldConsolidate ? consolidateSellerHistory(rawRows) : rawRows;
     const searchedRows = rows.filter(row => matchesSearch(row, search));
     const filteredRows = searchedRows.filter(row => !status || row.status.toLowerCase() === status);
 
@@ -712,14 +853,20 @@ router.get('/history', protect, async (req, res) => {
       statusUpdates: 0
     };
     for (const row of filteredRows) {
-      if (Object.prototype.hasOwnProperty.call(counts, row.activityType)) {
+      if (Array.isArray(row.categories)) {
+        for (const cat of row.categories) {
+          if (Object.prototype.hasOwnProperty.call(counts, cat)) {
+            counts[cat] += 1;
+          }
+        }
+      } else if (Object.prototype.hasOwnProperty.call(counts, row.activityType)) {
         counts[row.activityType] += 1;
       }
     }
 
     const categoryRows = activityType === 'all'
       ? filteredRows
-      : filteredRows.filter(row => row.activityType === activityType);
+      : filteredRows.filter(row => Array.isArray(row.categories) ? row.categories.includes(activityType) : row.activityType === activityType);
     categoryRows.sort((left, right) => {
       const leftValue = sortBy === 'customer.name' ? left.customer.name : left[sortBy];
       const rightValue = sortBy === 'customer.name' ? right.customer.name : right[sortBy];
@@ -756,21 +903,40 @@ router.get('/history/details', protect, async (req, res) => {
     const activityId = String(req.query.id || '');
     if (!activityId) return res.status(400).json({ message: 'Activity ID is required' });
 
-    const rows = await loadSellerHistory(req, {});
-    const activity = rows.find(row => row.id === activityId);
+    const rawRows = await loadSellerHistory(req, {});
+    const consolidated = consolidateSellerHistory(rawRows);
+
+    let activity = consolidated.find(row => row.id === activityId);
+    if (!activity && activityId.startsWith('order:')) {
+      const orderId = activityId.slice(6);
+      activity = consolidated.find(row => row.orderId === orderId);
+    }
+    if (!activity) {
+      activity = rawRows.find(row => row.id === activityId);
+    }
     if (!activity) return res.status(404).json({ message: 'History record not found' });
 
-    const relatedTransactions = activity.orderId
-      ? rows
-        .filter(row => row.orderId === activity.orderId && row.id !== activity.id)
+    const targetOrderId = activity.orderId;
+    const allOrderActivities = targetOrderId
+      ? rawRows
+        .filter(row => row.orderId === targetOrderId)
+        .sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime())
+        .map(publicActivity)
+      : [publicActivity(activity)];
+
+    const relatedTransactions = targetOrderId
+      ? rawRows
+        .filter(row => row.orderId === targetOrderId && row.id !== activity.id)
         .map(publicActivity)
       : [];
+
     return res.json({
       success: true,
       data: {
         activity: publicActivity(activity),
         details: activity.details || {},
-        relatedTransactions
+        relatedTransactions,
+        activities: allOrderActivities
       }
     });
   } catch (error) {
