@@ -46,9 +46,14 @@ const getOrderCustomer = (order) => ({
 });
 
 const getItemAmount = (item) => {
-  const savedAmount = safeNumber(item.finalCustomerAmount ?? item.finalCustomerPrice);
-  if (savedAmount > 0) return savedAmount;
-  return safeNumber(item.price ?? item.unitCustomerPrice) * safeNumber(item.quantity);
+  if (item.totalSellerAmount !== undefined && item.totalSellerAmount !== null && safeNumber(item.totalSellerAmount) > 0) {
+    return safeNumber(item.totalSellerAmount);
+  }
+  const normalPrice = item.normalPrice !== undefined && item.normalPrice !== null
+    ? safeNumber(item.normalPrice)
+    : (item.netPrice !== undefined && item.netPrice !== null ? safeNumber(item.netPrice) : safeNumber(item.price));
+  const qty = safeNumber(item.quantity) || 1;
+  return normalPrice * qty;
 };
 
 const toItemDetail = (item) => ({
@@ -58,7 +63,9 @@ const toItemDetail = (item) => ({
   measurement: item.productUnitSize && item.productUnitSize !== 1
     ? `${item.productUnitSize} ${item.measurementBasis || item.measurementUnit || ''}`.trim()
     : '',
-  unitPrice: safeNumber(item.price ?? item.unitCustomerPrice),
+  unitPrice: item.normalPrice !== undefined && item.normalPrice !== null
+    ? safeNumber(item.normalPrice)
+    : (item.netPrice !== undefined && item.netPrice !== null ? safeNumber(item.netPrice) : safeNumber(item.price ?? item.unitCustomerPrice)),
   amount: getItemAmount(item),
   taxAmount: safeNumber(item.gstAmount || item.totalGst)
 });
@@ -222,13 +229,15 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
     const orderId = order._id.toString();
     const referenceId = getOrderReference(order);
     const itemDetails = order.sellerItems.map(toItemDetail);
-    // Strict alignment with Seller Orders page: use seller's items total (finalCustomerAmount or price * quantity)
-    const calculatedSellerCustomerTotal = itemDetails.reduce((sum, item) => sum + item.amount, 0);
-    const orderTotal = calculatedSellerCustomerTotal > 0
-      ? calculatedSellerCustomerTotal
+    // Strict alignment with Seller Orders page: use seller's order total without commissions
+    const calculatedSellerOrderTotal = itemDetails.reduce((sum, item) => sum + item.amount, 0);
+    const orderTotal = calculatedSellerOrderTotal > 0
+      ? calculatedSellerOrderTotal
       : ((order.totalAmountWithoutCommissions !== undefined && order.totalAmountWithoutCommissions !== null)
-          ? Number(order.totalAmountWithoutCommissions)
-          : Number(order.totalAmount || 0));
+          ? safeNumber(order.totalAmountWithoutCommissions)
+          : (order.sellerItemsNetTotal !== undefined && order.sellerItemsNetTotal !== null
+              ? safeNumber(order.sellerItemsNetTotal)
+              : safeNumber(order.totalAmount)));
     order.sellerTotalAmount = orderTotal;
     const customer = order.customer;
     const orderDetails = {

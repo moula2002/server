@@ -448,8 +448,10 @@ router.get('/orders', protect, async (req, res) => {
       orderObj.items = sellerItems;
       orderObj.sellerItemsNetTotal = sellerItemsNetTotal;
       orderObj.sellerTotalCustomerAmount = sellerTotalCustomerAmount;
-      orderObj.totalAmountWithoutCommissions = sellerTotalCustomerAmount;
-      orderObj.totalAmount = sellerTotalCustomerAmount;
+      // Source of truth: seller order total without commissions
+      orderObj.totalAmountWithoutCommissions = sellerItemsNetTotal;
+      orderObj.totalAmount = sellerItemsNetTotal;
+      orderObj.sellerTotalAmount = sellerItemsNetTotal;
 
       return orderObj;
     }).filter(Boolean);
