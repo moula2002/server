@@ -3104,13 +3104,62 @@ router.put('/:id/return-delivery', protect, async (req, res) => {
 });
 
 // @route   DELETE /api/orders/admin/:id
-// @desc    Admin deletes an order
+// @desc    Admin deletes an order (completely cleans up order and associated seller history records)
 router.delete('/admin/:id', protect, async (req, res) => {
   try {
     const { Order: OrderModel } = getModels(req);
-    const order = await OrderModel.findByIdAndDelete(req.params.id);
+    const orderId = req.params.id;
+    const order = await OrderModel.findById(orderId);
     if (!order) return res.status(404).json({ message: 'Order not found' });
-    res.json({ message: 'Order deleted successfully' });
+
+    // 1. Delete the order document itself
+    await OrderModel.findByIdAndDelete(orderId);
+
+    // 2. Cascade delete corresponding SellerHistoryEvent records to prevent orphaned records in seller history
+    try {
+      const activeDb = req.db || OrderModel.db || mongoose.connection;
+      const SellerHistoryEventModel = activeDb.models?.SellerHistoryEvent ||
+        (activeDb.model ? activeDb.model('SellerHistoryEvent', require('../models/SellerHistoryEvent').schema) : require('../models/SellerHistoryEvent'));
+      await SellerHistoryEventModel.deleteMany({
+        $or: [
+          { orderId: order._id },
+          { orderId: order._id.toString() }
+        ]
+      });
+    } catch (cleanErr) {
+      console.error('[Order Delete] Failed to clean up SellerHistoryEvent:', cleanErr.message);
+    }
+
+    // 3. Cascade delete corresponding PaymentAuditLog records for this order
+    try {
+      const activeDb = req.db || OrderModel.db || mongoose.connection;
+      const PaymentAuditModel = activeDb.models?.PaymentAuditLog ||
+        (activeDb.model ? activeDb.model('PaymentAuditLog', require('../models/PaymentAuditLog').schema) : require('../models/PaymentAuditLog'));
+      await PaymentAuditModel.deleteMany({
+        $or: [
+          { orderId: order._id },
+          { orderId: order._id.toString() }
+        ]
+      });
+    } catch (cleanErr) {
+      console.error('[Order Delete] Failed to clean up PaymentAuditLog:', cleanErr.message);
+    }
+
+    // 4. Emit real-time notification to sync connected seller panels
+    try {
+      emitOrderRealtimeUpdate(order, 'delete');
+      const { getIO } = require('../utils/socket');
+      const io = getIO();
+      if (io) {
+        io.emit('order:deleted', { orderId: order._id.toString(), orderNumber: order.orderNumber });
+        io.emit('history:refresh', { orderId: order._id.toString() });
+        io.emit('data_updated', { type: 'order_deleted', orderId: order._id.toString() });
+      }
+    } catch (socketErr) {
+      // Socket not initialized or client offline
+    }
+
+    res.json({ message: 'Order and associated history removed successfully', orderId: order._id });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

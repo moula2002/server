@@ -579,6 +579,7 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
     const occurredAt = event.occurredAt;
     const orderId = event.orderId?.toString() || '';
     const order = ordersById.get(orderId);
+    if (orderId && !order) continue; // Skip orphaned records where order was deleted by admin
     let eventActivityType = event.activityType;
     if (event.activity === 'Order Delivered' || event.status === 'Delivered') {
       eventActivityType = 'delivered';
