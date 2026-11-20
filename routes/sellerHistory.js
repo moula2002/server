@@ -632,6 +632,8 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
       orderId,
       details: {
         ...event.metadata,
+        orderTotal: order?.sellerTotalAmount !== undefined ? order.sellerTotalAmount : event.amount,
+        paymentAmount: order?.sellerTotalAmount !== undefined ? order.sellerTotalAmount : event.amount,
         status: event.status || '',
         description: event.description || '',
         order: order ? {
@@ -849,6 +851,17 @@ const consolidateSellerHistory = (rows) => {
   for (const entry of validOrderRows) {
     entry.activities.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
     entry.categories = Array.from(entry.categories);
+    // Strict safeguard: recalculate canonical seller total without commission
+    const itemsList = entry.details?.items || [];
+    if (itemsList.length > 0) {
+      const itemSum = itemsList.reduce((sum, it) => sum + safeNumber(it.amount), 0);
+      if (itemSum > 0) {
+        entry.amount = itemSum;
+        entry.details.orderTotal = itemSum;
+        entry.details.paymentAmount = itemSum;
+        entry.activities.forEach(a => { a.amount = itemSum; });
+      }
+    }
   }
   for (const entry of nonOrderRows) {
     entry.categories = Array.from(entry.categories);
