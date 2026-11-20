@@ -3115,15 +3115,21 @@ router.delete('/admin/:id', protect, async (req, res) => {
     // 1. Delete the order document itself
     await OrderModel.findByIdAndDelete(orderId);
 
+    const activeDb = req.db || OrderModel.db || mongoose.connection;
+    const orderObjId = mongoose.Types.ObjectId.isValid(orderId) ? new mongoose.Types.ObjectId(orderId) : order._id;
+    const orderIdStr = orderId.toString();
+
     // 2. Cascade delete corresponding SellerHistoryEvent records to prevent orphaned records in seller history
     try {
-      const activeDb = req.db || OrderModel.db || mongoose.connection;
       const SellerHistoryEventModel = activeDb.models?.SellerHistoryEvent ||
         (activeDb.model ? activeDb.model('SellerHistoryEvent', require('../models/SellerHistoryEvent').schema) : require('../models/SellerHistoryEvent'));
       await SellerHistoryEventModel.deleteMany({
         $or: [
-          { orderId: order._id },
-          { orderId: order._id.toString() }
+          { orderId: orderObjId },
+          { orderId: orderIdStr },
+          { eventKey: { $regex: `^${orderIdStr}:` } },
+          { 'metadata.orderId': orderObjId },
+          { 'metadata.orderId': orderIdStr }
         ]
       });
     } catch (cleanErr) {
@@ -3132,28 +3138,48 @@ router.delete('/admin/:id', protect, async (req, res) => {
 
     // 3. Cascade delete corresponding PaymentAuditLog records for this order
     try {
-      const activeDb = req.db || OrderModel.db || mongoose.connection;
       const PaymentAuditModel = activeDb.models?.PaymentAuditLog ||
         (activeDb.model ? activeDb.model('PaymentAuditLog', require('../models/PaymentAuditLog').schema) : require('../models/PaymentAuditLog'));
       await PaymentAuditModel.deleteMany({
         $or: [
-          { orderId: order._id },
-          { orderId: order._id.toString() }
+          { orderId: orderObjId },
+          { orderId: orderIdStr },
+          { 'metadata.orderId': orderObjId },
+          { 'metadata.orderId': orderIdStr }
         ]
       });
     } catch (cleanErr) {
       console.error('[Order Delete] Failed to clean up PaymentAuditLog:', cleanErr.message);
     }
 
-    // 4. Emit real-time notification to sync connected seller panels
+    // 4. Cascade delete/update corresponding SellerInvoice records
+    try {
+      const SellerInvoiceModel = activeDb.models?.SellerInvoice ||
+        (activeDb.model ? activeDb.model('SellerInvoice', require('../models/SellerInvoice').schema) : require('../models/SellerInvoice'));
+      await SellerInvoiceModel.deleteMany({
+        $or: [
+          { orderId: orderObjId },
+          { orderId: orderIdStr },
+          ...(order.orderNumber ? [{ orderNumber: order.orderNumber }] : [])
+        ]
+      });
+      await SellerInvoiceModel.updateMany(
+        { orderIds: { $in: [orderObjId, orderIdStr] } },
+        { $pull: { orderIds: { $in: [orderObjId, orderIdStr] } } }
+      );
+    } catch (cleanErr) {
+      console.error('[Order Delete] Failed to clean up SellerInvoice:', cleanErr.message);
+    }
+
+    // 5. Emit real-time notification to sync connected seller panels
     try {
       emitOrderRealtimeUpdate(order, 'delete');
       const { getIO } = require('../utils/socket');
       const io = getIO();
       if (io) {
-        io.emit('order:deleted', { orderId: order._id.toString(), orderNumber: order.orderNumber });
-        io.emit('history:refresh', { orderId: order._id.toString() });
-        io.emit('data_updated', { type: 'order_deleted', orderId: order._id.toString() });
+        io.emit('order:deleted', { orderId: orderIdStr, orderNumber: order.orderNumber });
+        io.emit('history:refresh', { orderId: orderIdStr });
+        io.emit('data_updated', { type: 'order_deleted', orderId: orderIdStr });
       }
     } catch (socketErr) {
       // Socket not initialized or client offline

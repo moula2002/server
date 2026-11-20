@@ -517,11 +517,15 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
     }));
   }
 
+  const orphanedAuditIds = [];
   for (const audit of paymentAudits) {
     if (audit.action === 'MANUAL_SETTLEMENT') continue;
     const orderId = audit.orderId?.toString() || '';
-    const order = ordersById.get(orderId);
-    if (orderId && !order) continue;
+    const order = orderId ? ordersById.get(orderId) : null;
+    if (orderId && !order) {
+      orphanedAuditIds.push(audit._id);
+      continue; // Skip orphaned records where order was deleted by admin
+    }
     const actionLabels = {
       COD_COLLECTED: 'Payment Received',
       COD_NOT_COLLECTED: 'Payment Pending',
@@ -575,11 +579,23 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
     }));
   }
 
+  // Auto-purge any orphaned payment audit logs from the database asynchronously
+  if (orphanedAuditIds.length > 0) {
+    PaymentAuditModel.deleteMany({ _id: { $in: orphanedAuditIds } }).catch(err => {
+      console.error('[SellerHistory] Auto-cleanup orphaned payment audits error:', err.message);
+    });
+  }
+
+  const orphanedEventIds = [];
   for (const event of historyEvents) {
     const occurredAt = event.occurredAt;
     const orderId = event.orderId?.toString() || '';
-    const order = ordersById.get(orderId);
-    if (orderId && !order) continue; // Skip orphaned records where order was deleted by admin
+    const order = orderId ? ordersById.get(orderId) : null;
+    // Skip and collect orphaned history events where the order was deleted by admin
+    if ((orderId && !order) || (!order && ['statusUpdates', 'pickups', 'returns', 'delivered'].includes(event.activityType))) {
+      orphanedEventIds.push(event._id);
+      continue;
+    }
     let eventActivityType = event.activityType;
     if (event.activity === 'Order Delivered' || event.status === 'Delivered') {
       eventActivityType = 'delivered';
@@ -619,6 +635,13 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
         } : null
       }
     }));
+  }
+
+  // Auto-purge any orphaned history events from the database asynchronously
+  if (orphanedEventIds.length > 0) {
+    HistoryEventModel.deleteMany({ _id: { $in: orphanedEventIds } }).catch(err => {
+      console.error('[SellerHistory] Auto-cleanup orphaned history events error:', err.message);
+    });
   }
 
   for (const row of rows) {
@@ -674,6 +697,14 @@ const consolidateSellerHistory = (rows) => {
 
   for (const row of rows) {
     if (row.orderId) {
+      // Must have a valid reference, customer, or items - never accept empty ghost records from deleted orders
+      const hasValidReference = Boolean(row.referenceId && row.referenceId !== '—');
+      const hasCustomer = Boolean(row.customer?.name && row.customer.name.trim());
+      const hasItems = Boolean(row.details?.items && row.details.items.length > 0);
+      if (!hasValidReference && !hasCustomer && !hasItems) {
+        continue;
+      }
+
       if (!orderMap.has(row.orderId)) {
         orderMap.set(row.orderId, {
           id: `order:${row.orderId}`,
@@ -762,6 +793,10 @@ const consolidateSellerHistory = (rows) => {
         entry.paymentMethod = row.details.paymentMethod;
       }
     } else {
+      // Non-order records must have a valid reference and cannot be orphaned order activities (status updates / pickups)
+      if (!row.referenceId || row.referenceId === '—' || ['statusUpdates', 'pickups'].includes(row.activityType)) {
+        continue;
+      }
       nonOrderRows.push({
         ...row,
         activities: [{
@@ -778,7 +813,15 @@ const consolidateSellerHistory = (rows) => {
     }
   }
 
-  for (const entry of orderMap.values()) {
+  // Filter out any orphaned orders that lack reference, customer, and items
+  const validOrderRows = Array.from(orderMap.values()).filter(order => {
+    const hasValidReference = Boolean(order.referenceId && order.referenceId !== '—');
+    const hasCustomer = Boolean(order.customer?.name && order.customer.name.trim());
+    const hasItems = Boolean(order.details?.items && order.details.items.length > 0);
+    return hasValidReference || hasCustomer || hasItems;
+  });
+
+  for (const entry of validOrderRows) {
     entry.activities.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
     entry.categories = Array.from(entry.categories);
   }
@@ -786,7 +829,7 @@ const consolidateSellerHistory = (rows) => {
     entry.categories = Array.from(entry.categories);
   }
 
-  return [...orderMap.values(), ...nonOrderRows];
+  return [...validOrderRows, ...nonOrderRows];
 };
 
 router.get('/history', protect, async (req, res) => {
