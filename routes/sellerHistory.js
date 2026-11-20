@@ -273,39 +273,42 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
       pickup => pickup.sellerId?.toString() === sellerIdStr
     );
     if (sellerPickup) {
-      const isPickedUp = sellerPickup.status === 'Picked Up' || order.orderStatus === 'Picked Up';
+      const isPickedUp = sellerPickup.status === 'Picked Up' || sellerPickup.status === 'Delivered' || order.orderStatus === 'Picked Up' || order.orderStatus === 'Delivered';
       const isOutForDelivery = sellerPickup.status === 'Out for Delivery' || order.orderStatus === 'Out for Delivery';
-      const pickupTitle = isPickedUp
-        ? 'Order Picked Up'
-        : isOutForDelivery
-          ? 'Pickup Dispatched'
-          : sellerPickup.scheduledDate ? 'Pickup Scheduled' : 'Pickup Record Created';
-      const pickupDate = sellerPickup.scheduledDate || sellerPickup.pickupDate || order.updatedAt || order.createdAt;
+      const isScheduled = Boolean(sellerPickup.scheduledDate || sellerPickup.pickupDate);
+      if (isPickedUp || isOutForDelivery || isScheduled) {
+        const pickupTitle = isPickedUp
+          ? 'Order Picked Up'
+          : isOutForDelivery
+            ? 'Pickup Dispatched'
+            : 'Pickup Scheduled';
+        const pickupDate = sellerPickup.scheduledDate || sellerPickup.pickupDate || order.updatedAt || order.createdAt;
 
-      add(createActivity({
-        id: `pickup:${orderId}:${sellerPickup._id?.toString() || sellerIdStr}`,
-        activityType: 'pickups',
-        activity: pickupTitle,
-        occurredAt: pickupDate,
-        referenceId,
-        customer,
-        description: `Pickup record${sellerPickup.status ? `; current status: ${sellerPickup.status}` : ''}${sellerPickup.pickupCode ? `; Code: ${sellerPickup.pickupCode}` : ''}`,
-        amount: orderTotal,
-        status: sellerPickup.status || order.orderStatus,
-        source: 'order',
-        recordId: orderId,
-        orderId,
-        details: orderDetails
-      }));
-    } else if ((!order.sellerPickups || order.sellerPickups.length === 0) && (order.pickupCode || order.orderStatus === 'Picked Up')) {
+        add(createActivity({
+          id: `pickup:${orderId}:${sellerPickup._id?.toString() || sellerIdStr}`,
+          activityType: 'pickups',
+          activity: pickupTitle,
+          occurredAt: pickupDate,
+          referenceId,
+          customer,
+          description: `Pickup record; status: ${sellerPickup.status || order.orderStatus}${sellerPickup.pickupCode ? `; Code: ${sellerPickup.pickupCode}` : ''}`,
+          amount: orderTotal,
+          status: sellerPickup.status || order.orderStatus,
+          source: 'order',
+          recordId: orderId,
+          orderId,
+          details: orderDetails
+        }));
+      }
+    } else if ((!order.sellerPickups || order.sellerPickups.length === 0) && (order.orderStatus === 'Picked Up' || order.orderStatus === 'Out for Delivery')) {
       add(createActivity({
         id: `pickup:${orderId}:${sellerIdStr}`,
         activityType: 'pickups',
-        activity: order.orderStatus === 'Picked Up' ? 'Order Picked Up' : 'Pickup Record Created',
+        activity: order.orderStatus === 'Picked Up' ? 'Order Picked Up' : 'Pickup Dispatched',
         occurredAt: order.updatedAt || order.createdAt,
         referenceId,
         customer,
-        description: `Pickup record${order.orderStatus ? `; current status: ${order.orderStatus}` : ''}${order.pickupCode ? `; Code: ${order.pickupCode}` : ''}`,
+        description: `Pickup record; status: ${order.orderStatus}${order.pickupCode ? `; Code: ${order.pickupCode}` : ''}`,
         amount: orderTotal,
         status: order.orderStatus,
         source: 'order',
@@ -325,23 +328,6 @@ const loadSellerHistory = async (req, { startDate, endDate }) => {
         referenceId,
         customer,
         description: `${order.paymentMethod || 'Payment'} payment received for order`,
-        amount: orderTotal,
-        status: order.paymentStatus,
-        source: 'order',
-        recordId: orderId,
-        orderId,
-        details: orderDetails
-      }));
-    } else if (order.createdAt && order.paymentStatus === 'Pending' && !order.paidAt &&
-      !hasHistoryEvent(orderId, 'payments', 'Payment Pending')) {
-      add(createActivity({
-        id: `order-payment-pending:${orderId}`,
-        activityType: 'payments',
-        activity: 'Payment Pending',
-        occurredAt: order.createdAt,
-        referenceId,
-        customer,
-        description: `${order.paymentMethod || 'Payment'} payment pending for order`,
         amount: orderTotal,
         status: order.paymentStatus,
         source: 'order',
