@@ -238,6 +238,10 @@ router.put('/profile', protect, async (req, res) => {
     const user = await SellerModel.findById(req.user._id);
     if (!user) return res.status(404).json({ message: 'Seller not found' });
 
+    if (user.isVerified) {
+      return res.status(403).json({ message: 'Verified seller profile details are locked and cannot be edited directly. Please contact admin to request changes.' });
+    }
+
     // Update fields
     user.name = req.body.name || user.name;
     user.phone = req.body.phone || user.phone;
