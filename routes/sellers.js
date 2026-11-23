@@ -239,8 +239,8 @@ router.put('/profile', protect, async (req, res) => {
     const user = await SellerModel.findById(req.user._id);
     if (!user) return res.status(404).json({ message: 'Seller not found' });
 
-    if (user.isVerified) {
-      return res.status(403).json({ message: 'Verified seller profile details are locked and cannot be edited directly. Please contact admin to request changes.' });
+    if (user.isVerified || user.isProfileComplete) {
+      return res.status(403).json({ message: 'Seller profile details are locked and cannot be edited directly. Please contact admin to request changes.' });
     }
 
     // Update fields
@@ -715,6 +715,9 @@ router.get('/pickups', protect, async (req, res) => {
 // @route   PUT /api/sellers/:id/verify
 // @desc    Verify/Approve a seller (Admin)
 router.put('/:id/verify', protect, async (req, res) => {
+  if (req.user?.role === 'seller') {
+    return res.status(403).json({ message: 'Sellers cannot verify accounts.' });
+  }
   const { isVerified, status, creditDays } = req.body;
   try {
     const { Seller: SellerModel } = getModels(req);
@@ -735,6 +738,9 @@ router.put('/:id/verify', protect, async (req, res) => {
 // @route   PUT /api/sellers/:id
 // @desc    Update a seller's details (Admin)
 router.put('/:id', protect, async (req, res) => {
+  if (req.user?.role === 'seller') {
+    return res.status(403).json({ message: 'Sellers are not authorized to edit seller accounts.' });
+  }
   const { 
     name, email, phone, password, businessName, businessAddress, 
     gstNumber, panNumber, creditDays, status, isVerified, b2b, b2c,
