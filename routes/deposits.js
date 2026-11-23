@@ -25,9 +25,15 @@ router.post('/', protect, async (req, res) => {
 
     const { Driver: DriverModel, Deposit: DepositModel } = getModels(req);
 
-    // Check driver wallet
+    // Check driver wallet and cash management permission
     const driver = await DriverModel.findById(req.user._id);
-    if (!driver || (driver.wallet || 0) < amount) {
+    if (!driver) {
+      return res.status(404).json({ message: 'Driver not found' });
+    }
+    if (!driver.cashManagement) {
+      return res.status(403).json({ message: 'Cash management is disabled for this driver. Contact administrator.' });
+    }
+    if ((driver.wallet || 0) < amount) {
       return res.status(400).json({ message: 'Insufficient wallet balance' });
     }
 

@@ -32,6 +32,15 @@ const isOnlineOrder = (order) => {
 };
 
 /**
+ * Helper to determine if an order is valid (not cancelled or returned)
+ */
+const isValidOrder = (order) => {
+  if (!order || !order.orderStatus) return true;
+  const s = String(order.orderStatus).trim();
+  return !['Cancelled', 'Returned', 'Rejected', 'Return Rejected'].includes(s);
+};
+
+/**
  * Extract seller items and financial breakdown for a seller from an order
  */
 const extractSellerOrderBreakdown = (order, targetSellerIdStr, productSellerMap = {}) => {
@@ -47,9 +56,12 @@ const extractSellerOrderBreakdown = (order, targetSellerIdStr, productSellerMap 
   }
 
   order.items.forEach(item => {
-    let itemSellerId = item.seller?.sellerId?.toString() || item.sellerId?.toString();
+    let itemSellerId = item.seller?.sellerId?.toString() || item.seller?._id?.toString() || item.sellerId?.toString();
     if (!itemSellerId && item.productId) {
       itemSellerId = productSellerMap[item.productId.toString()];
+    }
+    if (!itemSellerId && order.sellerId) {
+      itemSellerId = order.sellerId.toString();
     }
 
     if (itemSellerId && itemSellerId === targetSellerIdStr) {
@@ -168,9 +180,10 @@ router.get('/dashboard-stats', protect, async (req, res) => {
     let totalCodCollection = 0;
     let totalOnlineCollection = 0;
 
+    const validOrders = orders.filter(isValidOrder);
     const deliveredOrders = orders.filter(o => o.orderStatus === 'Delivered');
 
-    deliveredOrders.forEach(order => {
+    validOrders.forEach(order => {
       const isCod = isCodOrder(order);
       const isOnline = isOnlineOrder(order);
       const orderAmount = Number(order.totalAmount) || 0;
@@ -226,21 +239,26 @@ router.get('/dashboard-stats', protect, async (req, res) => {
     sellers.forEach(seller => {
       const sellerIdStr = seller._id.toString();
       let sPayable = 0;
+      let sDeliveredPayable = 0;
 
-      deliveredOrders.forEach(order => {
+      validOrders.forEach(order => {
         const bd = extractSellerOrderBreakdown(order, sellerIdStr, productSellerMap);
         if (bd.hasSellerItem) {
           sPayable += bd.sellerPayable;
+          if (order.orderStatus === 'Delivered') {
+            sDeliveredPayable += bd.sellerPayable;
+          }
         }
       });
 
+      const effectivePayable = sDeliveredPayable > 0 ? sDeliveredPayable : sPayable;
       const sPaid = payouts
         .filter(p => p.sellerId?.toString() === sellerIdStr && (!p.status || p.status === 'Completed'))
         .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
 
-      const sPending = Math.max(0, sPayable - sPaid);
+      const sPending = Math.max(0, effectivePayable - sPaid);
       totalPendingPayments += sPending;
-      totalOutstandingAmount += (sPayable - sPaid);
+      totalOutstandingAmount += (effectivePayable - sPaid);
     });
 
     res.json({
@@ -254,7 +272,7 @@ router.get('/dashboard-stats', protect, async (req, res) => {
       totalOnlineCollection: round2(totalOnlineCollection),
       partnerMerchantsCount: sellers.length,
       deliveredOrdersCount: deliveredOrders.length,
-      totalOrdersCount: orders.length
+      totalOrdersCount: validOrders.length
     });
   } catch (error) {
     console.error('Fetch payments dashboard stats error:', error);
@@ -270,6 +288,7 @@ router.get('/dashboard-stats', protect, async (req, res) => {
 router.get('/sellers', protect, async (req, res) => {
   try {
     const { sellers, orders, payouts, productSellerMap } = await loadPaymentContext(req);
+    const validOrders = orders.filter(isValidOrder);
     const deliveredOrders = orders.filter(o => o.orderStatus === 'Delivered');
 
     const sellerPaymentStats = sellers.map(seller => {
@@ -280,7 +299,8 @@ router.get('/sellers', protect, async (req, res) => {
       let onlineSales = 0;
       let totalCommission = 0;
       let totalGst = 0;
-      let sellerPayable = 0;
+      let validSellerPayable = 0;
+      let deliveredSellerPayable = 0;
       let deliveredOrderCount = 0;
       let totalOrderCount = 0;
       let hasCod = false;
@@ -290,9 +310,12 @@ router.get('/sellers', protect, async (req, res) => {
       orders.forEach(order => {
         let orderHasSeller = false;
         order.items?.forEach(item => {
-          let itemSellerId = item.seller?.sellerId?.toString() || item.sellerId?.toString();
+          let itemSellerId = item.seller?.sellerId?.toString() || item.seller?._id?.toString() || item.sellerId?.toString();
           if (!itemSellerId && item.productId) {
             itemSellerId = productSellerMap[item.productId.toString()];
+          }
+          if (!itemSellerId && order.sellerId) {
+            itemSellerId = order.sellerId.toString();
           }
           if (itemSellerId === sellerIdStr) {
             orderHasSeller = true;
@@ -306,27 +329,32 @@ router.get('/sellers', protect, async (req, res) => {
         }
       });
 
-      // Compute delivered sales & financials
-      deliveredOrders.forEach(order => {
+      // Compute sales & financials across valid orders
+      validOrders.forEach(order => {
         const bd = extractSellerOrderBreakdown(order, sellerIdStr, productSellerMap);
         if (bd.hasSellerItem) {
-          deliveredOrderCount++;
           totalSales += bd.sellerSales;
           totalCommission += bd.sellerCommission;
           totalGst += bd.sellerGst;
-          sellerPayable += bd.sellerPayable;
+          validSellerPayable += bd.sellerPayable;
 
           if (isCodOrder(order)) {
             codSales += bd.sellerSales;
           } else {
             onlineSales += bd.sellerSales;
           }
+
+          if (order.orderStatus === 'Delivered') {
+            deliveredOrderCount++;
+            deliveredSellerPayable += bd.sellerPayable;
+          }
         }
       });
 
+      const effectiveSellerPayable = deliveredSellerPayable > 0 ? deliveredSellerPayable : validSellerPayable;
       const sellerPayouts = payouts.filter(p => p.sellerId?.toString() === sellerIdStr && (!p.status || p.status === 'Completed'));
       const settledAmount = round2(sellerPayouts.reduce((sum, p) => sum + (Number(p.amount) || 0), 0));
-      const outstandingBalance = round2(sellerPayable - settledAmount);
+      const outstandingBalance = round2(effectiveSellerPayable - settledAmount);
       const pendingAmount = Math.max(0, outstandingBalance);
 
       // Method label
@@ -337,11 +365,11 @@ router.get('/sellers', protect, async (req, res) => {
 
       // Status
       let paymentStatus = 'Pending';
-      if (sellerPayable > 0 && settledAmount >= sellerPayable) {
+      if (effectiveSellerPayable > 0 && settledAmount >= effectiveSellerPayable) {
         paymentStatus = 'Settled';
       } else if (settledAmount > 0) {
         paymentStatus = 'Partially Settled';
-      } else if (sellerPayable === 0 && settledAmount === 0) {
+      } else if (effectiveSellerPayable === 0 && settledAmount === 0) {
         paymentStatus = 'Settled';
       }
 
@@ -352,14 +380,14 @@ router.get('/sellers', protect, async (req, res) => {
         onlineSales: round2(onlineSales),
         totalCommission: round2(totalCommission),
         totalGst: round2(totalGst),
-        sellerPayable: round2(sellerPayable),
+        sellerPayable: round2(effectiveSellerPayable),
         settledAmount,
         totalPaid: settledAmount, // Backward compatibility
         pendingAmount,
         outstandingBalance,
         paymentMethod,
         paymentStatus,
-        orderCount: deliveredOrderCount,
+        orderCount: deliveredOrderCount > 0 ? deliveredOrderCount : totalOrderCount,
         deliveredOrderCount,
         totalOrderCount,
         payoutCount: sellerPayouts.length
@@ -854,18 +882,24 @@ router.post('/settle', protect, async (req, res) => {
       if (p.sellerId) productSellerMap[p._id.toString()] = p.sellerId.toString();
     });
 
-    // Compute backend payable from delivered orders
+    // Compute backend payable from valid orders
     const sellerIdStr = seller._id.toString();
-    const deliveredOrders = await OrderModel.find({ orderStatus: 'Delivered' }).lean();
+    const activeOrders = await OrderModel.find({ 
+      orderStatus: { $nin: ['Cancelled', 'Returned', 'Rejected', 'Return Rejected'] } 
+    }).lean();
 
+    let deliveredPayable = 0;
     let totalSellerPayable = 0;
-    deliveredOrders.forEach(order => {
+    activeOrders.forEach(order => {
       const bd = extractSellerOrderBreakdown(order, sellerIdStr, productSellerMap);
       if (bd.hasSellerItem) {
         totalSellerPayable += bd.sellerPayable;
+        if (order.orderStatus === 'Delivered') {
+          deliveredPayable += bd.sellerPayable;
+        }
       }
     });
-    totalSellerPayable = round2(totalSellerPayable);
+    totalSellerPayable = round2(deliveredPayable > 0 ? deliveredPayable : totalSellerPayable);
 
     // Compute previously settled amount
     const previousPayouts = await SellerPaymentModel.find({ 
@@ -1120,6 +1154,9 @@ router.get('/sellers/:sellerId/details', protect, async (req, res) => {
     let totalGst = 0;
     let totalSellerPayable = 0;
 
+    let validPayable = 0;
+    let deliveredPayable = 0;
+
     const sellerOrderLedger = [];
 
     orders.forEach(order => {
@@ -1130,15 +1167,19 @@ router.get('/sellers/:sellerId/details', protect, async (req, res) => {
         if (isCod) codOrdersCount++;
         else onlineOrdersCount++;
 
-        if (order.orderStatus === 'Delivered') {
-          deliveredOrdersCount++;
+        if (isValidOrder(order)) {
           totalSales += bd.sellerSales;
           totalCommission += bd.sellerCommission;
           totalGst += bd.sellerGst;
-          totalSellerPayable += bd.sellerPayable;
+          validPayable += bd.sellerPayable;
 
           if (isCod) codSales += bd.sellerSales;
           else onlineSales += bd.sellerSales;
+        }
+
+        if (order.orderStatus === 'Delivered') {
+          deliveredOrdersCount++;
+          deliveredPayable += bd.sellerPayable;
         }
 
         sellerOrderLedger.push({
@@ -1165,6 +1206,7 @@ router.get('/sellers/:sellerId/details', protect, async (req, res) => {
     });
 
     // Payouts
+    totalSellerPayable = round2(deliveredPayable > 0 ? deliveredPayable : validPayable);
     const sellerPayouts = payouts.filter(p => p.sellerId?.toString() === sellerIdStr);
     const settledAmount = round2(sellerPayouts.reduce((sum, p) => sum + (Number(p.amount) || 0), 0));
     const outstandingBalance = round2(totalSellerPayable - settledAmount);
@@ -1221,7 +1263,7 @@ router.get('/sellers/:sellerId/history', protect, async (req, res) => {
     const sellerPayouts = payouts.filter(p => p.sellerId?.toString() === sellerId.toString());
     const sales = [];
 
-    orders.filter(o => o.orderStatus === 'Delivered').forEach(order => {
+    orders.filter(isValidOrder).forEach(order => {
       const bd = extractSellerOrderBreakdown(order, sellerId.toString(), productSellerMap);
       if (bd.hasSellerItem) {
         bd.sellerItems.forEach(it => {
