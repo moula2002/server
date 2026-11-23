@@ -235,9 +235,12 @@ router.get('/next-number', protect, async (req, res) => {
       const numStr = (inv.invoiceNumber || '').toString().trim();
       if (numStr) usedNumbers.push(numStr);
 
-      const parsed = parseInt(numStr, 10);
-      if (/^\d+$/.test(numStr) && !isNaN(parsed) && parsed > 0) {
-        usedNumericSequences.push(parsed);
+      const match = numStr.match(/\d+/g);
+      if (match) {
+        const lastNum = parseInt(match[match.length - 1], 10);
+        if (!isNaN(lastNum) && lastNum > 0) {
+          usedNumericSequences.push(lastNum);
+        }
       } else if (inv.invoiceSequenceNumber && inv.invoiceSequenceNumber > 0) {
         usedNumericSequences.push(inv.invoiceSequenceNumber);
       }
@@ -245,12 +248,14 @@ router.get('/next-number', protect, async (req, res) => {
 
     const maxNumeric = usedNumericSequences.length > 0 ? Math.max(...usedNumericSequences) : 0;
     const nextExpectedNumber = maxNumeric + 1;
+    const nextInvoiceNumber = `INV-${String(nextExpectedNumber).padStart(5, '0')}`;
 
     res.json({
       totalInvoices: existingInvoices.length,
       lastInvoiceNumber: existingInvoices.length > 0 ? existingInvoices[existingInvoices.length - 1].invoiceNumber : null,
       maxSequentialNumber: maxNumeric,
       nextExpectedNumber,
+      nextInvoiceNumber,
       usedNumbers
     });
   } catch (error) {
@@ -456,8 +461,6 @@ router.post('/generate', protect, (req, res, next) => {
       }
 
       const humanOrderId = getOrderDisplayId(targetOrder);
-      trimmedInvoiceNumber = humanOrderId;
-      numericInvoiceNumber = targetOrder.orderNumber || parseInt(humanOrderId, 10) || 1;
 
       const duplicate = await InvoiceModel.findOne({
         sellerId: sellerId,
@@ -469,7 +472,48 @@ router.post('/generate', protect, (req, res, next) => {
 
       if (duplicate) {
         return res.status(400).json({ 
-          message: `An invoice for order #${humanOrderId} has already been generated. Duplicate invoices for the same order are not allowed.` 
+          message: `An invoice (${duplicate.invoiceNumber}) has already been generated for order #${humanOrderId}. Duplicate invoices for the same order are not allowed.` 
+        });
+      }
+
+      const allSellerInvoices = await InvoiceModel.find({ sellerId }).select('invoiceNumber invoiceSequenceNumber').lean();
+      const usedNumericSequences = [];
+      const usedNumbers = new Set();
+      (allSellerInvoices || []).forEach(inv => {
+        const numStr = (inv.invoiceNumber || '').toString().trim();
+        if (numStr) usedNumbers.add(numStr.toUpperCase());
+        const match = numStr.match(/\d+/g);
+        if (match) {
+          const lastNum = parseInt(match[match.length - 1], 10);
+          if (!isNaN(lastNum) && lastNum > 0) usedNumericSequences.push(lastNum);
+        }
+        if (inv.invoiceSequenceNumber && inv.invoiceSequenceNumber > 0) {
+          usedNumericSequences.push(inv.invoiceSequenceNumber);
+        }
+      });
+
+      const maxNumeric = usedNumericSequences.length > 0 ? Math.max(...usedNumericSequences) : 0;
+      const nextExpectedNumber = maxNumeric + 1;
+
+      const rawInvoiceNumber = req.body.invoiceNumber;
+      if (rawInvoiceNumber && rawInvoiceNumber.toString().trim()) {
+        trimmedInvoiceNumber = rawInvoiceNumber.toString().trim();
+        const p = parseInt(trimmedInvoiceNumber.replace(/\D/g, ''), 10);
+        numericInvoiceNumber = !isNaN(p) && p > 0 ? p : nextExpectedNumber;
+      } else {
+        trimmedInvoiceNumber = `INV-${String(nextExpectedNumber).padStart(5, '0')}`;
+        numericInvoiceNumber = nextExpectedNumber;
+      }
+
+      const duplicateInvoiceNum = await InvoiceModel.findOne({
+        sellerId: sellerId,
+        invoiceNumber: trimmedInvoiceNumber,
+        status: { $nin: ['Cancelled', 'Rejected'] }
+      });
+
+      if (duplicateInvoiceNum) {
+        return res.status(400).json({ 
+          message: `Invoice number "${trimmedInvoiceNumber}" has already been used for this seller. Please provide a different invoice number.` 
         });
       }
 
@@ -819,11 +863,30 @@ router.post('/generate-batch', protect, (req, res, next) => {
       }
     });
 
+    const existingInvoices = await InvoiceModel.find({ sellerId })
+      .select('invoiceNumber invoiceSequenceNumber')
+      .lean();
+    const usedNumericSequences = [];
+    const usedNumbers = new Set();
+    (existingInvoices || []).forEach(inv => {
+      const numStr = (inv.invoiceNumber || '').toString().trim();
+      if (numStr) usedNumbers.add(numStr.toUpperCase());
+      const match = numStr.match(/\d+/g);
+      if (match) {
+        const lastNum = parseInt(match[match.length - 1], 10);
+        if (!isNaN(lastNum) && lastNum > 0) usedNumericSequences.push(lastNum);
+      }
+      if (inv.invoiceSequenceNumber && inv.invoiceSequenceNumber > 0) {
+        usedNumericSequences.push(inv.invoiceSequenceNumber);
+      }
+    });
+
+    let currentMaxSeq = usedNumericSequences.length > 0 ? Math.max(...usedNumericSequences) : 0;
     const batchNumbers = new Set();
     const batchOrderIds = new Set();
     for (let i = 0; i < invoicesMetadata.length; i++) {
       const item = invoicesMetadata[i];
-      const reqOrderId = item.orderId || item.orderNumber || item.invoiceNumber;
+      const reqOrderId = item.orderId || item.orderNumber;
       if (!reqOrderId) {
         return res.status(400).json({ message: `Entry #${i + 1} has no Order ID specified.` });
       }
@@ -873,20 +936,33 @@ router.post('/generate-batch', protect, (req, res, next) => {
       }
       batchOrderIds.add(targetOrder._id.toString());
 
-      const humanOrderId = targetOrder.orderNumber 
-        ? String(targetOrder.orderNumber).padStart(5, '0') 
-        : (targetOrder.orderId || targetOrder._id.toString().slice(-6).toUpperCase());
-      const trimmedInvNum = humanOrderId;
-      const numSeq = targetOrder.orderNumber || parseInt(humanOrderId, 10) || (i + 1);
-
-      if (batchNumbers.has(trimmedInvNum)) {
-        return res.status(400).json({ message: `Duplicate Order #${trimmedInvNum} within this submission.` });
+      let assignedInvNum = '';
+      let assignedSeq = 0;
+      if (item.invoiceNumber && item.invoiceNumber.toString().trim()) {
+        assignedInvNum = item.invoiceNumber.toString().trim();
+        const p = parseInt(assignedInvNum.replace(/\D/g, ''), 10);
+        assignedSeq = !isNaN(p) && p > 0 ? p : (currentMaxSeq + 1);
+        if (usedNumbers.has(assignedInvNum.toUpperCase()) || batchNumbers.has(assignedInvNum.toUpperCase())) {
+          return res.status(400).json({ message: `Invoice number "${assignedInvNum}" is already used or duplicate in this batch.` });
+        }
+      } else {
+        currentMaxSeq += 1;
+        assignedSeq = currentMaxSeq;
+        assignedInvNum = `INV-${String(currentMaxSeq).padStart(5, '0')}`;
+        while (usedNumbers.has(assignedInvNum.toUpperCase()) || batchNumbers.has(assignedInvNum.toUpperCase())) {
+          currentMaxSeq += 1;
+          assignedSeq = currentMaxSeq;
+          assignedInvNum = `INV-${String(currentMaxSeq).padStart(5, '0')}`;
+        }
       }
-      batchNumbers.add(trimmedInvNum);
+
+      batchNumbers.add(assignedInvNum.toUpperCase());
+      item._computedInvoiceNumber = assignedInvNum;
+      item._computedSequenceNumber = assignedSeq;
 
       const itemFiles = filesByInvoiceIndex[i] || [];
       if (itemFiles.length > 5) {
-        return res.status(400).json({ message: `Order #${trimmedInvNum} exceeds the maximum of 5 images.` });
+        return res.status(400).json({ message: `Entry #${i + 1} exceeds the maximum of 5 images.` });
       }
     }
 
@@ -897,12 +973,12 @@ router.post('/generate-batch', protect, (req, res, next) => {
         { orderId: { $in: selectedOrderIds } },
         { orders: { $in: selectedOrderIds } }
       ]
-    }).select('invoiceNumber');
+    }).select('invoiceNumber orderNumber orderRef');
 
     if (existingDuplicates && existingDuplicates.length > 0) {
-      const dupList = existingDuplicates.map(d => `#${d.invoiceNumber}`).join(', ');
+      const dupList = existingDuplicates.map(d => `Invoice #${d.invoiceNumber}`).join(', ');
       return res.status(400).json({ 
-        message: `An invoice has already been generated for order(s) ${dupList}. Duplicate invoices are not allowed.` 
+        message: `An invoice has already been generated for order(s) (${dupList}). Duplicate invoices are not allowed.` 
       });
     }
 
@@ -910,7 +986,7 @@ router.post('/generate-batch', protect, (req, res, next) => {
 
     for (let i = 0; i < invoicesMetadata.length; i++) {
       const item = invoicesMetadata[i];
-      const reqOrderId = item.orderId || item.orderNumber || item.invoiceNumber;
+      const reqOrderId = item.orderId || item.orderNumber;
       const isObjectId = mongoose.Types.ObjectId.isValid(reqOrderId);
       const parsedOrderNum = parseInt(reqOrderId, 10);
       const orderQuery = {
@@ -930,11 +1006,8 @@ router.post('/generate-batch', protect, (req, res, next) => {
         .populate('items.productId');
       const sellerItems = getSellerOrderItems(targetOrder, sellerId);
 
-      const humanOrderId = targetOrder.orderNumber 
-        ? String(targetOrder.orderNumber).padStart(5, '0') 
-        : (targetOrder.orderId || targetOrder._id.toString().slice(-6).toUpperCase());
-      const trimmedInvNum = humanOrderId;
-      const numSeq = targetOrder.orderNumber || parseInt(humanOrderId, 10) || (i + 1);
+      const trimmedInvNum = item._computedInvoiceNumber;
+      const numSeq = item._computedSequenceNumber;
 
       const start = new Date(item.startDate);
       const end = new Date(item.endDate);
@@ -1250,6 +1323,8 @@ router.get('/my-invoices', protect, async (req, res) => {
     const invoices = await InvoiceModel.find({ sellerId })
       .select('-invoiceImage.data')
       .populate('sellerId', 'businessName name email storeName')
+      .populate('orderId', 'orderNumber orderId orderRef createdAt')
+      .populate('orders', 'orderNumber orderId orderRef createdAt')
       .sort({ createdAt: -1 })
       .lean();
 

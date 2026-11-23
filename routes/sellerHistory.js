@@ -449,12 +449,8 @@ const loadSellerHistory = async (req, { startDate, endDate, sellerId: explicitSe
     const invoiceOrderId = invoiceOrderIds[0] || '';
     const linkedOrders = invoiceOrderIds.map(id => ordersById.get(id)).filter(Boolean);
     const order = linkedOrders[0];
-    const rawInvNum = invoice.orderNumber ?? invoice.invoiceNumber ?? invoice.invoiceSequenceNumber;
-    let invoiceReference = invoice._id.toString();
-    if (rawInvNum !== undefined && rawInvNum !== null && String(rawInvNum).trim()) {
-      const clean = String(rawInvNum).trim().replace(/^#/, '');
-      invoiceReference = /^\d+$/.test(clean) ? `#${clean.padStart(5, '0')}` : `#${clean}`;
-    }
+    const rawInvNum = invoice.invoiceNumber || (invoice.invoiceSequenceNumber ? `INV-${String(invoice.invoiceSequenceNumber).padStart(5, '0')}` : invoice._id.toString());
+    const invoiceReference = String(rawInvNum).trim();
     for (const id of invoiceOrderIds) {
       if (!ordersById.has(id)) continue;
       const current = invoicesByOrder.get(id) || [];
@@ -462,6 +458,7 @@ const loadSellerHistory = async (req, { startDate, endDate, sellerId: explicitSe
       invoicesByOrder.set(id, current);
     }
     const customer = order?.customer || {};
+    const linkedOrderRef = order ? getOrderReference(order) : (invoice.orderNumber ? `#${String(invoice.orderNumber).padStart(5, '0')}` : '');
     add(createActivity({
       id: `invoice:${invoice._id.toString()}`,
       activityType: 'invoices',
@@ -469,8 +466,8 @@ const loadSellerHistory = async (req, { startDate, endDate, sellerId: explicitSe
       occurredAt: invoice.createdAt,
       referenceId: invoiceReference,
       customer,
-      description: invoice.orderNumber
-        ? `Invoice for order #${String(invoice.orderNumber).padStart(5, '0')}`
+      description: linkedOrderRef
+        ? `Invoice for order ${linkedOrderRef}`
         : 'Seller invoice generated',
       amount: invoice.netAmount ?? invoice.totalAmount,
       status: invoice.status,
@@ -482,6 +479,7 @@ const loadSellerHistory = async (req, { startDate, endDate, sellerId: explicitSe
         invoiceNumber: invoiceReference,
         orderId: invoiceOrderId,
         orderNumber: invoice.orderNumber ?? '',
+        orderReference: linkedOrderRef,
         startDate: invoice.startDate || null,
         endDate: invoice.endDate || null,
         totalAmount: safeNumber(invoice.totalAmount),
