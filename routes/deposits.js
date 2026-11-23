@@ -134,6 +134,41 @@ router.get('/admin', protect, async (req, res) => {
 
 // @route   PUT /api/deposits/:id/status
 // @desc    Update deposit status (Approve/Reject)
+// @route   PUT /api/deposits/:id
+// @desc    Update deposit status (alias for /:id/status for frontend compatibility)
+router.put('/:id', protect, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin' && req.user.role !== 'super_admin') {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    const { status, remarks } = req.body;
+    const { Driver: DriverModel, Deposit: DepositModel } = getModels(req);
+    const deposit = await DepositModel.findById(req.params.id);
+
+    if (!deposit) {
+      return res.status(404).json({ message: 'Deposit request not found' });
+    }
+
+    const targetStatus = (status === 'Completed' || status === 'Approved') ? 'Approved' : (status || 'Approved');
+    deposit.status = targetStatus;
+    if (remarks) deposit.remarks = remarks;
+
+    if (targetStatus === 'Approved') {
+      const driver = await DriverModel.findById(deposit.driverId);
+      if (driver && driver.wallet) {
+        driver.wallet = Math.max(0, (driver.wallet || 0) - deposit.amount);
+        await driver.save();
+      }
+    }
+
+    await deposit.save();
+    res.json(deposit);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 router.put('/:id/status', protect, async (req, res) => {
   try {
     if (req.user.role !== 'admin' && req.user.role !== 'super_admin') {

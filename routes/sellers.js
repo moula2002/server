@@ -419,8 +419,17 @@ router.get('/orders', protect, async (req, res) => {
       const sellerPickup = orderObj.sellerPickups?.find(sp => sp.sellerId?.toString() === sellerIdStr);
       if (sellerPickup) {
         orderObj.pickupCode = sellerPickup.pickupCode;
-        orderObj.orderStatus = sellerPickup.status;
-        orderObj.status = sellerPickup.status;
+        
+        // Downstream global lifecycle statuses always take precedence over a stagnant pickup status
+        const downstreamStatuses = ['Picked Up', 'Shipped', 'Out for Delivery', 'Delivered', 'Cancelled', 'Returned', 'Partially Returned', 'Return Requested', 'Return Approved', 'Return Rejected', 'Return Driver Assigned', 'Out for Return'];
+        if (downstreamStatuses.includes(orderObj.orderStatus)) {
+          orderObj.status = orderObj.orderStatus;
+        } else if (sellerPickup.status) {
+          orderObj.orderStatus = sellerPickup.status;
+          orderObj.status = sellerPickup.status;
+        } else {
+          orderObj.status = orderObj.orderStatus;
+        }
       } else {
         orderObj.status = orderObj.orderStatus;
       }
@@ -605,7 +614,10 @@ router.get('/pickups', protect, async (req, res) => {
       const orderObj = order;
       const originalOrderStatus = orderObj.orderStatus;
       const sellerPickup = orderObj.sellerPickups?.find(sp => sp.sellerId?.toString() === sellerId.toString());
-      const pickupStatus = sellerPickup?.status || orderObj.orderStatus;
+      const downstreamStatuses = ['Picked Up', 'Shipped', 'Out for Delivery', 'Delivered', 'Cancelled', 'Returned', 'Partially Returned', 'Return Requested', 'Return Approved', 'Return Rejected', 'Return Driver Assigned', 'Out for Return'];
+      const pickupStatus = downstreamStatuses.includes(orderObj.orderStatus)
+        ? orderObj.orderStatus
+        : (sellerPickup?.status || orderObj.orderStatus);
       if (['Cancelled', 'Rejected by Seller'].includes(pickupStatus)) return null;
       orderObj.pickupCode = sellerPickup?.pickupCode || orderObj.pickupCode;
       orderObj.orderStatus = pickupStatus;

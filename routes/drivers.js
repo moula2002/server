@@ -309,4 +309,49 @@ router.delete('/:id', protect, async (req, res) => {
   }
 });
 
+
+// @route   POST /api/drivers/verify-otp
+// @desc    Verify OTP for driver cash collection settlement
+router.post('/verify-otp', async (req, res) => {
+  const { driverId, otp } = req.body;
+  if (!driverId || !otp) {
+    return res.status(400).json({ success: false, message: 'driverId and otp are required' });
+  }
+  try {
+    const DriverModel = getModelSafe('Driver', req, Driver);
+    let DepositModel = null;
+    try {
+      DepositModel = getModelSafe('Deposit', req, require('../models/Deposit'));
+    } catch (_) {}
+    
+    const driver = await DriverModel.findById(driverId);
+    if (!driver) {
+      return res.status(404).json({ success: false, message: 'Driver not found' });
+    }
+
+    const cleanOtp = otp.toString().trim();
+
+    // Check if deposit with this OTP exists for the driver
+    let deposit = null;
+    if (DepositModel) {
+      deposit = await DepositModel.findOne({
+        driverId,
+        otp: cleanOtp,
+        status: { $in: ['Pending', 'pending'] }
+      });
+    }
+
+    // Or check if driver has otp field on model
+    const driverOtpMatches = driver.otp && driver.otp.toString().trim() === cleanOtp;
+
+    if (deposit || driverOtpMatches) {
+      return res.json({ success: true, message: 'OTP verified successfully' });
+    }
+
+    return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 module.exports = router;

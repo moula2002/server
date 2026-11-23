@@ -5,7 +5,8 @@ const cashCollectorSchema = new mongoose.Schema({
   type: {
     type: String,
     required: true,
-    enum: ['B2C', 'B2B', 'B2C (Driver)', 'Account']
+    enum: ['B2C', 'B2B', 'B2C (Driver)', 'B2C Driver', 'Account', 'Other'],
+    default: 'B2C'
   },
   name: {
     type: String,
@@ -13,7 +14,8 @@ const cashCollectorSchema = new mongoose.Schema({
   },
   phone: {
     type: String,
-    required: true
+    required: false,
+    default: ''
   },
   email: {
     type: String
@@ -23,11 +25,12 @@ const cashCollectorSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['active', 'inactive'],
-    default: 'active'
+    enum: ['active', 'inactive', 'Verified', 'Pending', 'Completed', 'Settled'],
+    default: 'Verified'
   },
   amount: {
-    type: Number
+    type: Number,
+    default: 0
   },
   description: {
     type: String
@@ -35,6 +38,23 @@ const cashCollectorSchema = new mongoose.Schema({
   paymentMethod: {
     type: String,
     default: 'Cash'
+  },
+  otp: {
+    type: String
+  },
+  driverId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Driver'
+  },
+  orderId: {
+    type: String
+  },
+  verification: {
+    type: String,
+    default: 'Verified'
+  },
+  settledBy: {
+    type: String
   },
   date: {
     type: Date,

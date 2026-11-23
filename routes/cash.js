@@ -9,11 +9,11 @@ router.get('/', async (req, res) => {
   try {
     if (!req.locationId) {
       const { aggregateGET } = require('../utils/aggregator');
-      const transactions = await aggregateGET('CashCollector', req, {}, [], '', { date: -1 });
+      const transactions = await aggregateGET('CashCollector', req, {}, ['driverId'], '', { date: -1, createdAt: -1 });
       return res.json(transactions);
     }
     const CashCollectorModel = req.models?.CashCollector || CashCollector;
-    const transactions = await CashCollectorModel.find().sort({ date: -1 });
+    const transactions = await CashCollectorModel.find().populate('driverId', 'name phone wallet').sort({ date: -1, createdAt: -1 });
     res.json(transactions);
   } catch (err) {
     console.error(err.message);
@@ -25,19 +25,40 @@ router.get('/', async (req, res) => {
 // @desc    Record a new cash transaction / collector
 // @access  Private (Admin)
 router.post('/', async (req, res) => {
-  const { type, name, phone, email, password, amount, description, paymentMethod } = req.body;
+  const { 
+    type, 
+    name, 
+    phone, 
+    email, 
+    password, 
+    amount, 
+    description, 
+    paymentMethod,
+    otp,
+    driverId,
+    orderId,
+    status,
+    verification,
+    date
+  } = req.body;
 
   try {
     const CashCollectorModel = req.models?.CashCollector || CashCollector;
     const newTransaction = new CashCollectorModel({
-      type,
-      name,
-      phone,
+      type: type || 'B2C',
+      name: name || 'Cash Collection',
+      phone: phone || '',
       email,
       password,
-      amount,
-      description,
-      paymentMethod
+      amount: amount !== undefined ? Number(amount) : 0,
+      description: description || '',
+      paymentMethod: paymentMethod || 'Cash',
+      otp: otp ? String(otp) : undefined,
+      driverId: driverId || undefined,
+      orderId: orderId || undefined,
+      status: status || 'Verified',
+      verification: verification || (otp ? 'Verified (OTP)' : 'Manual Entry'),
+      date: date ? new Date(date) : new Date()
     });
 
     let transaction;
@@ -64,7 +85,23 @@ router.post('/', async (req, res) => {
 // @desc    Update a cash transaction
 // @access  Private (Admin)
 router.put('/:id', async (req, res) => {
-  const { type, name, phone, email, password, amount, description, paymentMethod } = req.body;
+  const { 
+    type, 
+    name, 
+    phone, 
+    email, 
+    password, 
+    amount, 
+    description, 
+    paymentMethod,
+    otp,
+    driverId,
+    orderId,
+    status,
+    verification,
+    date
+  } = req.body;
+
   try {
     const CashCollectorModel = req.models?.CashCollector || CashCollector;
     let transaction = await CashCollectorModel.findById(req.params.id);
@@ -72,12 +109,18 @@ router.put('/:id', async (req, res) => {
 
     if (type) transaction.type = type;
     if (name) transaction.name = name;
-    if (phone) transaction.phone = phone;
+    if (phone !== undefined) transaction.phone = phone;
     if (email !== undefined) transaction.email = email;
     if (password) transaction.password = password;
-    if (amount !== undefined) transaction.amount = amount;
+    if (amount !== undefined) transaction.amount = Number(amount);
     if (description !== undefined) transaction.description = description;
     if (paymentMethod) transaction.paymentMethod = paymentMethod;
+    if (otp !== undefined) transaction.otp = String(otp);
+    if (driverId !== undefined) transaction.driverId = driverId;
+    if (orderId !== undefined) transaction.orderId = orderId;
+    if (status !== undefined) transaction.status = status;
+    if (verification !== undefined) transaction.verification = verification;
+    if (date) transaction.date = new Date(date);
 
     transaction = await transaction.save();
     res.json(transaction);

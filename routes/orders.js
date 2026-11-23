@@ -1153,6 +1153,13 @@ router.put('/:id/ship', protect, async (req, res) => {
     order.driverId = req.body.driverId;
     if (order.orderStatus === 'Out for Delivery' || req.body.outForDelivery !== false || order.orderStatus === 'Packed') {
       order.orderStatus = 'Out for Delivery';
+      if (order.sellerPickups && order.sellerPickups.length > 0) {
+        order.sellerPickups.forEach(sp => {
+          if (['Pending', 'Packed', 'Confirmed', 'Accepted', 'Processing'].includes(sp.status)) {
+            sp.status = 'Out for Delivery';
+          }
+        });
+      }
       const otp = prepareOrderDeliveryOtp(order);
       await dispatchDeliveryOtpNotification({ order, otp, user: order.userId });
     }
