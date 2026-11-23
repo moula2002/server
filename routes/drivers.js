@@ -16,6 +16,45 @@ const getModelSafe = (modelName, req, fallbackModel) => {
   }
 };
 
+/**
+ * Helper to locate Driver model and document across tenant connections or central DB
+ */
+const findDriverModelAndDoc = async (id, req) => {
+  // 1. If tenant context exists on request
+  if (req.locationId && req.models?.Driver) {
+    const doc = await req.models.Driver.findById(id);
+    if (doc) return { DriverModel: req.models.Driver, driver: doc };
+  }
+
+  // 2. Search default / context model
+  const CentralDriver = getModelSafe('Driver', req, Driver);
+  try {
+    const doc = await CentralDriver.findById(id);
+    if (doc) return { DriverModel: CentralDriver, driver: doc };
+  } catch (e) {}
+
+  // 3. Search across active tenant databases (Global Super Admin mode)
+  try {
+    const { connectDBByLocation } = require('../utils/db_manager');
+    const LocationModel = CentralDriver.db.models.Location || CentralDriver.db.model('Location', require('../models/Location').schema);
+    const locations = await LocationModel.find({ isActive: true }).lean();
+    for (const loc of locations) {
+      try {
+        const conn = await connectDBByLocation(loc._id.toString());
+        const TenantDriver = conn.models.Driver || conn.model('Driver', Driver.schema);
+        const doc = await TenantDriver.findById(id);
+        if (doc) {
+          return { DriverModel: TenantDriver, driver: doc, location: loc };
+        }
+      } catch (e) {}
+    }
+  } catch (err) {
+    console.error('[Drivers] Error searching across tenant DBs:', err.message);
+  }
+
+  return { DriverModel: CentralDriver, driver: null };
+};
+
 // @route   GET /api/drivers
 // @desc    Get all drivers
 router.get('/', protect, async (req, res) => {
@@ -223,12 +262,11 @@ router.get('/:id/location', protect, async (req, res) => {
 });
 
 // @route   PUT /api/drivers/:id
-// @desc    Update a driver profile (e.g., wallet balance, password)
+// @desc    Update a driver profile (e.g., wallet balance, password, cashManagement)
 router.put('/:id', protect, async (req, res) => {
   try {
     if (req.body.type) req.body.type = req.body.type.toLowerCase();
-    const DriverModel = getModelSafe('Driver', req, Driver);
-    const driver = await DriverModel.findById(req.params.id);
+    const { DriverModel, driver } = await findDriverModelAndDoc(req.params.id, req);
     if (!driver) return res.status(404).json({ message: 'Driver not found' });
     
     // Assign fields (skip password to hash manually)
@@ -298,8 +336,7 @@ router.get('/:id/attendance', protect, async (req, res) => {
 // @desc    Delete a driver
 router.delete('/:id', protect, async (req, res) => {
   try {
-    const DriverModel = getModelSafe('Driver', req, Driver);
-    const driver = await DriverModel.findById(req.params.id);
+    const { DriverModel, driver } = await findDriverModelAndDoc(req.params.id, req);
     if (!driver) return res.status(404).json({ message: 'Driver not found' });
     
     await DriverModel.findByIdAndDelete(req.params.id);
@@ -318,16 +355,15 @@ router.post('/verify-otp', async (req, res) => {
     return res.status(400).json({ success: false, message: 'driverId and otp are required' });
   }
   try {
-    const DriverModel = getModelSafe('Driver', req, Driver);
-    let DepositModel = null;
-    try {
-      DepositModel = getModelSafe('Deposit', req, require('../models/Deposit'));
-    } catch (_) {}
-    
-    const driver = await DriverModel.findById(driverId);
+    const { DriverModel, driver } = await findDriverModelAndDoc(driverId, req);
     if (!driver) {
       return res.status(404).json({ success: false, message: 'Driver not found' });
     }
+
+    let DepositModel = null;
+    try {
+      DepositModel = DriverModel?.db?.models?.Deposit || DriverModel?.db?.model('Deposit', require('../models/Deposit').schema) || require('../models/Deposit');
+    } catch (_) {}
 
     const cleanOtp = otp.toString().trim();
 

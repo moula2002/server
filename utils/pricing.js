@@ -235,6 +235,13 @@ function findCategoryCommission(commissions, categoryId, unit, measurementUnit =
     const isPinMatch = targetPincode && targetPincode !== 'all' && cPin === targetPincode;
     const isPinAll = !c.pincode || cPin === 'all';
 
+    // Strict PIN Code Validation:
+    // If a commission rule is defined for a specific PIN code that does NOT match the target PIN code,
+    // it must NEVER be applied (prevents cross-PIN code commission leakage).
+    if (!isPinMatch && !isPinAll) {
+      continue;
+    }
+
     let score = 0;
     // Priority 1: Exact direct match on product measurement basis (e.g. KG == KG, LTR == LTR)
     if (isMeasMatch) {
@@ -487,7 +494,8 @@ function processProductPricing(payload, commissions = []) {
 
   const priceBasis = payload.priceBasis || (payload.isPackagePrice ? 'per_package' : 'per_unit');
 
-  const adminRule = findCategoryCommission(commissions, categoryId, unit, measurementUnit);
+  const targetPincode = payload.pincode || payload.sellerPincode || payload.shippingPincode || null;
+  const adminRule = findCategoryCommission(commissions, categoryId, unit, measurementUnit, targetPincode);
 
   let commissionType = 'flat';
   let commissionValue = 0;

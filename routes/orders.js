@@ -1197,11 +1197,13 @@ router.put('/:id/ship', protect, async (req, res) => {
     // Populate user to check role
     await order.populate('userId', 'role');
 
-    // Only increment wallet for B2C COD orders
+    // Only increment wallet for B2C COD orders if driver has cash management enabled
     if ((order.paymentMethod === 'COD' || order.paymentMethod === 'Cash at Delivery' || order.paymentMethod === 'UPI at Delivery') && order.userId?.role === 'b2c') {
-      await DriverModel.findByIdAndUpdate(req.body.driverId, {
-        $inc: { wallet: order.totalAmount }
-      });
+      const assignedDriver = await DriverModel.findById(req.body.driverId);
+      if (assignedDriver && assignedDriver.cashManagement) {
+        assignedDriver.wallet = (assignedDriver.wallet || 0) + order.totalAmount;
+        await assignedDriver.save();
+      }
     }
 
     res.json(order);
@@ -1639,9 +1641,9 @@ router.put('/:id/payment', protect, async (req, res) => {
           await collector.save();
         }
       } else if (order.driverId) {
-        // Update Driver wallet
+        // Update Driver wallet (only if cashManagement is enabled)
         const driver = await DriverModel.findById(order.driverId);
-        if (driver) {
+        if (driver && driver.cashManagement) {
           driver.wallet = (driver.wallet || 0) + order.totalAmount;
           await driver.save();
         }
@@ -1803,8 +1805,9 @@ router.post('/:id/verify-delivery-otp', protect, async (req, res) => {
           await collector.save();
         }
       } else if (order.driverId) {
+        // Update Driver wallet (only if cashManagement is enabled)
         const driver = await DriverModel.findById(order.driverId);
-        if (driver) {
+        if (driver && driver.cashManagement) {
           driver.wallet = (driver.wallet || 0) + order.totalAmount;
           await driver.save();
         }

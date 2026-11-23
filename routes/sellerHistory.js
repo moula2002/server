@@ -111,8 +111,9 @@ const createActivity = ({
   details
 });
 
-const loadSellerHistory = async (req, { startDate, endDate }) => {
-  const sellerId = req.user._id;
+const loadSellerHistory = async (req, { startDate, endDate, sellerId: explicitSellerId }) => {
+  const sellerId = explicitSellerId || (req.user?.role === 'seller' ? req.user._id : (req.query.sellerId || req.params.sellerId));
+  if (!sellerId) return [];
   const sellerIdStr = sellerId.toString();
   const ProductModel = getModel(req, 'Product', '../models/Product');
   const OrderModel = getModel(req, 'Order', '../models/Order');
@@ -869,10 +870,17 @@ const consolidateSellerHistory = (rows) => {
   return [...validOrderRows, ...nonOrderRows];
 };
 
-router.get('/history', protect, async (req, res) => {
+const handleGetSellerHistory = async (req, res) => {
   try {
-    if (req.user?.role !== 'seller') {
-      return res.status(403).json({ message: 'Only sellers can access business history' });
+    const isSeller = req.user?.role === 'seller' && !req.admin;
+    const isAdmin = !!req.admin || req.user?.role === 'admin' || req.user?.role === 'super_admin' || req.user?.role === 'manager' || req.user?.role === 'sales';
+    if (!isSeller && !isAdmin) {
+      return res.status(403).json({ message: 'Only sellers and admins can access business history' });
+    }
+
+    const sellerId = (isSeller && !isAdmin) ? req.user._id : (req.query.sellerId || req.params.sellerId);
+    if (!sellerId) {
+      return res.status(400).json({ message: 'sellerId is required for admin requests' });
     }
 
     const startDate = validDateRange(req.query.startDate);
@@ -916,7 +924,7 @@ router.get('/history', protect, async (req, res) => {
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
     const search = String(req.query.search || '').trim().slice(0, 100);
     const status = String(req.query.status || '').trim().slice(0, 80).toLowerCase();
-    const rawRows = await loadSellerHistory(req, { startDate, endDate });
+    const rawRows = await loadSellerHistory(req, { startDate, endDate, sellerId });
     const shouldConsolidate = req.query.consolidate !== 'false';
     const rows = shouldConsolidate ? consolidateSellerHistory(rawRows) : rawRows;
     const searchedRows = rows.filter(row => matchesSearch(row, search));
@@ -973,17 +981,25 @@ router.get('/history', protect, async (req, res) => {
     console.error('Seller business history fetch error:', error);
     return res.status(500).json({ message: 'Failed to load business history' });
   }
-});
+};
 
-router.get('/history/details', protect, async (req, res) => {
+const handleGetSellerHistoryDetails = async (req, res) => {
   try {
-    if (req.user?.role !== 'seller') {
-      return res.status(403).json({ message: 'Only sellers can access business history' });
+    const isSeller = req.user?.role === 'seller' && !req.admin;
+    const isAdmin = !!req.admin || req.user?.role === 'admin' || req.user?.role === 'super_admin' || req.user?.role === 'manager' || req.user?.role === 'sales';
+    if (!isSeller && !isAdmin) {
+      return res.status(403).json({ message: 'Only sellers and admins can access business history' });
     }
+
+    const sellerId = (isSeller && !isAdmin) ? req.user._id : (req.query.sellerId || req.params.sellerId);
+    if (!sellerId) {
+      return res.status(400).json({ message: 'sellerId is required for admin requests' });
+    }
+
     const activityId = String(req.query.id || '');
     if (!activityId) return res.status(400).json({ message: 'Activity ID is required' });
 
-    const rawRows = await loadSellerHistory(req, {});
+    const rawRows = await loadSellerHistory(req, { sellerId });
     const consolidated = consolidateSellerHistory(rawRows);
 
     let activity = consolidated.find(row => row.id === activityId);
@@ -1023,6 +1039,11 @@ router.get('/history/details', protect, async (req, res) => {
     console.error('Seller business history details error:', error);
     return res.status(500).json({ message: 'Failed to load history details' });
   }
-});
+};
+
+router.get('/history', protect, handleGetSellerHistory);
+router.get('/:sellerId/history', protect, handleGetSellerHistory);
+router.get('/history/details', protect, handleGetSellerHistoryDetails);
+router.get('/:sellerId/history/details', protect, handleGetSellerHistoryDetails);
 
 module.exports = router;
