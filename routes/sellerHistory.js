@@ -872,13 +872,13 @@ const consolidateSellerHistory = (rows) => {
 
 const handleGetSellerHistory = async (req, res) => {
   try {
-    const isSeller = req.user?.role === 'seller';
-    const isAdmin = req.user?.role === 'admin' || req.user?.role === 'super_admin' || req.user?.role === 'manager';
+    const isSeller = req.user?.role === 'seller' && !req.admin;
+    const isAdmin = !!req.admin || req.user?.role === 'admin' || req.user?.role === 'super_admin' || req.user?.role === 'manager' || req.user?.role === 'sales';
     if (!isSeller && !isAdmin) {
       return res.status(403).json({ message: 'Only sellers and admins can access business history' });
     }
 
-    const sellerId = isSeller ? req.user._id : (req.query.sellerId || req.params.sellerId);
+    const sellerId = (isSeller && !isAdmin) ? req.user._id : (req.query.sellerId || req.params.sellerId);
     if (!sellerId) {
       return res.status(400).json({ message: 'sellerId is required for admin requests' });
     }
@@ -985,13 +985,13 @@ const handleGetSellerHistory = async (req, res) => {
 
 const handleGetSellerHistoryDetails = async (req, res) => {
   try {
-    const isSeller = req.user?.role === 'seller';
-    const isAdmin = req.user?.role === 'admin' || req.user?.role === 'super_admin' || req.user?.role === 'manager';
+    const isSeller = req.user?.role === 'seller' && !req.admin;
+    const isAdmin = !!req.admin || req.user?.role === 'admin' || req.user?.role === 'super_admin' || req.user?.role === 'manager' || req.user?.role === 'sales';
     if (!isSeller && !isAdmin) {
       return res.status(403).json({ message: 'Only sellers and admins can access business history' });
     }
 
-    const sellerId = isSeller ? req.user._id : (req.query.sellerId || req.params.sellerId);
+    const sellerId = (isSeller && !isAdmin) ? req.user._id : (req.query.sellerId || req.params.sellerId);
     if (!sellerId) {
       return res.status(400).json({ message: 'sellerId is required for admin requests' });
     }
