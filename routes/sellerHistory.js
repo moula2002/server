@@ -449,14 +449,19 @@ const loadSellerHistory = async (req, { startDate, endDate, sellerId: explicitSe
     const invoiceOrderId = invoiceOrderIds[0] || '';
     const linkedOrders = invoiceOrderIds.map(id => ordersById.get(id)).filter(Boolean);
     const order = linkedOrders[0];
+    const rawInvNum = invoice.orderNumber ?? invoice.invoiceNumber ?? invoice.invoiceSequenceNumber;
+    let invoiceReference = invoice._id.toString();
+    if (rawInvNum !== undefined && rawInvNum !== null && String(rawInvNum).trim()) {
+      const clean = String(rawInvNum).trim().replace(/^#/, '');
+      invoiceReference = /^\d+$/.test(clean) ? `#${clean.padStart(5, '0')}` : `#${clean}`;
+    }
     for (const id of invoiceOrderIds) {
       if (!ordersById.has(id)) continue;
       const current = invoicesByOrder.get(id) || [];
-      current.push(invoice.invoiceNumber || '');
+      current.push(invoiceReference);
       invoicesByOrder.set(id, current);
     }
     const customer = order?.customer || {};
-    const invoiceReference = invoice.invoiceNumber || invoice._id.toString();
     add(createActivity({
       id: `invoice:${invoice._id.toString()}`,
       activityType: 'invoices',
