@@ -1,29 +1,97 @@
 const express = require('express');
 const router = express.Router();
 const CashCollector = require('../models/CashCollector');
+const { connectDBByLocation } = require('../utils/db_manager');
+const { aggregateGET } = require('../utils/aggregator');
+
+/**
+ * Helper to locate model and document across tenant connections or central DB
+ */
+const findModelAndDoc = async (id, req) => {
+  // 1. If tenant context exists on request
+  if (req.locationId && req.models?.CashCollector) {
+    const doc = await req.models.CashCollector.findById(id);
+    if (doc) return { Model: req.models.CashCollector, doc };
+  }
+
+  // 2. If target location is provided in body, query, or headers
+  const targetLoc = req.body?.locationId || req.query?.locationId || req.headers['x-target-location'];
+  if (targetLoc) {
+    try {
+      const conn = await connectDBByLocation(targetLoc);
+      const Model = conn.models.CashCollector || conn.model('CashCollector', CashCollector.schema);
+      const doc = await Model.findById(id);
+      if (doc) return { Model, doc };
+    } catch (e) {
+      console.warn(`[Cash] Failed to query targetLoc ${targetLoc}:`, e.message);
+    }
+  }
+
+  // 3. Search default/central model
+  const CentralModel = req.models?.CashCollector || CashCollector;
+  try {
+    const doc = await CentralModel.findById(id);
+    if (doc) return { Model: CentralModel, doc };
+  } catch (e) {
+    // continue
+  }
+
+  // 4. Search across active tenant databases (Global Super Admin mode)
+  try {
+    const LocationModel = CentralModel.db.models.Location || CentralModel.db.model('Location', require('../models/Location').schema);
+    const locations = await LocationModel.find({ isActive: true }).lean();
+    for (const loc of locations) {
+      try {
+        const conn = await connectDBByLocation(loc._id.toString());
+        const Model = conn.models.CashCollector || conn.model('CashCollector', CashCollector.schema);
+        const doc = await Model.findById(id);
+        if (doc) {
+          return { Model, doc, location: loc };
+        }
+      } catch (e) {
+        // continue
+      }
+    }
+  } catch (err) {
+    console.error('[Cash] Error searching across tenant DBs:', err.message);
+  }
+
+  return { Model: null, doc: null };
+};
 
 // @route   GET api/cash
-// @desc    Get all cash transactions
-// @access  Private (Admin)
+// @desc    Get all cash transactions (Supports Global Aggregation and Single-Tenant)
+// @access  Public / Admin
 router.get('/', async (req, res) => {
   try {
     if (!req.locationId) {
-      const { aggregateGET } = require('../utils/aggregator');
       const transactions = await aggregateGET('CashCollector', req, {}, ['driverId'], '', { date: -1, createdAt: -1 });
       return res.json(transactions);
     }
+
     const CashCollectorModel = req.models?.CashCollector || CashCollector;
-    const transactions = await CashCollectorModel.find().populate('driverId', 'name phone wallet').sort({ date: -1, createdAt: -1 });
-    res.json(transactions);
+    const transactions = await CashCollectorModel.find()
+      .populate('driverId', 'name phone wallet')
+      .sort({ date: -1, createdAt: -1 })
+      .lean();
+
+    // Enrich single-tenant transactions with location metadata if not present
+    const enriched = transactions.map(t => ({
+      ...t,
+      locationId: t.locationId || req.locationId,
+      locationName: t.locationName || req.dbName || req.locationId
+    }));
+
+    res.json(enriched);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    console.error('Error fetching cash logs:', err.message);
+    res.status(500).json({ message: 'Server Error fetching cash collection logs' });
   }
 });
 
 // @route   POST api/cash
-// @desc    Record a new cash transaction / collector
-// @access  Private (Admin)
+// @desc    Record a new cash transaction / collection
+// @access  Public / Admin
 router.post('/', async (req, res) => {
   const { 
     type, 
@@ -39,11 +107,28 @@ router.post('/', async (req, res) => {
     orderId,
     status,
     verification,
-    date
+    date,
+    locationId,
+    settledBy
   } = req.body;
 
   try {
-    const CashCollectorModel = req.models?.CashCollector || CashCollector;
+    let CashCollectorModel = req.models?.CashCollector;
+    const targetLocationId = req.locationId || locationId || req.headers['x-target-location'];
+
+    if (!req.locationId && targetLocationId) {
+      try {
+        const conn = await connectDBByLocation(targetLocationId);
+        CashCollectorModel = conn.models.CashCollector || conn.model('CashCollector', CashCollector.schema);
+      } catch (connErr) {
+        console.warn('[Cash] Failed switching to target location DB:', connErr.message);
+      }
+    }
+
+    if (!CashCollectorModel) {
+      CashCollectorModel = CashCollector;
+    }
+
     const newTransaction = new CashCollectorModel({
       type: type || 'B2C',
       name: name || 'Cash Collection',
@@ -56,8 +141,9 @@ router.post('/', async (req, res) => {
       otp: otp ? String(otp) : undefined,
       driverId: driverId || undefined,
       orderId: orderId || undefined,
-      status: status || 'Verified',
-      verification: verification || (otp ? 'Verified (OTP)' : 'Manual Entry'),
+      status: status || 'Settled',
+      verification: verification || (otp ? `OTP: ${otp}` : (password ? 'Password Verified' : 'Manual Entry')),
+      settledBy: settledBy || (req.user?.name || req.user?.email || 'Admin'),
       date: date ? new Date(date) : new Date()
     });
 
@@ -74,16 +160,32 @@ router.post('/', async (req, res) => {
       }
     }
 
-    res.json(transaction);
+    // Populate driver info if available
+    let responseObj = transaction.toObject();
+    if (driverId) {
+      try {
+        const DriverModel = CashCollectorModel.db.models.Driver || CashCollectorModel.db.model('Driver', require('../models/Driver').schema);
+        const driverDoc = await DriverModel.findById(driverId).select('name phone wallet').lean();
+        if (driverDoc) responseObj.driverId = driverDoc;
+      } catch (e) {
+        // continue
+      }
+    }
+
+    if (targetLocationId) {
+      responseObj.locationId = targetLocationId;
+    }
+
+    res.status(201).json(responseObj);
   } catch (err) {
-    console.error('Error logging transaction:', err);
+    console.error('Error logging cash transaction:', err);
     res.status(500).json({ message: err.message });
   }
 });
 
 // @route   PUT api/cash/:id
 // @desc    Update a cash transaction
-// @access  Private (Admin)
+// @access  Public / Admin
 router.put('/:id', async (req, res) => {
   const { 
     type, 
@@ -99,13 +201,15 @@ router.put('/:id', async (req, res) => {
     orderId,
     status,
     verification,
-    date
+    date,
+    settledBy
   } = req.body;
 
   try {
-    const CashCollectorModel = req.models?.CashCollector || CashCollector;
-    let transaction = await CashCollectorModel.findById(req.params.id);
-    if (!transaction) return res.status(404).json({ message: 'Transaction not found' });
+    const { Model, doc: transaction } = await findModelAndDoc(req.params.id, req);
+    if (!transaction) {
+      return res.status(404).json({ message: 'Cash transaction not found' });
+    }
 
     if (type) transaction.type = type;
     if (name) transaction.name = name;
@@ -120,29 +224,31 @@ router.put('/:id', async (req, res) => {
     if (orderId !== undefined) transaction.orderId = orderId;
     if (status !== undefined) transaction.status = status;
     if (verification !== undefined) transaction.verification = verification;
+    if (settledBy !== undefined) transaction.settledBy = settledBy;
     if (date) transaction.date = new Date(date);
 
-    transaction = await transaction.save();
-    res.json(transaction);
+    const updated = await transaction.save();
+    res.json(updated);
   } catch (err) {
-    console.error('Error updating transaction:', err);
+    console.error('Error updating cash transaction:', err);
     res.status(500).json({ message: err.message });
   }
 });
 
 // @route   DELETE api/cash/:id
 // @desc    Delete a cash transaction
-// @access  Private (Admin)
+// @access  Public / Admin
 router.delete('/:id', async (req, res) => {
   try {
-    const CashCollectorModel = req.models?.CashCollector || CashCollector;
-    const transaction = await CashCollectorModel.findById(req.params.id);
-    if (!transaction) return res.status(404).json({ message: 'Transaction not found' });
-    
-    await CashCollectorModel.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Transaction removed' });
+    const { Model, doc: transaction } = await findModelAndDoc(req.params.id, req);
+    if (!transaction) {
+      return res.status(404).json({ message: 'Cash transaction not found' });
+    }
+
+    await Model.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Transaction removed successfully' });
   } catch (err) {
-    console.error('Error deleting transaction:', err);
+    console.error('Error deleting cash transaction:', err);
     res.status(500).json({ message: err.message });
   }
 });
