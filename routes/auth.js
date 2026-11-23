@@ -501,7 +501,7 @@ router.post('/b2b-verify-submit', protect, async (req, res) => {
     if (businessName) updateFields.businessName = businessName;
     if (phone) updateFields.phone = phone;
 
-    const user = await UserModel.findByIdAndUpdate(userId, updateFields, { new: true });
+    const user = await UserModel.findByIdAndUpdate(userId, updateFields, { returnDocument: 'after' });
     if (!user) return res.status(404).json({ message: 'User not found' });
     
     res.json(formatUser(user));
@@ -965,7 +965,7 @@ router.post('/driver-login', async (req, res) => {
       await DriverModel.updateOne({ _id: driver._id }, { $set: { tokenVersion: nextVersion } });
       driver.tokenVersion = nextVersion;
       
-      const token = jwt.sign({ id: driver._id, tokenVersion: driver.tokenVersion }, process.env.JWT_SECRET, { expiresIn: '30d' });
+      const token = jwt.sign({ id: driver._id, role: 'driver', tokenVersion: driver.tokenVersion }, process.env.JWT_SECRET, { expiresIn: '30d' });
       res.json({
         token,
         _id: driver._id,

@@ -29,6 +29,52 @@ const protect = async (req, res, next) => {
       const dbName = req.isGlobalAccess ? null : (req.dbName || decoded.dbName);
       let account;
 
+      // If role is known from token, check targeted model first to avoid unnecessary queries
+      if (decoded.role === 'seller') {
+        const SellerModel = req.models?.Seller || Seller;
+        account = SellerModel ? await SellerModel.findById(decoded.id).select('-password') : null;
+        if (account) {
+          if (account.tokenVersion !== undefined && decoded.tokenVersion !== account.tokenVersion) {
+            return res.status(401).json({ message: 'Session expired, logged in from another device', code: 'SESSION_INVALIDATED' });
+          }
+          req.user = account;
+          req.user.role = 'seller';
+          return next();
+        }
+      } else if (decoded.role === 'driver') {
+        const DriverModel = req.models?.Driver || Driver;
+        account = DriverModel ? await DriverModel.findById(decoded.id).select('-password') : null;
+        if (account) {
+          if (account.tokenVersion !== undefined && decoded.tokenVersion !== account.tokenVersion) {
+            return res.status(401).json({ message: 'Session expired, logged in from another device', code: 'SESSION_INVALIDATED' });
+          }
+          req.user = account;
+          req.user.role = 'driver';
+          return next();
+        }
+      } else if (decoded.role === 'cash_collector') {
+        const CashCollectorModel = req.models?.CashCollector || CashCollector;
+        account = CashCollectorModel ? await CashCollectorModel.findById(decoded.id).select('-password') : null;
+        if (account) {
+          if (account.tokenVersion !== undefined && decoded.tokenVersion !== account.tokenVersion) {
+            return res.status(401).json({ message: 'Session expired, logged in from another device', code: 'SESSION_INVALIDATED' });
+          }
+          req.user = account;
+          req.user.role = 'cash_collector';
+          return next();
+        }
+      } else if (decoded.role === 'user') {
+        const UserModel = req.models?.User || User;
+        account = UserModel ? await UserModel.findById(decoded.id).select('-password') : null;
+        if (account) {
+          if (account.tokenVersion !== undefined && decoded.tokenVersion !== account.tokenVersion) {
+            return res.status(401).json({ message: 'Session expired, logged in from another device', code: 'SESSION_INVALIDATED' });
+          }
+          req.user = account;
+          return next();
+        }
+      }
+
       // 1. Try finding in Global DB first (for Super Admins or Global accounts)
       account = await Admin.findById(decoded.id).select('-password');
       if (!account) {
@@ -38,15 +84,12 @@ const protect = async (req, res, next) => {
       
       // 2. If not in Global, and it's a tenant session, try finding in Tenant DB
       if (!account && locationId) {
-        console.log(`[DEBUG-PROTECT] Searching in tenant DB. locationId: ${locationId}, dbName: ${dbName}, decoded.id: ${decoded.id}`);
         const tenantConn = await connectDBByLocation(locationId, dbName);
         const TenantAdmin = tenantConn.models.Admin || tenantConn.model('Admin', Admin.schema);
         account = await TenantAdmin.findById(decoded.id).select('-password');
-        console.log(`[DEBUG-PROTECT] Found in tenant Admin: ${!!account}`);
         if (!account) {
           const TenantSales = tenantConn.models.Sales || tenantConn.model('Sales', Admin.schema, 'sales');
           account = await TenantSales.findById(decoded.id).select('-password');
-          console.log(`[DEBUG-PROTECT] Found in tenant Sales: ${!!account}`);
         }
       }
 
@@ -153,7 +196,13 @@ const protect = async (req, res, next) => {
 
       return res.status(401).json({ message: 'Not authorized, account not found' });
     } catch (error) {
-      console.error('[Protect Middleware Error]:', error);
+      if (error.name === 'TokenExpiredError') {
+        return res.status(401).json({ message: 'Session expired. Please log in again.', code: 'TOKEN_EXPIRED' });
+      }
+      if (error.name === 'JsonWebTokenError') {
+        return res.status(401).json({ message: 'Invalid session token. Please log in again.', code: 'TOKEN_INVALID' });
+      }
+      console.error('[Protect Middleware Error]:', error.message || error);
       return res.status(401).json({ message: 'Not authorized, token failed' });
     }
   }

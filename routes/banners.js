@@ -175,17 +175,17 @@ router.post('/', protect, async (req, res) => {
 router.put('/:id', protect, async (req, res) => {
   try {
     const BannerModel = getModel('Banner', req) || GlobalBanner;
-    let banner = await BannerModel.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    let banner = await BannerModel.findByIdAndUpdate(req.params.id, req.body, { returnDocument: 'after' });
 
     // Fallback: Check GlobalBanner if not updated in tenant BannerModel
     if (!banner && BannerModel !== GlobalBanner) {
-      banner = await GlobalBanner.findByIdAndUpdate(req.params.id, req.body, { new: true });
+      banner = await GlobalBanner.findByIdAndUpdate(req.params.id, req.body, { returnDocument: 'after' });
     }
 
     // Fallback: If still not found, search and update in tenant databases
     if (!banner) {
       banner = await findInTenantDatabases(async (TenantBanner) => {
-        return await TenantBanner.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        return await TenantBanner.findByIdAndUpdate(req.params.id, req.body, { returnDocument: 'after' });
       });
     }
 

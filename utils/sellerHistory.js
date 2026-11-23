@@ -76,7 +76,7 @@ const recordSellerHistoryEvent = async (req, order, event) => {
             metadata: event.metadata || null
           }
         },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
+        { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
       ).catch(error => {
         if (error.code === 11000) return null;
         throw error;
