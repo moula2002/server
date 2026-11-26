@@ -136,6 +136,17 @@ router.param('id', async (req, res, next, id) => {
 
 // Helper function to get product stock (considering size variants)
 const getProductStock = (product, variantSize, role) => {
+  const hasVariants = (product.b2b && product.b2b.length > 0) ||
+    (product.b2c && product.b2c.length > 0) ||
+    (product.variants && product.variants.length > 0);
+
+  if (!hasVariants) {
+    if (product.stockStatus === 'Out of Stock') {
+      return { hasVariant: true, stock: 0 };
+    }
+    return { hasVariant: true, stock: product.stock || 0 };
+  }
+
   if (variantSize) {
     const variantArray = role === 'b2b' ? (product.b2b || []) : (product.b2c || []);
     let foundVariant = null;
@@ -233,8 +244,13 @@ const adjustProductStock = async (ProductModel, productId, variantSize, quantity
   }
 
   if (!hasVariants) {
-    product.stock = (product.stock || 0) + quantity;
+    product.stock = Math.max(0, (product.stock || 0) + quantity);
     updatedStock = product.stock;
+    if (product.stock === 0) {
+      product.stockStatus = 'Out of Stock';
+    } else if (quantity > 0 && product.stockStatus === 'Out of Stock') {
+      product.stockStatus = 'Available';
+    }
     await product.save();
     return { product, updatedStock };
   }

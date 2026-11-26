@@ -1078,6 +1078,15 @@ router.post('/bulk-upload', protect, excelUpload.single('file'), async (req, res
 
 // Helper to extract stock for variant (B2B Size Variants as single source of truth)
 function getProductAvailableStock(product, variantSize, role = 'b2c') {
+  const hasVariants = (product.b2b && product.b2b.length > 0) ||
+    (product.b2c && product.b2c.length > 0) ||
+    (product.variants && product.variants.length > 0);
+
+  if (!hasVariants) {
+    if (product.stockStatus === 'Out of Stock') return 0;
+    return product.stock !== undefined ? product.stock : 0;
+  }
+
   if (variantSize) {
     const variantArray = role === 'b2b' ? (product.b2b || []) : (product.b2c || []);
     let found = (variantArray || []).find(v => (v.packetSize || v.sizeName) === variantSize);
@@ -1526,6 +1535,9 @@ router.put('/:id', protect, async (req, res) => {
     }
     if (updatedPayload.customerPricePerPackage === undefined && updatedPayload.customerFinalPricePerProductUnit !== undefined) {
       updatedPayload.customerPricePerPackage = updatedPayload.customerFinalPricePerProductUnit;
+    }
+    if (req.body.stock !== undefined) {
+      updatedPayload.stock = parseInt(req.body.stock, 10) || 0;
     }
     const product = await targetProductModel.findByIdAndUpdate(id, updatedPayload, { returnDocument: 'after' });
     if (!product) return res.status(404).json({ message: 'Product not found' });
