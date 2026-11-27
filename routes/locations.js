@@ -248,27 +248,85 @@ router.put('/:id', protect, superAdmin, async (req, res) => {
 });
 
 // @route   DELETE /api/locations/:id
-// @desc    Delete a location
+// @desc    Permanently delete a location from central, default, and tenant DBs
 // @access  Private/SuperAdmin
 router.delete('/:id', protect, superAdmin, async (req, res) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid location ID' });
+    }
+
     const centralConn = await getCentralConn();
     const CentralLocation = centralConn.models.Location || centralConn.model('Location', Location.schema);
 
     const location = await CentralLocation.findById(req.params.id);
-    if (!location) return res.status(404).json({ message: 'Location not found' });
+    if (!location) {
+      return res.status(404).json({ message: 'Location not found' });
+    }
 
-    // Remove from central mapping
-    await removeFromCentral(location.pincode);
+    let cityClean = (location.city || '').trim().toLowerCase().replace(/\s+/g, '-');
+    while (cityClean.startsWith('zudo-')) {
+      cityClean = cityClean.replace('zudo-', '');
+    }
+    const dbName = location.name || `zudo-${cityClean}`;
+    const { connectDBByLocation } = require('../utils/db_manager');
+    const tenantConn = await connectDBByLocation(req.params.id, dbName);
 
-    // Delete from central DB
-    await location.deleteOne();
+    // Check for dependent operational records before deleting (unless ?force=true)
+    if (req.query.force !== 'true') {
+      const counts = {};
+      const modelsToCheck = [
+        { name: 'Order', schema: require('../models/Order').schema, label: 'orders' },
+        { name: 'Seller', schema: require('../models/Seller').schema, label: 'sellers' },
+        { name: 'Driver', schema: require('../models/Driver').schema, label: 'drivers' },
+        { name: 'CashCollector', schema: require('../models/CashCollector').schema, label: 'cash collections' }
+      ];
 
-    // Also delete from default DB
+      for (const m of modelsToCheck) {
+        try {
+          const Model = tenantConn.models[m.name] || tenantConn.model(m.name, m.schema);
+          const count = await Model.countDocuments();
+          if (count > 0) counts[m.label] = count;
+        } catch (e) {
+          // ignore if collection doesn't exist
+        }
+      }
+
+      const depEntries = Object.entries(counts);
+      if (depEntries.length > 0) {
+        const summary = depEntries.map(([label, c]) => `${c} ${label}`).join(', ');
+        return res.status(400).json({
+          message: `Cannot delete "${location.city}": it has dependent records (${summary}).`,
+          dependencies: counts
+        });
+      }
+    }
+
+    // 1. Remove pincode mapping from central
+    if (location.pincode) {
+      await removeFromCentral(location.pincode);
+    }
+
+    // 2. Delete from central DB (zudo-central)
+    await CentralLocation.findByIdAndDelete(req.params.id);
+
+    // 3. Delete from default DB
     await Location.findByIdAndDelete(req.params.id);
+    await Location.deleteMany({ city: location.city });
 
-    res.json({ message: 'Location removed' });
+    // 4. Delete location and pincode records from tenant DB
+    try {
+      const TenantLocation = tenantConn.models.Location || tenantConn.model('Location', Location.schema);
+      const TenantPincode = tenantConn.models.Pincode || tenantConn.model('Pincode', Pincode.schema);
+      await TenantLocation.deleteMany({ $or: [{ _id: location._id }, { city: location.city }] });
+      await TenantPincode.deleteMany({ locationId: location._id });
+    } catch (tenantErr) {
+      console.warn('[Location Delete] Tenant cleanup warning:', tenantErr.message);
+    }
+
+    res.json({ message: 'Location permanently deleted', deletedId: req.params.id });
   } catch (error) {
+    console.error('Location Deletion Error:', error);
     res.status(500).json({ message: error.message });
   }
 });
