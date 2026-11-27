@@ -985,18 +985,33 @@ router.post('/driver-login', async (req, res) => {
 });
 
 // @route   POST /api/auth/cash-collector-login
-// @desc    Cash Collector Login
+// @desc    Cash Collector Login (supports email or phone)
 router.post('/cash-collector-login', async (req, res) => {
-  const { email, password } = req.body;
+  const { email, phone, password } = req.body;
   try {
+    if ((!email && !phone) || !password) {
+      return res.status(400).json({ message: 'Email/phone and password are required' });
+    }
     const CashCollectorModel = getModel('CashCollector', req);
-    const collector = await CashCollectorModel.findOne({ email });
+    const query = email
+      ? { email: new RegExp(`^${email.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      : { phone: phone.trim() };
+    const collector = await CashCollectorModel.findOne(query);
     if (collector && (await collector.comparePassword(password))) {
-      
       collector.tokenVersion = (collector.tokenVersion || 0) + 1;
       await collector.save();
-      
-      const token = jwt.sign({ id: collector._id, tokenVersion: collector.tokenVersion }, process.env.JWT_SECRET, { expiresIn: '30d' });
+
+      const token = jwt.sign(
+        {
+          id: collector._id,
+          role: 'cash_collector',
+          locationId: req.locationId || undefined,
+          dbName: req.dbName || undefined,
+          tokenVersion: collector.tokenVersion
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: '30d' }
+      );
       res.json({
         token,
         user: {
@@ -1005,11 +1020,12 @@ router.post('/cash-collector-login', async (req, res) => {
           email: collector.email,
           role: 'cash_collector',
           phone: collector.phone,
+          status: collector.status,
           wallet: collector.amount || 0
         }
       });
     } else {
-      res.status(401).json({ message: 'Invalid phone or password' });
+      res.status(401).json({ message: 'Invalid email/phone or password' });
     }
   } catch (error) {
     res.status(500).json({ message: error.message });

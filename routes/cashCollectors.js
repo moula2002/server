@@ -77,18 +77,58 @@ const findCollectorAcrossTenants = async (id, req) => {
 };
 
 // @route   POST /api/cashcollectors/login
-// @desc    Authenticate cash collector and return JWT token
+// @desc    Authenticate cash collector and return JWT token (supports email or phone + multi-tenant)
 // @access  Public
 router.post('/login', async (req, res) => {
-  const { email, phone, password } = req.body;
+  const { email, phone, password, locationId } = req.body;
   try {
     if ((!email && !phone) || !password) {
       return res.status(400).json({ message: 'Email/phone and password are required' });
     }
 
-    const { Model: CashCollectorModel } = await resolveCollectorModel(req);
-    const query = email ? { email: email.trim() } : { phone: phone.trim() };
-    const collector = await CashCollectorModel.findOne(query);
+    const query = email
+      ? { email: new RegExp(`^${email.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      : { phone: phone.trim() };
+
+    let collector = null;
+    let resolvedLocId = req.locationId || locationId || null;
+    let resolvedDbName = req.dbName || null;
+
+    // 1. Try current tenant/default model
+    const { Model: PrimaryModel, locationId: primaryLoc } = await resolveCollectorModel(req, locationId);
+    collector = await PrimaryModel.findOne(query);
+    if (collector && primaryLoc) resolvedLocId = primaryLoc;
+
+    // 2. Fallback: search across active tenant DBs if not found and no explicit location was set
+    if (!collector && !req.locationId && !locationId) {
+      try {
+        const { connectDBByLocation } = require('../utils/db_manager');
+        const URI = process.env.MONGODB_URI;
+        const lastSlash = URI.lastIndexOf('/');
+        const lastQ = URI.indexOf('?', lastSlash);
+        const CENTRAL_URI = URI.substring(0, lastSlash + 1) + 'zudo-central' + (lastQ !== -1 ? URI.substring(lastQ) : '');
+        const centralConn = await require('mongoose').createConnection(CENTRAL_URI).asPromise();
+        const LocModel = centralConn.models.Location || centralConn.model('Location', require('../models/Location').schema);
+        const locations = await LocModel.find({ isActive: true }).lean();
+        await centralConn.close().catch(() => {});
+
+        for (const loc of locations) {
+          const cityClean = loc.city.toLowerCase().replace(/\s+/g, '-');
+          const dbName = loc.dbName || `zudo-${cityClean}`;
+          const conn = await connectDBByLocation(loc._id.toString(), dbName);
+          const TenantModel = conn.models.CashCollector || conn.model('CashCollector', CashCollector.schema);
+          const found = await TenantModel.findOne(query);
+          if (found) {
+            collector = found;
+            resolvedLocId = loc._id.toString();
+            resolvedDbName = conn.name;
+            break;
+          }
+        }
+      } catch (searchErr) {
+        console.warn('[CashCollector Login] Multi-tenant search error:', searchErr.message);
+      }
+    }
 
     if (collector && (await collector.comparePassword(password))) {
       collector.tokenVersion = (collector.tokenVersion || 0) + 1;
@@ -98,8 +138,8 @@ router.post('/login', async (req, res) => {
         {
           id: collector._id,
           role: 'cash_collector',
-          locationId: req.locationId || undefined,
-          dbName: req.dbName || undefined,
+          locationId: resolvedLocId || undefined,
+          dbName: resolvedDbName || undefined,
           tokenVersion: collector.tokenVersion
         },
         process.env.JWT_SECRET,
@@ -115,6 +155,7 @@ router.post('/login', async (req, res) => {
           role: 'cash_collector',
           phone: collector.phone,
           status: collector.status,
+          locationId: resolvedLocId || undefined,
           wallet: collector.amount || 0
         }
       });
