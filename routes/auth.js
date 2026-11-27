@@ -185,8 +185,15 @@ router.post('/login', async (req, res) => {
     } else if (!admin) {
       // 3. Scan all tenant databases if admin not found globally and no locationId provided
       logToFile(`Scanning all tenant DBs for user...`);
-      const LocationModel = req.models?.Location || Location;
-      const locations = await LocationModel.find({ isActive: true });
+      let locations = [];
+      try {
+        const centralConn = await getCentralConn();
+        const CentralLocation = centralConn.models.Location || centralConn.model('Location', Location.schema);
+        locations = await CentralLocation.find({ isActive: true }).lean();
+      } catch (e) {
+        const LocationModel = req.models?.Location || Location;
+        locations = await LocationModel.find({ isActive: true }).lean();
+      }
       for (const loc of locations) {
         const tempDbName = getLocationDbName(loc);
         const tenantConn = await connectDBByLocation(loc._id.toString(), tempDbName);
