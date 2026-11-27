@@ -14,7 +14,7 @@ const DeliverySlot = require('../models/DeliverySlot');
 const Notification = require('../models/Notification');
 const PopupAd = require('../models/PopupAd');
 const Banner = require('../models/Banner');
-const { connectDBByLocation } = require('../utils/db_manager');
+const { connectDBByLocation, getCentralConn } = require('../utils/db_manager');
 
 const protect = async (req, res, next) => {
   req.portal = req.headers['x-portal'] || 'Super Admin';
@@ -75,11 +75,22 @@ const protect = async (req, res, next) => {
         }
       }
 
-      // 1. Try finding in Global DB first (for Super Admins or Global accounts)
+      // 1. Try finding in Global DB first, then Central DB (zudo-central)
       account = await Admin.findById(decoded.id).select('-password');
       if (!account) {
         const SalesModel = mongoose.models.Sales || mongoose.model('Sales', Admin.schema, 'sales');
         account = await SalesModel.findById(decoded.id).select('-password');
+      }
+      if (!account) {
+        try {
+          const centralConn = await getCentralConn();
+          const CentralAdmin = centralConn.models.Admin || centralConn.model('Admin', Admin.schema);
+          account = await CentralAdmin.findById(decoded.id).select('-password');
+          if (!account) {
+            const CentralSales = centralConn.models.Sales || centralConn.model('Sales', Admin.schema, 'sales');
+            account = await CentralSales.findById(decoded.id).select('-password');
+          }
+        } catch (e) { /* ignore central lookup error */ }
       }
       
       // 2. If not in Global, and it's a tenant session, try finding in Tenant DB

@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const locationSchema = new mongoose.Schema({
   name: { type: String, required: true },
+  dbName: { type: String },
   city: { type: String, required: true },
   state: { type: String, required: true },
   pincode: { type: String },
