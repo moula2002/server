@@ -236,9 +236,11 @@ function findCategoryCommission(commissions, categoryId, unit, measurementUnit =
     const isPinAll = !c.pincode || cPin === 'all';
 
     // Strict PIN Code Validation:
-    // If a commission rule is defined for a specific PIN code that does NOT match the target PIN code,
+    // If a specific PIN code is requested and a rule is defined for a DIFFERENT specific PIN code,
     // it must NEVER be applied (prevents cross-PIN code commission leakage).
-    if (!isPinMatch && !isPinAll) {
+    // When no PIN code is specified (e.g. Admin Products overview), prefer 'All' rules first
+    // and still allow pincode-specific rules as fallback so admin commission is visible.
+    if (targetPincode && targetPincode !== 'all' && !isPinMatch && !isPinAll) {
       continue;
     }
 
