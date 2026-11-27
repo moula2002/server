@@ -302,9 +302,19 @@ router.delete('/:id', protect, superAdmin, async (req, res) => {
       }
     }
 
-    // 1. Remove pincode mapping from central
+    // 1. Remove pincode mapping from central (by pincode and by city/dbName)
     if (location.pincode) {
       await removeFromCentral(location.pincode);
+    }
+    try {
+      const PincodeMapping = centralConn.models.PincodeMapping || centralConn.model('PincodeMapping', new mongoose.Schema({
+        pincode: String,
+        dbName: String,
+        city: String
+      }, { collection: 'pincodemappings' }));
+      await PincodeMapping.deleteMany({ $or: [{ city: location.city }, { dbName }] });
+    } catch (mapErr) {
+      console.warn('[Location Delete] PincodeMapping cleanup warning:', mapErr.message);
     }
 
     // 2. Delete from central DB (zudo-central)

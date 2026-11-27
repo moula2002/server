@@ -140,6 +140,9 @@ router.post('/login', async (req, res) => {
     }
 
     if (collector && (await collector.comparePassword(password))) {
+      if (collector.status === 'inactive') {
+        return res.status(403).json({ message: 'Account is inactive. Please contact admin.' });
+      }
       collector.tokenVersion = (collector.tokenVersion || 0) + 1;
       await collector.save();
 

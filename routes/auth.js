@@ -317,6 +317,9 @@ router.get('/profile', protect, async (req, res) => {
       if (account) return res.json(account);
     } else if (req.user.role === 'cash_collector') {
       account = await req.models.CashCollector.findById(req.user._id).select('-password');
+      if (!account && req.models.Admin) {
+        account = await req.models.Admin.findById(req.user._id).select('-password');
+      }
       if (account) return res.json(account);
     } else if (req.user.role === 'seller') {
       account = await req.models.Seller.findById(req.user._id).select('-password');
@@ -1009,7 +1012,7 @@ router.post('/cash-collector-login', async (req, res) => {
       );
 
       identifierQueries.push({
-        email: new RegExp(`^${escapedEmail}$`, 'i')
+        email: new RegExp(`^\\s*${escapedEmail}\\s*$`, 'i')
       });
     }
 
@@ -1022,11 +1025,58 @@ router.post('/cash-collector-login', async (req, res) => {
         ? identifierQueries[0]
         : { $or: identifierQueries };
 
-    const collector = await CashCollectorModel.findOne(query);
+    let collector = await CashCollectorModel.findOne(query);
+    let resolvedLocId = req.locationId || req.body?.locationId || null;
+    let resolvedDbName = req.dbName || null;
+
+    if (!collector) {
+      const AdminModel = getModel('Admin', req);
+      collector = await AdminModel.findOne({ ...query, role: 'cash_collector' });
+    }
+
+    // Fallback: search across active tenant DBs if not found and no explicit location was set
+    if (!collector && !req.locationId && !req.body?.locationId) {
+      try {
+        const URI = process.env.MONGODB_URI;
+        const lastSlash = URI.lastIndexOf('/');
+        const lastQ = URI.indexOf('?', lastSlash);
+        const CENTRAL_URI = URI.substring(0, lastSlash + 1) + 'zudo-central' + (lastQ !== -1 ? URI.substring(lastQ) : '');
+        const centralConn = await mongoose.createConnection(CENTRAL_URI).asPromise();
+        const LocModel = centralConn.models.Location || centralConn.model('Location', require('../models/Location').schema);
+        const locations = await LocModel.find({ isActive: true }).lean();
+        await centralConn.close().catch(() => {});
+
+        for (const loc of locations) {
+          const cityClean = loc.city.toLowerCase().replace(/\s+/g, '-');
+          const dbName = loc.dbName || `zudo-${cityClean}`;
+          const conn = await connectDBByLocation(loc._id.toString(), dbName);
+          const TenantCC = conn.models.CashCollector || conn.model('CashCollector', CashCollector.schema);
+          let found = await TenantCC.findOne(query);
+          if (!found) {
+            const TenantAdmin = conn.models.Admin || conn.model('Admin', Admin.schema);
+            found = await TenantAdmin.findOne({ ...query, role: 'cash_collector' });
+          }
+          if (found) {
+            collector = found;
+            resolvedLocId = loc._id.toString();
+            resolvedDbName = conn.name;
+            break;
+          }
+        }
+      } catch (searchErr) {
+        console.warn('[CashCollector Auth Login] Multi-tenant search error:', searchErr.message);
+      }
+    }
 
     if (!collector || !(await collector.comparePassword(password))) {
       return res.status(401).json({
         message: 'Invalid email/phone or password'
+      });
+    }
+
+    if (collector.status === 'inactive') {
+      return res.status(403).json({
+        message: 'Account is inactive. Please contact admin.'
       });
     }
 
@@ -1037,8 +1087,8 @@ router.post('/cash-collector-login', async (req, res) => {
       {
         id: collector._id,
         role: 'cash_collector',
-        locationId: req.locationId || undefined,
-        dbName: req.dbName || undefined,
+        locationId: resolvedLocId || undefined,
+        dbName: resolvedDbName || undefined,
         tokenVersion: collector.tokenVersion
       },
       process.env.JWT_SECRET,
@@ -1053,7 +1103,8 @@ router.post('/cash-collector-login', async (req, res) => {
         email: collector.email,
         role: 'cash_collector',
         phone: collector.phone,
-        status: collector.status,
+        status: collector.status || 'active',
+        locationId: resolvedLocId || undefined,
         wallet: collector.amount || 0
       }
     });
