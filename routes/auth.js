@@ -1262,11 +1262,24 @@ router.post('/sales', protect, superAdmin, async (req, res) => {
   const { name, email, password, phone, pincodes, locationId } = req.body;
   try {
     let newSales;
-    if (locationId) {
-      const location = await Location.findById(locationId);
+    if (locationId && locationId !== 'global') {
+      let location = null;
+      if (mongoose.Types.ObjectId.isValid(locationId)) {
+        try {
+          const centralConn = await getCentralConn();
+          const CentralLocation = centralConn.models.Location || centralConn.model('Location', Location.schema);
+          location = await CentralLocation.findById(locationId);
+        } catch (e) { /* fallback to default DB */ }
+        if (!location) {
+          location = await Location.findById(locationId).catch(() => null);
+        }
+      }
       if (!location) return res.status(404).json({ message: 'Location not found' });
-      const cityClean = location.city.toLowerCase().replace(/\s+/g, '-');
-      const branchDbName = `zudo-${cityClean}`;
+
+      const cityClean = (location.city || '').trim().toLowerCase().replace(/\s+/g, '-');
+      let branchDbName = location.dbName || (location.name && location.name.toLowerCase().startsWith('zudo-') ? location.name.toLowerCase() : `zudo-${cityClean}`);
+      if (branchDbName === 'zudo-bangalore') branchDbName = 'zudo-bengaluru';
+
       const tenantConn = await connectDBByLocation(locationId, branchDbName);
       const TenantSales = tenantConn.models.Sales || tenantConn.model('Sales', Admin.schema, 'sales');
 
@@ -1274,7 +1287,7 @@ router.post('/sales', protect, superAdmin, async (req, res) => {
       if (salesExists) return res.status(400).json({ message: 'Sales account already exists in this location' });
 
       newSales = await TenantSales.create({
-        name, email, password, locationId,
+        name, email, password, role: 'sales', locationId: location._id,
         phone: phone || '',
         pincodes: pincodes || []
       });
@@ -1285,7 +1298,7 @@ router.post('/sales', protect, superAdmin, async (req, res) => {
       if (salesExists) return res.status(400).json({ message: 'Global Sales account already exists' });
 
       newSales = await SalesModel.create({
-        name, email, password, locationId: null,
+        name, email, password, role: 'sales', locationId: null,
         phone: phone || '',
         pincodes: pincodes || []
       });
