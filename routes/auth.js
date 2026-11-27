@@ -9,7 +9,7 @@ const CashCollector = require('../models/CashCollector');
 const Location = require('../models/Location');
 const Pincode = require('../models/Pincode');
 const { protect, superAdmin } = require('../middleware/auth');
-const { connectDBByLocation } = require('../utils/db_manager');
+const { connectDBByLocation, getCentralConn } = require('../utils/db_manager');
 const { seedLocationDB } = require('../utils/db_seeder');
 const { getModel } = require('../utils/model_loader');
 
@@ -107,83 +107,124 @@ router.post('/login', async (req, res) => {
   };
 
   try {
-    const emailToSearch = email.trim().toLowerCase();
+    const emailToSearch = (email || '').trim().toLowerCase();
     logToFile(`Login attempt for: "${emailToSearch}"`);
 
-    // 1. Check Global/Active Admin (Super Admin, Sales, or active tenant employees)
-    let AdminModel = req.models?.Admin || Admin;
-    let admin = await AdminModel.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
-    logToFile(`Checked active Admin collection. Found: ${!!admin}`);
-    if (!admin) {
-      const activeDb = req.db || mongoose.connection;
-      const SalesModel = activeDb.models.Sales || activeDb.model('Sales', Admin.schema, 'sales');
-      admin = await SalesModel.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
-      logToFile(`Checked active Sales collection. Found: ${!!admin}`);
-    }
-    let tenantDbName = null;
-    let isTenantAdmin = false;
-
-    const { locationId } = req.body;
-    logToFile(`Request body locationId: ${locationId}`);
-
     const resolveLocationById = async (locId) => {
-      if (!locId) return null;
-      let loc = await Location.findById(locId).catch(() => null);
-      if (!loc && typeof getCentralConn === 'function') {
-        try {
-          const centralConn = await getCentralConn();
-          const CentralLocation = centralConn.models.Location || centralConn.model('Location', Location.schema);
-          loc = await CentralLocation.findById(locId);
-        } catch (e) { /* ignore central lookup error */ }
+      if (!locId || !mongoose.Types.ObjectId.isValid(locId)) return null;
+      let loc = null;
+      try {
+        const centralConn = await getCentralConn();
+        const CentralLocation = centralConn.models.Location || centralConn.model('Location', Location.schema);
+        loc = await CentralLocation.findById(locId);
+      } catch (e) { /* fallback to default DB */ }
+      if (!loc) {
+        loc = await Location.findById(locId).catch(() => null);
       }
       return loc;
     };
 
-    const getLocationDbName = (loc) => loc?.dbName || `zudo-${(loc?.city || '').toLowerCase().replace(/\s+/g, '-')}`;
+    const getLocationDbName = (loc) => {
+      if (!loc) return null;
+      if (loc.dbName && String(loc.dbName).trim()) return String(loc.dbName).trim().toLowerCase();
+      if (loc.name && String(loc.name).trim().toLowerCase().startsWith('zudo-')) {
+        const nameLower = String(loc.name).trim().toLowerCase();
+        return nameLower === 'zudo-bangalore' ? 'zudo-bengaluru' : nameLower;
+      }
+      const citySlug = String(loc.city || '').trim().toLowerCase().replace(/\s+/g, '-');
+      const derived = citySlug ? `zudo-${citySlug}` : null;
+      return derived === 'zudo-bangalore' ? 'zudo-bengaluru' : derived;
+    };
+
+    const { locationId } = req.body;
+    logToFile(`Request body locationId: ${locationId}`);
+
+    let selectedLocation = null;
+    if (locationId && locationId !== 'global' && locationId !== 'null' && locationId !== 'undefined') {
+      if (!mongoose.Types.ObjectId.isValid(locationId)) {
+        return res.status(400).json({ message: 'Invalid branch/location selected.' });
+      }
+      selectedLocation = await resolveLocationById(locationId);
+      if (!selectedLocation) {
+        return res.status(404).json({ message: 'Selected branch/location not found.' });
+      }
+      if (selectedLocation.isActive === false) {
+        return res.status(403).json({ message: 'Selected branch/location is currently inactive.' });
+      }
+    }
+
+    // 1. Check Global DB Admin & Sales, then Central DB (zudo-central) Admin & Sales
+    let admin = await Admin.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
+    logToFile(`Checked Global Admin collection. Found: ${!!admin}`);
+    if (!admin) {
+      const GlobalSalesModel = mongoose.models.Sales || mongoose.model('Sales', Admin.schema, 'sales');
+      admin = await GlobalSalesModel.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
+      logToFile(`Checked Global Sales collection. Found: ${!!admin}`);
+    }
+    if (!admin) {
+      try {
+        const centralConn = await getCentralConn();
+        const CentralAdmin = centralConn.models.Admin || centralConn.model('Admin', Admin.schema);
+        admin = await CentralAdmin.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
+        logToFile(`Checked Central Admin collection. Found: ${!!admin}`);
+        if (!admin) {
+          const CentralSales = centralConn.models.Sales || centralConn.model('Sales', Admin.schema, 'sales');
+          admin = await CentralSales.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
+          logToFile(`Checked Central Sales collection. Found: ${!!admin}`);
+        }
+      } catch (e) { /* ignore central admin lookup error */ }
+    }
+
+    // If not in Global DB, check active req.models (if request had tenant context)
+    if (!admin && req.isTenant && req.models?.Admin) {
+      admin = await req.models.Admin.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
+      logToFile(`Checked active tenant Admin collection. Found: ${!!admin}`);
+      if (!admin && req.db) {
+        const SalesModel = req.db.models.Sales || req.db.model('Sales', Admin.schema, 'sales');
+        admin = await SalesModel.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
+        logToFile(`Checked active tenant Sales collection. Found: ${!!admin}`);
+      }
+    }
+
+    let tenantDbName = null;
+    let isTenantAdmin = false;
 
     if (admin) {
       logToFile(`Admin found. Role: ${admin.role}, assigned locationId: ${admin.locationId}`);
-      if (req.isTenant) {
+      if (selectedLocation) {
+        tenantDbName = getLocationDbName(selectedLocation);
+        isTenantAdmin = true;
+        logToFile(`Resolved location from context locationId: ${tenantDbName}`);
+      } else if (admin.locationId) {
+        const assignedLoc = await resolveLocationById(admin.locationId);
+        if (assignedLoc) {
+          if (assignedLoc.isActive === false) {
+            return res.status(403).json({ message: 'Your assigned branch/location is currently inactive.' });
+          }
+          tenantDbName = getLocationDbName(assignedLoc);
+          isTenantAdmin = true;
+          logToFile(`Resolved location from global admin's assigned locationId: ${tenantDbName}`);
+        }
+      } else if (req.isTenant) {
         isTenantAdmin = true;
         tenantDbName = req.dbName;
         logToFile(`Admin operates in tenant context: ${tenantDbName}`);
       }
-      // If the admin has a specific location assigned
-      else if (admin.locationId) {
-        const location = await resolveLocationById(admin.locationId);
-        if (location) {
-          tenantDbName = getLocationDbName(location);
-          isTenantAdmin = true;
-          logToFile(`Resolved location from global admin's assigned locationId: ${tenantDbName}`);
-        }
+    } else if (selectedLocation) {
+      // 2. Check if the user exists in the selected location's tenant database
+      tenantDbName = getLocationDbName(selectedLocation);
+      const tenantConn = await connectDBByLocation(selectedLocation._id.toString(), tenantDbName);
+      const TenantAdmin = tenantConn.models.Admin || tenantConn.model('Admin', Admin.schema);
+      admin = await TenantAdmin.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
+      logToFile(`Checked tenant Admin collection (${tenantDbName}). Found: ${!!admin}`);
+      if (!admin) {
+        const TenantSales = tenantConn.models.Sales || tenantConn.model('Sales', Admin.schema, 'sales');
+        admin = await TenantSales.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
+        logToFile(`Checked tenant Sales collection (${tenantDbName}). Found: ${!!admin}`);
       }
-      // If it's a Super Admin switching context with selected locationId
-      else if (locationId) {
-        const location = await resolveLocationById(locationId);
-        if (location) {
-          tenantDbName = getLocationDbName(location);
-          isTenantAdmin = true;
-          logToFile(`Resolved location from context locationId: ${tenantDbName}`);
-        }
-      }
-    } else if (locationId) {
-      // 2. Check if the user exists in the tenant's specific database
-      const location = await resolveLocationById(locationId);
-      if (location) {
-        tenantDbName = getLocationDbName(location);
-        const tenantConn = await connectDBByLocation(locationId, tenantDbName);
-        const TenantAdmin = tenantConn.models.Admin || tenantConn.model('Admin', Admin.schema);
-        admin = await TenantAdmin.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
-        logToFile(`Checked tenant Admin collection. Found: ${!!admin}`);
-        if (!admin) {
-          const TenantSales = tenantConn.models.Sales || tenantConn.model('Sales', Admin.schema, 'sales');
-          admin = await TenantSales.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
-          logToFile(`Checked tenant Sales collection. Found: ${!!admin}`);
-        }
-        if (admin) isTenantAdmin = true;
-      }
-    } else if (!admin) {
-      // 3. Scan all tenant databases if admin not found globally and no locationId provided
+      if (admin) isTenantAdmin = true;
+    } else {
+      // 3. Scan all active central/default tenant databases if admin not found globally and no locationId provided
       logToFile(`Scanning all tenant DBs for user...`);
       let locations = [];
       try {
@@ -196,6 +237,7 @@ router.post('/login', async (req, res) => {
       }
       for (const loc of locations) {
         const tempDbName = getLocationDbName(loc);
+        if (!tempDbName) continue;
         const tenantConn = await connectDBByLocation(loc._id.toString(), tempDbName);
         const TenantAdmin = tenantConn.models.Admin || tenantConn.model('Admin', Admin.schema);
         admin = await TenantAdmin.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
@@ -232,11 +274,12 @@ router.post('/login', async (req, res) => {
           ? locationId
           : admin.locationId;
 
+        const resolvedDbName = isTenantAdmin ? (admin.dbName || tenantDbName) : null;
         const token = jwt.sign(
           {
             id: admin._id,
             locationId: effectiveLocationId,
-            dbName: isTenantAdmin ? (admin.dbName || tenantDbName) : null,
+            dbName: resolvedDbName,
             tokenVersion: admin.tokenVersion
           },
           process.env.JWT_SECRET,
@@ -249,6 +292,7 @@ router.post('/login', async (req, res) => {
           email: admin.email,
           role: admin.role,
           locationId: effectiveLocationId,
+          dbName: resolvedDbName,
           targetSegment: admin.targetSegment || 'Both',
           permissions: admin.permissions,
           token,

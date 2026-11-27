@@ -98,6 +98,7 @@ router.post('/', protect, superAdmin, async (req, res) => {
       cityClean = cityClean.replace('zudo-', '');
     }
     const dbName = `zudo-${cityClean}`;
+    data.dbName = dbName;
 
     if (!data.name) {
       data.name = dbName;

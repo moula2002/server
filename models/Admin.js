@@ -6,7 +6,7 @@ const adminSchema = new mongoose.Schema({
   password: { type: String, required: true },
   role: { 
     type: String, 
-    enum: ['super_admin', 'normal_admin', 'sales', 'accounting', 'manager', 'logistics', 'cash_collector', 'b2b_admin', 'b2c_admin'], 
+    enum: ['super_admin', 'superadmin', 'normal_admin', 'sales', 'accounting', 'manager', 'logistics', 'cash_collector', 'b2b_admin', 'b2c_admin'], 
     default: 'manager' 
   },
   name: { type: String, required: true },
