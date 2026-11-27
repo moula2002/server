@@ -167,9 +167,6 @@ const getProductStock = (product, variantSize, role) => {
     }
     return { hasVariant: false, stock: 0 };
   }
-  const hasVariants = (product.b2b && product.b2b.length > 0) ||
-    (product.b2c && product.b2c.length > 0) ||
-    (product.variants && product.variants.length > 0);
 
   if (!variantSize && hasVariants) {
     // If no variantSize provided but product has variants, fallback to first variant
@@ -982,6 +979,178 @@ router.get('/admin/all', protect, async (req, res) => {
       res.json(orders);
     }
   } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Helper to build normalized pickup points for an order
+const buildOrderPickupPoints = (order) => {
+  const sellerMap = new Map();
+  const sellerPickups = Array.isArray(order.sellerPickups) ? order.sellerPickups : [];
+
+  (order.items || []).forEach(item => {
+    const sellerObj = item.seller?.sellerId && typeof item.seller.sellerId === 'object' ? item.seller.sellerId : null;
+    const rawSellerId = sellerObj?._id || item.seller?.sellerId || item.sellerId || item.productId?.sellerId;
+    const sellerIdStr = rawSellerId ? rawSellerId.toString() : `unknown-${item.seller?.name || 'seller'}`;
+
+    if (!sellerMap.has(sellerIdStr)) {
+      const spEntry = sellerPickups.find(sp => sp.sellerId && sp.sellerId.toString() === sellerIdStr);
+      const name = sellerObj?.businessName || sellerObj?.storeName || sellerObj?.name || item.seller?.name || 'Merchant Partner';
+      const phone = sellerObj?.phone || item.seller?.phone || '';
+      const address = item.seller?.address || sellerObj?.pickupLocation?.address || sellerObj?.businessAddress || 'Pickup address not specified';
+      const lat = item.seller?.lat ?? sellerObj?.pickupLocation?.lat ?? null;
+      const lng = item.seller?.lng ?? sellerObj?.pickupLocation?.lng ?? null;
+
+      sellerMap.set(sellerIdStr, {
+        sellerId: rawSellerId || null,
+        sellerName: name,
+        sellerPhone: phone,
+        pickupAddress: address,
+        lat,
+        lng,
+        pickupCode: spEntry?.pickupCode || order.pickupCode || '',
+        pickupStatus: spEntry?.status || order.orderStatus || 'Pending',
+        items: []
+      });
+    }
+
+    sellerMap.get(sellerIdStr).items.push({
+      name: item.name || item.productId?.name || 'Product',
+      quantity: item.quantity || 1,
+      variantSize: item.variantSize || ''
+    });
+  });
+
+  return Array.from(sellerMap.values());
+};
+
+// @route   GET /api/orders/admin/pickups
+// @desc    Get all pickup records with seller pickup points, OTPs, and driver assignments (Admin)
+// @access  Private
+router.get('/admin/pickups', protect, async (req, res) => {
+  try {
+    let orderFilter = {};
+    if (req.portal === 'B2B' || req.portal === 'B2C') {
+      const { User: UserModel } = getModels(req);
+      const users = await UserModel.find({ role: req.portal.toLowerCase() }).select('_id');
+      orderFilter.userId = { $in: users.map(u => u._id) };
+    }
+
+    let orders = [];
+    if (!req.locationId) {
+      const { aggregateGET } = require('../utils/aggregator');
+      orders = await aggregateGET('Order', req, orderFilter, ['userId', 'driverId', 'returnDriverId', 'items.productId', 'items.seller.sellerId'], '', { createdAt: -1 });
+    } else {
+      const { Order: OrderModel } = getModels(req);
+      orders = await OrderModel.find(orderFilter)
+        .populate('userId', 'name email role phone businessName companyName')
+        .populate('driverId', 'name phone vehicleNo vehicleDetails cashManagement')
+        .populate('returnDriverId', 'name phone vehicleNo vehicleDetails')
+        .populate('items.productId', 'name sellerId')
+        .populate('items.seller.sellerId', 'name businessName storeName companyName phone businessAddress pickupLocation')
+        .sort({ createdAt: -1 })
+        .lean();
+    }
+
+    const enrichedPickups = (orders || []).map(order => {
+      const pickupPoints = buildOrderPickupPoints(order);
+      const isReturnPickup = (order.returnStatus === 'Approved') ||
+        ['Return Driver Assigned', 'Out for Return', 'Return Picked Up'].includes(order.orderStatus) ||
+        (order.items || []).some(i => ['Return Approved', 'Picked Up from Customer', 'Returned to Seller'].includes(i.returnStatus));
+
+      return {
+        _id: order._id,
+        orderNumber: order.orderNumber || null,
+        orderRef: order.orderRef || (order.orderNumber ? String(order.orderNumber).padStart(5, '0') : order._id.toString().slice(-6).toUpperCase()),
+        orderStatus: order.orderStatus,
+        returnStatus: order.returnStatus || 'None',
+        isReturnPickup,
+        pickupCode: order.pickupCode || '',
+        pickupPoints,
+        driverId: order.driverId || null,
+        returnDriverId: order.returnDriverId || null,
+        customer: {
+          name: order.userId?.name || order.shippingAddress?.name || 'Customer',
+          phone: order.userId?.phone || order.shippingAddress?.phone || '',
+          address: order.shippingAddress ? `${order.shippingAddress.addressLine || ''}, ${order.shippingAddress.city || ''} ${order.shippingAddress.pincode || ''}`.trim() : ''
+        },
+        totalAmount: order.totalAmount || 0,
+        paymentMethod: order.paymentMethod || 'COD',
+        deliverySlot: order.deliverySlot || null,
+        locationId: order.locationId || req.locationId || null,
+        locationName: order.locationName || null,
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt
+      };
+    });
+
+    res.json(enrichedPickups);
+  } catch (error) {
+    console.error('Fetch admin pickups error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   PUT /api/orders/:id/pickup-status
+// @desc    Update pickup status for a specific seller or entire order (Admin)
+// @access  Private
+router.put('/:id/pickup-status', protect, async (req, res) => {
+  try {
+    const { status, sellerId } = req.body;
+    if (!status) {
+      return res.status(400).json({ message: 'Status is required' });
+    }
+
+    const { Order: OrderModel } = getModels(req);
+    const order = await OrderModel.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    const previousStatus = order.orderStatus;
+
+    if (sellerId) {
+      if (!order.sellerPickups) order.sellerPickups = [];
+      let sp = order.sellerPickups.find(p => p.sellerId && p.sellerId.toString() === sellerId.toString());
+      if (!sp) {
+        sp = { sellerId, status, pickupCode: order.pickupCode || generateOTP(6) };
+        order.sellerPickups.push(sp);
+      } else {
+        sp.status = status;
+      }
+
+      // Sync global orderStatus if all sellers reached this status or single seller
+      const allMatch = order.sellerPickups.length <= 1 || order.sellerPickups.every(p => p.status === status);
+      if (allMatch) {
+        order.orderStatus = status;
+      }
+    } else {
+      order.orderStatus = status;
+      if (Array.isArray(order.sellerPickups) && order.sellerPickups.length > 0) {
+        order.sellerPickups.forEach(sp => {
+          sp.status = status;
+        });
+      }
+    }
+
+    await order.save();
+
+    if (previousStatus !== order.orderStatus || sellerId) {
+      await recordSellerHistoryEvent(req, order, {
+        sellerIds: sellerId ? [sellerId] : undefined,
+        activityType: 'pickups',
+        activity: `Pickup ${status}`,
+        fromStatus: previousStatus,
+        status: status,
+        occurredAt: order.updatedAt || new Date(),
+        description: `Pickup status updated to ${status} by Admin`
+      });
+    }
+
+    emitOrderRealtimeUpdate(order, 'update');
+    res.json(order);
+  } catch (error) {
+    console.error('Update pickup status error:', error);
     res.status(500).json({ message: error.message });
   }
 });
