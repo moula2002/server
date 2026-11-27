@@ -347,13 +347,31 @@ router.delete('/:id', protect, async (req, res) => {
 });
 
 
+// Track OTP verification attempts per driverId to prevent brute-force
+const driverOtpAttempts = new Map();
+const MAX_DRIVER_OTP_ATTEMPTS = 5;
+const LOCKOUT_MS = 15 * 60 * 1000;
+
 // @route   POST /api/drivers/verify-otp
 // @desc    Verify OTP for driver cash collection settlement
-router.post('/verify-otp', async (req, res) => {
+// @access  Private (Admin)
+router.post('/verify-otp', protect, async (req, res) => {
+  const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin', 'cash_admin'].includes(req.user?.role);
+  if (!isAdmin) {
+    return res.status(403).json({ success: false, message: '403 Forbidden: Admin authorization required' });
+  }
+
   const { driverId, otp } = req.body;
   if (!driverId || !otp) {
     return res.status(400).json({ success: false, message: 'driverId and otp are required' });
   }
+
+  const key = String(driverId);
+  const attemptRec = driverOtpAttempts.get(key);
+  if (attemptRec && attemptRec.lockedUntil && Date.now() < attemptRec.lockedUntil) {
+    return res.status(429).json({ success: false, message: 'Too many invalid OTP attempts. Please try again later.' });
+  }
+
   try {
     const { DriverModel, driver } = await findDriverModelAndDoc(driverId, req);
     if (!driver) {
@@ -381,10 +399,21 @@ router.post('/verify-otp', async (req, res) => {
     const driverOtpMatches = driver.otp && driver.otp.toString().trim() === cleanOtp;
 
     if (deposit || driverOtpMatches) {
+      driverOtpAttempts.delete(key);
       return res.json({ success: true, message: 'OTP verified successfully' });
     }
 
-    return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
+    const nextCount = (attemptRec?.count || 0) + 1;
+    driverOtpAttempts.set(key, {
+      count: nextCount,
+      lockedUntil: nextCount >= MAX_DRIVER_OTP_ATTEMPTS ? Date.now() + LOCKOUT_MS : null
+    });
+
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid or expired OTP',
+      remainingAttempts: Math.max(0, MAX_DRIVER_OTP_ATTEMPTS - nextCount)
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

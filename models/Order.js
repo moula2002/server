@@ -267,6 +267,14 @@ const orderSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  codCashCredited: {
+    type: Boolean,
+    default: false
+  },
+  codCashCreditedAt: {
+    type: Date,
+    default: null
+  },
   deliveredAt: {
     type: Date,
     default: null
