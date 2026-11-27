@@ -1956,7 +1956,7 @@ router.put('/:id/payment', protect, async (req, res) => {
       const creditClaim = await OrderModel.findOneAndUpdate(
         { _id: order._id, codCashCredited: { $ne: true } },
         { $set: { codCashCredited: true, codCashCreditedAt: new Date() } },
-        { new: true }
+        { returnDocument: 'after' }
       );
 
       if (creditClaim) {
@@ -2146,7 +2146,7 @@ router.post('/:id/verify-delivery-otp', protect, async (req, res) => {
       const creditClaim = await OrderModel.findOneAndUpdate(
         { _id: order._id, codCashCredited: { $ne: true } },
         { $set: { codCashCredited: true, codCashCreditedAt: new Date() } },
-        { new: true }
+        { returnDocument: 'after' }
       );
 
       if (creditClaim) {
