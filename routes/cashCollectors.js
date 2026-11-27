@@ -87,16 +87,21 @@ router.post('/login', async (req, res) => {
     }
 
     const query = email
-      ? { email: new RegExp(`^${email.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      ? { email: new RegExp(`^\\s*${email.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i') }
       : { phone: phone.trim() };
 
+    const AdminSchema = require('../models/Admin').schema;
     let collector = null;
     let resolvedLocId = req.locationId || locationId || null;
     let resolvedDbName = req.dbName || null;
 
-    // 1. Try current tenant/default model
-    const { Model: PrimaryModel, locationId: primaryLoc } = await resolveCollectorModel(req, locationId);
+    // 1. Try current tenant/default model (CashCollector, then Admin with role cash_collector)
+    const { Model: PrimaryModel, conn: primaryConn, locationId: primaryLoc } = await resolveCollectorModel(req, locationId);
     collector = await PrimaryModel.findOne(query);
+    if (!collector) {
+      const PrimaryAdminModel = (primaryConn?.models?.Admin) || (primaryConn ? primaryConn.model('Admin', AdminSchema) : require('../models/Admin'));
+      collector = await PrimaryAdminModel.findOne({ ...query, role: 'cash_collector' });
+    }
     if (collector && primaryLoc) resolvedLocId = primaryLoc;
 
     // 2. Fallback: search across active tenant DBs if not found and no explicit location was set
@@ -117,7 +122,11 @@ router.post('/login', async (req, res) => {
           const dbName = loc.dbName || `zudo-${cityClean}`;
           const conn = await connectDBByLocation(loc._id.toString(), dbName);
           const TenantModel = conn.models.CashCollector || conn.model('CashCollector', CashCollector.schema);
-          const found = await TenantModel.findOne(query);
+          let found = await TenantModel.findOne(query);
+          if (!found) {
+            const TenantAdmin = conn.models.Admin || conn.model('Admin', AdminSchema);
+            found = await TenantAdmin.findOne({ ...query, role: 'cash_collector' });
+          }
           if (found) {
             collector = found;
             resolvedLocId = loc._id.toString();
