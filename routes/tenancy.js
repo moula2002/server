@@ -44,23 +44,28 @@ router.get('/find/:pincode', async (req, res) => {
 });
 
 // @route   GET /api/tenancy/locations
-// @desc    Get all available locations (for manual selection)
+// @desc    Get all available active locations from zudo-central (for website selection)
 router.get('/locations', async (req, res) => {
   try {
     const conn = await getCentralConn();
-    const Mapping = conn.models['PincodeMapping'] || conn.model('PincodeMapping', new mongoose.Schema({
-      pincode: String,
-      dbName: String,
-      city: String
-    }, { collection: 'pincodemappings' }));
+    const CentralLocation = conn.models['Location'] || conn.model('Location', require('../models/Location').schema);
+    const activeLocs = await CentralLocation.find({ isActive: true }).lean();
 
-    // Get unique cities and their dbNames
-    const locations = await Mapping.aggregate([
-      { $group: { _id: "$city", dbName: { $first: "$dbName" } } },
-      { $project: { city: "$_id", dbName: 1, _id: 0 } }
-    ]);
+    const locations = activeLocs.map(loc => {
+      let cityClean = (loc.city || '').trim().toLowerCase().replace(/\s+/g, '-');
+      while (cityClean.startsWith('zudo-')) {
+        cityClean = cityClean.replace('zudo-', '');
+      }
+      return {
+        _id: loc._id,
+        city: loc.city,
+        state: loc.state,
+        pincode: loc.pincode,
+        dbName: loc.name || `zudo-${cityClean}`
+      };
+    });
 
-    console.log(`Tenancy: Returning ${locations.length} locations.`);
+    console.log(`Tenancy: Returning ${locations.length} active locations.`);
     res.json(locations);
   } catch (error) {
     console.error('Tenancy Locations Error:', error);
