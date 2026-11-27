@@ -1,8 +1,20 @@
 const express = require('express');
 const router = express.Router();
 const CashCollector = require('../models/CashCollector');
+const { protect } = require('../middleware/auth');
 const { connectDBByLocation } = require('../utils/db_manager');
 const { aggregateGET } = require('../utils/aggregator');
+
+const isAdminRequest = (req) => {
+  return !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin', 'cash_admin'].includes(req.user?.role);
+};
+
+const requireAdmin = (req, res, next) => {
+  if (!isAdminRequest(req)) {
+    return res.status(403).json({ message: '403 Forbidden: Admin authorization required' });
+  }
+  next();
+};
 
 /**
  * Helper to locate model and document across tenant connections or central DB
@@ -61,8 +73,8 @@ const findModelAndDoc = async (id, req) => {
 
 // @route   GET api/cash
 // @desc    Get all cash transactions (Supports Global Aggregation and Single-Tenant)
-// @access  Public / Admin
-router.get('/', async (req, res) => {
+// @access  Private (Admin)
+router.get('/', protect, requireAdmin, async (req, res) => {
   try {
     if (!req.locationId) {
       const transactions = await aggregateGET('CashCollector', req, {}, ['driverId'], '', { date: -1, createdAt: -1 });
@@ -91,8 +103,8 @@ router.get('/', async (req, res) => {
 
 // @route   POST api/cash
 // @desc    Record a new cash transaction / collection
-// @access  Public / Admin
-router.post('/', async (req, res) => {
+// @access  Private (Admin)
+router.post('/', protect, requireAdmin, async (req, res) => {
   const { 
     type, 
     name, 
@@ -111,6 +123,11 @@ router.post('/', async (req, res) => {
     locationId,
     settledBy
   } = req.body;
+
+  const numericAmount = Number(amount);
+  if (amount !== undefined && (isNaN(numericAmount) || numericAmount < 0)) {
+    return res.status(400).json({ message: 'Invalid amount: must be a non-negative number' });
+  }
 
   try {
     let CashCollectorModel = req.models?.CashCollector;
@@ -185,8 +202,8 @@ router.post('/', async (req, res) => {
 
 // @route   PUT api/cash/:id
 // @desc    Update a cash transaction
-// @access  Public / Admin
-router.put('/:id', async (req, res) => {
+// @access  Private (Admin)
+router.put('/:id', protect, requireAdmin, async (req, res) => {
   const { 
     type, 
     name, 
@@ -237,8 +254,8 @@ router.put('/:id', async (req, res) => {
 
 // @route   DELETE api/cash/:id
 // @desc    Delete a cash transaction
-// @access  Public / Admin
-router.delete('/:id', async (req, res) => {
+// @access  Private (Admin)
+router.delete('/:id', protect, requireAdmin, async (req, res) => {
   try {
     const { Model, doc: transaction } = await findModelAndDoc(req.params.id, req);
     if (!transaction) {

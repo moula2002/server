@@ -504,6 +504,11 @@ router.get('/cod-orders', protect, async (req, res) => {
 // @desc    Admin updates COD order collection status, reference, or settlement status
 router.put('/cod-orders/:orderId/status', protect, async (req, res) => {
   try {
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin', 'cash_admin'].includes(req.user?.role);
+    if (!isAdmin) {
+      return res.status(403).json({ message: '403 Forbidden: Admin authorization required' });
+    }
+
     const { orderId } = req.params;
     const { 
       action, 
@@ -559,6 +564,9 @@ router.put('/cod-orders/:orderId/status', protect, async (req, res) => {
       auditAction = 'COD_VERIFIED';
       updatedStatus = 'Verified';
     } else if (action === 'APPROVE_SETTLEMENT') {
+      if (['Approved', 'Settled'].includes(order.sellerSettlementStatus)) {
+        return res.status(400).json({ message: `Settlement is already ${order.sellerSettlementStatus} for this order.` });
+      }
       order.sellerSettlementStatus = 'Approved';
       auditAction = 'COD_SETTLEMENT_APPROVED';
       updatedStatus = 'Approved';
@@ -910,12 +918,46 @@ router.post('/settle', protect, async (req, res) => {
     const previouslySettled = round2(previousPayouts.reduce((sum, p) => sum + (Number(p.amount) || 0), 0));
     const currentOutstanding = round2(totalSellerPayable - previouslySettled);
 
-    // Prevent duplicate settlement (submitted within 30s with identical amount and transaction reference)
+    if (currentOutstanding <= 0 || numericAmount > round2(currentOutstanding + 0.01)) {
+      return res.status(400).json({
+        message: `Settlement amount (₹${numericAmount}) exceeds current outstanding payable (₹${Math.max(0, currentOutstanding)}).`
+      });
+    }
+
+    // Check if any selected orderIds are already settled
+    const { orderIds: settleOrderIds } = req.body;
+    if (Array.isArray(settleOrderIds) && settleOrderIds.length > 0) {
+      const alreadySettledCount = await OrderModel.countDocuments({
+        _id: { $in: settleOrderIds },
+        sellerSettlementStatus: 'Settled'
+      });
+      if (alreadySettledCount > 0) {
+        return res.status(409).json({
+          message: 'One or more selected orders have already been settled.'
+        });
+      }
+    }
+
+    // Prevent duplicate settlement (same UTR/transaction reference or submitted within 30s)
+    const txRef = (transactionId || utrReference || '').trim();
+    if (txRef) {
+      const refDuplicate = await SellerPaymentModel.findOne({
+        sellerId,
+        $or: [{ transactionId: txRef }, { utrReference: txRef }],
+        status: { $ne: 'Reversed' }
+      });
+      if (refDuplicate) {
+        return res.status(409).json({
+          message: `Duplicate transaction reference '${txRef}'. This reference has already been used for a settlement.`
+        });
+      }
+    }
+
     const thirtySecondsAgo = new Date(Date.now() - 30 * 1000);
     const recentDuplicate = await SellerPaymentModel.findOne({
       sellerId,
       amount: numericAmount,
-      transactionId: transactionId || utrReference || '',
+      transactionId: txRef,
       createdAt: { $gte: thirtySecondsAgo }
     });
 

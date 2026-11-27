@@ -40,22 +40,22 @@ const getSalesAssociateForUser = async (req, user) => {
     const PincodeModel = req.models?.Pincode || Pincode;
     const activeDb = req.db || mongoose.connection;
     const SalesModel = activeDb.models.Sales || activeDb.model('Sales', Admin.schema, 'sales');
-    
+
     let salesAssociate = null;
     if (user.pincode) {
       const pincodeDoc = await PincodeModel.findOne({ code: user.pincode.trim() });
       if (pincodeDoc && pincodeDoc.locationId) {
-        salesAssociate = await SalesModel.findOne({ 
-          role: 'sales', 
-          locationId: pincodeDoc.locationId 
+        salesAssociate = await SalesModel.findOne({
+          role: 'sales',
+          locationId: pincodeDoc.locationId
         }).select('name email phone');
       }
     }
-    
+
     if (!salesAssociate) {
       salesAssociate = await SalesModel.findOne({ role: 'sales' }).select('name email phone');
     }
-    
+
     return salesAssociate;
   } catch (error) {
     console.error('Error fetching sales associate:', error);
@@ -70,7 +70,7 @@ router.get('/login-logs', (req, res) => {
     const fs = require('fs');
     const path = require('path');
     const logPath = path.join(__dirname, '../login-debug.txt');
-    
+
     if (req.query.clear === 'true') {
       if (fs.existsSync(logPath)) {
         fs.unlinkSync(logPath);
@@ -141,7 +141,7 @@ router.post('/login', async (req, res) => {
           isTenantAdmin = true;
           logToFile(`Resolved location from global admin's assigned locationId: ${tenantDbName}`);
         }
-      } 
+      }
       // If it's a Super Admin switching context with selected locationId
       else if (locationId) {
         const location = await Location.findById(locationId);
@@ -244,7 +244,7 @@ router.post('/register', async (req, res) => {
   try {
     const { name, email, password, role, phone, businessName, gstNumber, panNumber, aadhaarNumber, gstPdf, storePic, pincode } = req.body;
     const UserModel = req.models.User;
-    
+
     const userExists = await UserModel.findOne({ email, role: role || 'b2c' });
     if (userExists) return res.status(400).json({ message: 'Account already exists' });
 
@@ -259,15 +259,15 @@ router.post('/register', async (req, res) => {
 
     user.tokenVersion = (user.tokenVersion || 0) + 1;
     await user.save();
-    
+
     const token = jwt.sign({ id: user._id, tokenVersion: user.tokenVersion }, process.env.JWT_SECRET, { expiresIn: '30d' });
     const salesAssociate = await getSalesAssociateForUser(req, user);
-    res.status(201).json({ 
-      token, 
+    res.status(201).json({
+      token,
       user: {
         ...formatUser(user),
         salesAssociate
-      } 
+      }
     });
   } catch (error) {
     res.status(400).json({ message: error.message });
@@ -293,12 +293,12 @@ router.post('/user-login', async (req, res) => {
       await user.save();
       const token = jwt.sign({ id: user._id, tokenVersion: user.tokenVersion }, process.env.JWT_SECRET, { expiresIn: '30d' });
       const salesAssociate = await getSalesAssociateForUser(req, user);
-      res.json({ 
-        token, 
+      res.json({
+        token,
         user: {
           ...formatUser(user),
           salesAssociate
-        } 
+        }
       });
     } else {
       res.status(401).json({ message: 'Invalid email or password' });
@@ -383,7 +383,7 @@ const resolveUserPhone = async (user, req) => {
         phone: { $exists: true, $nin: [null, ''] }
       });
       if (sameEmailUser?.phone) return String(sameEmailUser.phone).trim();
-    } catch (e) {}
+    } catch (e) { }
   }
 
   // 3. Check seller profiles
@@ -399,7 +399,7 @@ const resolveUserPhone = async (user, req) => {
       });
       if (seller?.phone) return String(seller.phone).trim();
     }
-  } catch (e) {}
+  } catch (e) { }
 
   // 4. Check sales profiles
   try {
@@ -415,7 +415,7 @@ const resolveUserPhone = async (user, req) => {
       });
       if (sales?.phone) return String(sales.phone).trim();
     }
-  } catch (e) {}
+  } catch (e) { }
 
   // 5. Check order history
   try {
@@ -430,7 +430,7 @@ const resolveUserPhone = async (user, req) => {
       const orderPhone = order?.customerDetails?.phone || order?.shippingAddress?.phone || order?.customer?.phone;
       if (orderPhone) return String(orderPhone).trim();
     }
-  } catch (e) {}
+  } catch (e) { }
 
   return null;
 };
@@ -447,7 +447,7 @@ router.get('/b2b-pending', protect, async (req, res) => {
         const foundPhone = await resolveUserPhone(uObj, req);
         if (foundPhone) {
           uObj.phone = foundPhone;
-          UserModel.updateOne({ _id: u._id }, { $set: { phone: foundPhone } }).catch(() => {});
+          UserModel.updateOne({ _id: u._id }, { $set: { phone: foundPhone } }).catch(() => { });
         }
       }
       return uObj;
@@ -470,7 +470,7 @@ router.get('/b2b-verified', protect, async (req, res) => {
         const foundPhone = await resolveUserPhone(uObj, req);
         if (foundPhone) {
           uObj.phone = foundPhone;
-          UserModel.updateOne({ _id: u._id }, { $set: { phone: foundPhone } }).catch(() => {});
+          UserModel.updateOne({ _id: u._id }, { $set: { phone: foundPhone } }).catch(() => { });
         }
       }
       return uObj;
@@ -488,7 +488,7 @@ router.post('/b2b-verify-submit', protect, async (req, res) => {
     const UserModel = getModel('User', req);
     const userId = req.user._id;
     const { gstPdf, storePic, gstNumber, panNumber, aadhaarNumber, pincode, businessName, phone } = req.body;
-    
+
     const updateFields = {
       isWaitingApproval: true
     };
@@ -503,7 +503,7 @@ router.post('/b2b-verify-submit', protect, async (req, res) => {
 
     const user = await UserModel.findByIdAndUpdate(userId, updateFields, { returnDocument: 'after' });
     if (!user) return res.status(404).json({ message: 'User not found' });
-    
+
     res.json(formatUser(user));
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -632,9 +632,9 @@ router.post('/create-admin', protect, superAdmin, async (req, res) => {
     if (role === 'super_admin') {
       finalTargetSegment = 'Both';
       finalPermissions = [
-        'view_dashboard', 'manage_products', 'manage_categories', 'manage_subcategories', 
-        'manage_orders', 'manage_drivers', 'manage_sellers', 'manage_users', 
-        'manage_cash', 'manage_b2b_verification', 'manage_deliveries', 'manage_reviews', 
+        'view_dashboard', 'manage_products', 'manage_categories', 'manage_subcategories',
+        'manage_orders', 'manage_drivers', 'manage_sellers', 'manage_users',
+        'manage_cash', 'manage_b2b_verification', 'manage_deliveries', 'manage_reviews',
         'manage_bulk_upload', 'manage_admins', 'manage_locations', 'manage_profile', 'manage_invoices'
       ];
     } else if (role === 'b2b_admin') {
@@ -720,7 +720,7 @@ router.put('/admins/:id', protect, superAdmin, async (req, res) => {
     admin.locationId = (req.body.locationId === '') ? null : (req.body.locationId || admin.locationId);
     admin.targetSegment = req.body.targetSegment || admin.targetSegment;
     admin.permissions = req.body.permissions || admin.permissions;
-    
+
     if (req.body.pincodes !== undefined) {
       admin.pincodes = req.body.pincodes;
       admin.markModified('pincodes');
@@ -799,7 +799,7 @@ router.put('/profile', protect, async (req, res) => {
         admin.email = req.body.email || admin.email;
         admin.phone = req.body.phone || admin.phone;
         admin.locationId = (req.body.locationId === '') ? null : (req.body.locationId || admin.locationId);
-        
+
         if (req.body.pincodes !== undefined) {
           admin.pincodes = req.body.pincodes;
           admin.markModified('pincodes');
@@ -875,15 +875,15 @@ router.post('/google-login', async (req, res) => {
 
     user.tokenVersion = (user.tokenVersion || 0) + 1;
     await user.save();
-    
+
     const token = jwt.sign({ id: user._id, tokenVersion: user.tokenVersion }, process.env.JWT_SECRET, { expiresIn: '30d' });
     const salesAssociate = await getSalesAssociateForUser(req, user);
-    res.json({ 
-      token, 
+    res.json({
+      token,
       user: {
         ...formatUser(user),
         salesAssociate
-      } 
+      }
     });
   } catch (error) {
     res.status(400).json({ message: error.message });
@@ -960,11 +960,11 @@ router.post('/driver-login', async (req, res) => {
     const isMatch = await driver.comparePassword(password);
     if (isMatch) {
       console.log(`[Driver Login] Success: ${emailToSearch}`);
-      
+
       const nextVersion = (driver.tokenVersion || 0) + 1;
       await DriverModel.updateOne({ _id: driver._id }, { $set: { tokenVersion: nextVersion } });
       driver.tokenVersion = nextVersion;
-      
+
       const token = jwt.sign({ id: driver._id, role: 'driver', tokenVersion: driver.tokenVersion }, process.env.JWT_SECRET, { expiresIn: '30d' });
       res.json({
         token,
@@ -988,47 +988,77 @@ router.post('/driver-login', async (req, res) => {
 // @desc    Cash Collector Login (supports email or phone)
 router.post('/cash-collector-login', async (req, res) => {
   const { email, phone, password } = req.body;
-  try {
-    if ((!email && !phone) || !password) {
-      return res.status(400).json({ message: 'Email/phone and password are required' });
-    }
-    const CashCollectorModel = getModel('CashCollector', req);
-    const query = email
-      ? { email: new RegExp(`^${email.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
-      : { phone: phone.trim() };
-    const collector = await CashCollectorModel.findOne(query);
-    if (collector && (await collector.comparePassword(password))) {
-      collector.tokenVersion = (collector.tokenVersion || 0) + 1;
-      await collector.save();
 
-      const token = jwt.sign(
-        {
-          id: collector._id,
-          role: 'cash_collector',
-          locationId: req.locationId || undefined,
-          dbName: req.dbName || undefined,
-          tokenVersion: collector.tokenVersion
-        },
-        process.env.JWT_SECRET,
-        { expiresIn: '30d' }
-      );
-      res.json({
-        token,
-        user: {
-          _id: collector._id,
-          name: collector.name,
-          email: collector.email,
-          role: 'cash_collector',
-          phone: collector.phone,
-          status: collector.status,
-          wallet: collector.amount || 0
-        }
+  try {
+    const emailIdentifier = typeof email === 'string' ? email.trim() : '';
+    const phoneIdentifier = typeof phone === 'string' ? phone.trim() : '';
+
+    if ((!emailIdentifier && !phoneIdentifier) || !password) {
+      return res.status(400).json({
+        message: 'Email/phone and password are required'
       });
-    } else {
-      res.status(401).json({ message: 'Invalid email/phone or password' });
     }
+
+    const CashCollectorModel = getModel('CashCollector', req);
+    const identifierQueries = [];
+
+    if (emailIdentifier) {
+      const escapedEmail = emailIdentifier.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        '\\$&'
+      );
+
+      identifierQueries.push({
+        email: new RegExp(`^${escapedEmail}$`, 'i')
+      });
+    }
+
+    if (phoneIdentifier) {
+      identifierQueries.push({ phone: phoneIdentifier });
+    }
+
+    const query =
+      identifierQueries.length === 1
+        ? identifierQueries[0]
+        : { $or: identifierQueries };
+
+    const collector = await CashCollectorModel.findOne(query);
+
+    if (!collector || !(await collector.comparePassword(password))) {
+      return res.status(401).json({
+        message: 'Invalid email/phone or password'
+      });
+    }
+
+    collector.tokenVersion = (collector.tokenVersion || 0) + 1;
+    await collector.save();
+
+    const token = jwt.sign(
+      {
+        id: collector._id,
+        role: 'cash_collector',
+        locationId: req.locationId || undefined,
+        dbName: req.dbName || undefined,
+        tokenVersion: collector.tokenVersion
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    return res.json({
+      token,
+      user: {
+        _id: collector._id,
+        name: collector.name,
+        email: collector.email,
+        role: 'cash_collector',
+        phone: collector.phone,
+        status: collector.status,
+        wallet: collector.amount || 0
+      }
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    return res.status(500).json({ message: error.message });
   }
 });
 
@@ -1057,15 +1087,15 @@ router.put('/users/:id', protect, async (req, res) => {
       console.log(`[DEBUG] User not found for id: ${req.params.id}`);
       return res.status(404).json({ message: 'User not found' });
     }
-    
+
     user.name = req.body.name || user.name;
     user.email = req.body.email || user.email;
     user.phone = req.body.phone !== undefined ? req.body.phone : user.phone;
-    
+
     if (req.body.password) {
       user.password = req.body.password;
     }
-    
+
     await user.save();
     console.log(`[DEBUG] User updated successfully: ${user._id}`);
     res.json(user);
@@ -1083,7 +1113,7 @@ router.delete('/users/:id', protect, async (req, res) => {
     const UserModel = getModel('User', req);
     const user = await UserModel.findById(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
-    
+
     await user.deleteOne();
     res.json({ message: 'User deleted successfully' });
   } catch (error) {
@@ -1099,7 +1129,7 @@ router.put('/users/:id/block', protect, async (req, res) => {
     const UserModel = getModel('User', req);
     const user = await UserModel.findById(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
-    
+
     user.isBlocked = !user.isBlocked;
     await user.save();
     res.json({ message: user.isBlocked ? 'User blocked' : 'User unblocked', user });
@@ -1158,7 +1188,7 @@ router.put('/sales/:id', protect, superAdmin, async (req, res) => {
     salesAccount.email = req.body.email || salesAccount.email;
     salesAccount.phone = req.body.phone || salesAccount.phone;
     salesAccount.locationId = (req.body.locationId === '') ? null : (req.body.locationId || salesAccount.locationId);
-    
+
     if (req.body.pincodes !== undefined) {
       salesAccount.pincodes = req.body.pincodes;
       salesAccount.markModified('pincodes');

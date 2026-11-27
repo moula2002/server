@@ -1096,9 +1096,14 @@ router.get('/admin/pickups', protect, async (req, res) => {
 
 // @route   PUT /api/orders/:id/pickup-status
 // @desc    Update pickup status for a specific seller or entire order (Admin)
-// @access  Private
+// @access  Private (Admin)
 router.put('/:id/pickup-status', protect, async (req, res) => {
   try {
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    if (!isAdmin) {
+      return res.status(403).json({ message: '403 Forbidden: Admin authorization required' });
+    }
+
     const { status, sellerId } = req.body;
     if (!status) {
       return res.status(400).json({ message: 'Status is required' });
@@ -1154,6 +1159,101 @@ router.put('/:id/pickup-status', protect, async (req, res) => {
     res.json(order);
   } catch (error) {
     console.error('Update pickup status error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @route   POST /api/orders/:id/verify-pickup-otp
+// @desc    Driver verifies 6-digit Seller Pickup OTP when collecting package from seller
+// @access  Private (Assigned Driver or Admin)
+router.post('/:id/verify-pickup-otp', protect, async (req, res) => {
+  try {
+    const { otp, sellerId } = req.body;
+    if (!otp) {
+      return res.status(400).json({ message: 'Please provide the 6-digit Seller Pickup OTP.' });
+    }
+
+    const { Order: OrderModel } = getModels(req);
+    const order = await OrderModel.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAssignedDriver = req.user?.role === 'driver' && order.driverId?.toString() === req.user._id.toString();
+    if (!isAdmin && !isAssignedDriver) {
+      return res.status(403).json({ message: '403 Forbidden: Only the assigned driver or admin can verify seller pickup OTP.' });
+    }
+
+    if (['Delivered', 'Cancelled'].includes(order.orderStatus)) {
+      return res.status(400).json({ message: `Cannot verify pickup for an order that is ${order.orderStatus}.` });
+    }
+
+    const cleanOtp = String(otp).trim();
+    if (!Array.isArray(order.sellerPickups) || order.sellerPickups.length === 0) {
+      if (!order.pickupCode || String(order.pickupCode).trim() !== cleanOtp) {
+        return res.status(400).json({ message: 'Invalid Seller Pickup OTP.' });
+      }
+      if (order.orderStatus === 'Picked Up') {
+        return res.status(400).json({ message: 'Pickup OTP has already been verified.' });
+      }
+      const prevStatus = order.orderStatus;
+      order.orderStatus = 'Picked Up';
+      await order.save();
+      await recordSellerHistoryEvent(req, order, {
+        activityType: 'pickups',
+        activity: 'Pickup Completed',
+        fromStatus: prevStatus,
+        status: 'Picked Up',
+        occurredAt: new Date(),
+        description: 'Seller pickup OTP verified and package collected'
+      });
+      emitOrderRealtimeUpdate(order, 'update');
+      return res.json({ success: true, message: 'Seller pickup OTP verified', order });
+    }
+
+    // Multi-seller or single-seller sellerPickups array
+    let sp = sellerId
+      ? order.sellerPickups.find(p => p.sellerId && p.sellerId.toString() === sellerId.toString())
+      : (order.sellerPickups.length === 1 ? order.sellerPickups[0] : null);
+
+    if (!sp) {
+      return res.status(400).json({ message: 'sellerId is required for multi-seller pickup verification, or seller pickup not found.' });
+    }
+
+    if (['Picked Up', 'Out for Delivery', 'Delivered'].includes(sp.status)) {
+      return res.status(400).json({ message: 'Pickup OTP already verified for this seller.' });
+    }
+
+    const expectedOtp = String(sp.pickupCode || order.pickupCode || '').trim();
+    if (!expectedOtp || expectedOtp !== cleanOtp) {
+      return res.status(400).json({ message: 'Invalid Seller Pickup OTP.' });
+    }
+
+    const prevStatus = sp.status;
+    sp.status = 'Picked Up';
+    sp.pickupCode = null; // Invalidate to prevent reuse
+
+    const allPickedUp = order.sellerPickups.every(p => ['Picked Up', 'Out for Delivery', 'Delivered'].includes(p.status));
+    if (allPickedUp) {
+      order.orderStatus = 'Picked Up';
+    }
+
+    await order.save();
+    await recordSellerHistoryEvent(req, order, {
+      sellerIds: sp.sellerId ? [sp.sellerId] : undefined,
+      activityType: 'pickups',
+      activity: 'Pickup Completed',
+      fromStatus: prevStatus,
+      status: 'Picked Up',
+      occurredAt: new Date(),
+      description: 'Seller pickup OTP verified and package collected from seller'
+    });
+
+    emitOrderRealtimeUpdate(order, 'update');
+    res.json({ success: true, message: 'Seller pickup OTP verified', order });
+  } catch (error) {
+    console.error('Verify pickup OTP error:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -1337,13 +1437,24 @@ router.put('/:id/ship', protect, async (req, res) => {
       return res.status(400).json({ message: `Cannot ship an order that is already ${order.orderStatus}.` });
     }
 
-    // Status updates to Out for Delivery when admin assigns driver to ship
+    // Status updates to Out for Delivery when admin dispatches, or Assigned when assigning for pickup
     order.driverId = req.body.driverId;
-    if (order.orderStatus === 'Out for Delivery' || req.body.outForDelivery !== false || order.orderStatus === 'Packed') {
-      order.orderStatus = 'Out for Delivery';
+    if (req.body.outForDelivery === false) {
+      if (['Pending', 'Confirmed', 'Accepted', 'Packed'].includes(order.orderStatus)) {
+        order.orderStatus = 'Assigned';
+      }
       if (order.sellerPickups && order.sellerPickups.length > 0) {
         order.sellerPickups.forEach(sp => {
           if (['Pending', 'Packed', 'Confirmed', 'Accepted', 'Processing'].includes(sp.status)) {
+            sp.status = 'Assigned';
+          }
+        });
+      }
+    } else {
+      order.orderStatus = 'Out for Delivery';
+      if (order.sellerPickups && order.sellerPickups.length > 0) {
+        order.sellerPickups.forEach(sp => {
+          if (['Pending', 'Packed', 'Confirmed', 'Accepted', 'Processing', 'Assigned', 'Picked Up'].includes(sp.status)) {
             sp.status = 'Out for Delivery';
           }
         });
@@ -1382,18 +1493,8 @@ router.put('/:id/ship', protect, async (req, res) => {
     }
     emitOrderRealtimeUpdate(order, 'update');
 
-    // Populate user to check role
-    await order.populate('userId', 'role');
-
-    // Only increment wallet for B2C COD orders if driver has cash management enabled
-    if ((order.paymentMethod === 'COD' || order.paymentMethod === 'Cash at Delivery' || order.paymentMethod === 'UPI at Delivery') && order.userId?.role === 'b2c') {
-      const assignedDriver = await DriverModel.findById(req.body.driverId);
-      if (assignedDriver && assignedDriver.cashManagement) {
-        assignedDriver.wallet = (assignedDriver.wallet || 0) + order.totalAmount;
-        await assignedDriver.save();
-      }
-    }
-
+    // Note: COD cash is credited to driver/collector wallet ONLY upon actual cash collection/delivery
+    // (never prematurely at ship/dispatch time).
     res.json(order);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1808,36 +1909,65 @@ router.all('/:id/status', protect, async (req, res) => {
 
 // @route   PUT /api/orders/:id/payment
 // @desc    Update payment info (screenshot and status)
+// @access  Private (Admin or Assigned Driver; customers can only upload paymentScreenshot)
 router.put('/:id/payment', protect, async (req, res) => {
   try {
     const { paymentScreenshot, paymentStatus, isCash } = req.body;
     const { Order: OrderModel, Driver: DriverModel, CashCollector: CashCollectorModel } = getModels(req);
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin', 'cash_admin'].includes(req.user?.role);
+    const isAssignedDriver = req.user?.role === 'driver' && order.driverId?.toString() === req.user._id.toString();
+    const isOwningCustomer = order.userId?.toString() === req.user._id.toString();
+
+    if (!isAdmin && !isAssignedDriver && !isOwningCustomer) {
+      return res.status(403).json({ message: '403 Forbidden: Not authorized to update payment for this order' });
+    }
+
+    if ((isCash || paymentStatus) && !isAdmin && !isAssignedDriver) {
+      return res.status(403).json({ message: '403 Forbidden: Only Admin or Assigned Driver can update payment status or record cash collection' });
+    }
+
     const previousPaymentStatus = order.paymentStatus;
 
     if (paymentScreenshot) order.paymentScreenshot = paymentScreenshot;
-    if (paymentStatus) order.paymentStatus = paymentStatus;
+    if (paymentStatus && (isAdmin || isAssignedDriver)) order.paymentStatus = paymentStatus;
 
-    // Handle Cash Payment logic
+    // Handle Cash Payment logic atomically (prevent duplicate credits)
     if (isCash) {
-      if (order.cashPersonId) {
-        // Update Cash Collector wallet
-        const collector = await CashCollectorModel.findById(order.cashPersonId);
-        if (collector) {
-          collector.amount = (collector.amount || 0) + order.totalAmount;
-          await collector.save();
-        }
-      } else if (order.driverId) {
-        // Update Driver wallet (only if cashManagement is enabled)
-        const driver = await DriverModel.findById(order.driverId);
-        if (driver && driver.cashManagement) {
-          driver.wallet = (driver.wallet || 0) + order.totalAmount;
-          await driver.save();
+      const creditClaim = await OrderModel.findOneAndUpdate(
+        { _id: order._id, codCashCredited: { $ne: true } },
+        { $set: { codCashCredited: true, codCashCreditedAt: new Date() } },
+        { new: true }
+      );
+
+      if (creditClaim) {
+        if (order.cashPersonId) {
+          await CashCollectorModel.findByIdAndUpdate(order.cashPersonId, {
+            $inc: { amount: Number(order.totalAmount) || 0 }
+          });
+          order.codCollectionStatus = 'Collected';
+          order.codCollectedAmount = Number(order.totalAmount) || 0;
+          order.codCollectedAt = new Date();
+        } else if (order.driverId) {
+          const driver = await DriverModel.findById(order.driverId);
+          if (driver && driver.cashManagement) {
+            await DriverModel.findByIdAndUpdate(order.driverId, {
+              $inc: { wallet: Number(order.totalAmount) || 0 }
+            });
+            order.codCollectionStatus = 'Collected';
+            order.codCollectedAmount = Number(order.totalAmount) || 0;
+            order.codCollectedAt = new Date();
+          } else {
+            order.codCollectionStatus = 'Disputed';
+            order.codRemarks = 'WARNING: Cash collected by driver without Cash Management permission';
+          }
         }
       }
       order.paymentMethod = 'Cash';
       order.paymentStatus = 'Completed';
+      order.codCashCredited = true;
     }
 
     order.paidAt = Date.now();
@@ -1861,13 +1991,19 @@ router.put('/:id/payment', protect, async (req, res) => {
 });
 
 // @route   POST /api/orders/:id/delivery-otp
-// @desc    Generate/Regenerate 6-digit delivery OTP (Admin/Driver)
+// @desc    Generate/Regenerate 6-digit delivery OTP (Admin/Assigned Driver only)
 router.post('/:id/delivery-otp', protect, async (req, res) => {
   try {
     const { Order: OrderModel } = getModels(req);
     const order = await OrderModel.findById(req.params.id).populate('userId', 'name email phone fcmToken role');
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
+    }
+
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isDriver = req.user?.role === 'driver' && order.driverId?.toString() === req.user._id.toString();
+    if (!isAdmin && !isDriver) {
+      return res.status(403).json({ message: '403 Forbidden: Only Admin or Assigned Driver can generate delivery OTP.' });
     }
 
     if (order.orderStatus === 'Delivered') {
@@ -1884,7 +2020,7 @@ router.post('/:id/delivery-otp', protect, async (req, res) => {
     res.json({
       success: true,
       message: '6-digit Delivery OTP generated and sent to customer',
-      deliveryOtp: newOtp,
+      ...(isAdmin ? { deliveryOtp: newOtp } : {}),
       expiresAt: order.deliveryOtpExpiresAt
     });
   } catch (error) {
@@ -1959,6 +2095,9 @@ router.post('/:id/verify-delivery-otp', protect, async (req, res) => {
     if (!isAdmin && !isDriver) {
       return res.status(403).json({ message: 'Not authorized to verify delivery for this order' });
     }
+    if (order.orderStatus === 'Delivered') {
+      return res.status(400).json({ message: 'Order is already delivered' });
+    }
     const previousOrderStatus = order.orderStatus;
     const previousPaymentStatus = order.paymentStatus;
 
@@ -1984,24 +2123,41 @@ router.post('/:id/verify-delivery-otp', protect, async (req, res) => {
       });
     }
 
-    // Handle payment update if delivered with Cash
-    if (isCash || req.body.isCash) {
-      if (order.cashPersonId) {
-        const collector = await CashCollectorModel.findById(order.cashPersonId);
-        if (collector) {
-          collector.amount = (collector.amount || 0) + order.totalAmount;
-          await collector.save();
-        }
-      } else if (order.driverId) {
-        // Update Driver wallet (only if cashManagement is enabled)
-        const driver = await DriverModel.findById(order.driverId);
-        if (driver && driver.cashManagement) {
-          driver.wallet = (driver.wallet || 0) + order.totalAmount;
-          await driver.save();
+    // Handle payment update if delivered with Cash (atomic single-credit guard)
+    const isCodOrderMethod = ['cod', 'cash at delivery', 'cash', 'upi at delivery'].includes(String(order.paymentMethod || '').trim().toLowerCase());
+    if (isCash || req.body.isCash || (isCodOrderMethod && paymentStatus === 'Completed')) {
+      const creditClaim = await OrderModel.findOneAndUpdate(
+        { _id: order._id, codCashCredited: { $ne: true } },
+        { $set: { codCashCredited: true, codCashCreditedAt: new Date() } },
+        { new: true }
+      );
+
+      if (creditClaim) {
+        if (order.cashPersonId) {
+          await CashCollectorModel.findByIdAndUpdate(order.cashPersonId, {
+            $inc: { amount: Number(order.totalAmount) || 0 }
+          });
+          order.codCollectionStatus = 'Collected';
+          order.codCollectedAmount = Number(order.totalAmount) || 0;
+          order.codCollectedAt = new Date();
+        } else if (order.driverId) {
+          const driver = await DriverModel.findById(order.driverId);
+          if (driver && driver.cashManagement) {
+            await DriverModel.findByIdAndUpdate(order.driverId, {
+              $inc: { wallet: Number(order.totalAmount) || 0 }
+            });
+            order.codCollectionStatus = 'Collected';
+            order.codCollectedAmount = Number(order.totalAmount) || 0;
+            order.codCollectedAt = new Date();
+          } else {
+            order.codCollectionStatus = 'Disputed';
+            order.codRemarks = 'WARNING: Delivered COD cash without Cash Management permission on driver';
+          }
         }
       }
       order.paymentMethod = 'Cash';
       order.paymentStatus = 'Completed';
+      order.codCashCredited = true;
       order.paidAt = new Date();
     } else if (paymentStatus) {
       order.paymentStatus = paymentStatus;
@@ -3167,6 +3323,11 @@ router.put('/:id/items/:itemId/return-status', protect, async (req, res) => {
 // @desc    Admin assigns a driver for return pickup and generates OTPs
 router.put('/:id/assign-return-driver', protect, async (req, res) => {
   try {
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    if (!isAdmin) {
+      return res.status(403).json({ message: '403 Forbidden: Only Admins can assign return drivers.' });
+    }
+
     const { driverId } = req.body;
     const { Order: OrderModel } = getModels(req);
     const order = await OrderModel.findById(req.params.id);
@@ -3201,7 +3362,7 @@ router.put('/:id/assign-return-driver', protect, async (req, res) => {
 });
 
 // @route   PUT /api/orders/:id/return-pickup
-// @desc    Driver picks up items from customer
+// @desc    Driver picks up items from customer (Assigned Return Driver or Admin)
 router.put('/:id/return-pickup', protect, async (req, res) => {
   try {
     const { otp } = req.body;
@@ -3209,7 +3370,16 @@ router.put('/:id/return-pickup', protect, async (req, res) => {
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
-    if (order.returnCustomerOtp !== otp) {
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAssignedReturnDriver = req.user?.role === 'driver' && order.returnDriverId?.toString() === req.user._id.toString();
+    if (!isAdmin && !isAssignedReturnDriver) {
+      return res.status(403).json({ message: '403 Forbidden: Not authorized to execute return pickup for this order.' });
+    }
+
+    if (!order.returnCustomerOtp) {
+      return res.status(400).json({ message: 'Return customer OTP is missing or has already been verified.' });
+    }
+    if (!otp || String(order.returnCustomerOtp).trim() !== String(otp).trim()) {
       return res.status(400).json({ message: 'Invalid customer return OTP' });
     }
 
@@ -3223,6 +3393,7 @@ router.put('/:id/return-pickup', protect, async (req, res) => {
 
     if (updatedCount > 0) {
       order.orderStatus = 'Out for Return';
+      order.returnCustomerOtp = null; // Invalidate after single use
     }
 
     await order.save();
@@ -3242,7 +3413,7 @@ router.put('/:id/return-pickup', protect, async (req, res) => {
 });
 
 // @route   PUT /api/orders/:id/return-delivery
-// @desc    Driver drops off items to a specific seller
+// @desc    Driver drops off items to a specific seller (Assigned Return Driver or Admin)
 router.put('/:id/return-delivery', protect, async (req, res) => {
   try {
     const { sellerId, otp } = req.body;
@@ -3250,11 +3421,23 @@ router.put('/:id/return-delivery', protect, async (req, res) => {
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
+    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAssignedReturnDriver = req.user?.role === 'driver' && order.returnDriverId?.toString() === req.user._id.toString();
+    if (!isAdmin && !isAssignedReturnDriver) {
+      return res.status(403).json({ message: '403 Forbidden: Not authorized to complete return drop-off for this order.' });
+    }
+
     const sellerPickup = order.sellerReturnPickups.find(sp => sp.sellerId.toString() === sellerId);
     if (!sellerPickup) return res.status(400).json({ message: 'Seller return info not found' });
-    if (sellerPickup.returnOtp !== otp) return res.status(400).json({ message: 'Invalid seller return OTP' });
+    if (sellerPickup.status === 'Returned to Seller' || !sellerPickup.returnOtp) {
+      return res.status(400).json({ message: 'Return drop-off OTP has already been verified for this seller' });
+    }
+    if (!otp || String(sellerPickup.returnOtp).trim() !== String(otp).trim()) {
+      return res.status(400).json({ message: 'Invalid seller return OTP' });
+    }
 
     sellerPickup.status = 'Returned to Seller';
+    sellerPickup.returnOtp = null; // Invalidate after single use
 
     order.items.forEach(item => {
       if (item.returnStatus === 'Picked Up from Customer' && item.seller.sellerId.toString() === sellerId) {
