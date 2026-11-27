@@ -126,6 +126,21 @@ router.post('/login', async (req, res) => {
     const { locationId } = req.body;
     logToFile(`Request body locationId: ${locationId}`);
 
+    const resolveLocationById = async (locId) => {
+      if (!locId) return null;
+      let loc = await Location.findById(locId).catch(() => null);
+      if (!loc && typeof getCentralConn === 'function') {
+        try {
+          const centralConn = await getCentralConn();
+          const CentralLocation = centralConn.models.Location || centralConn.model('Location', Location.schema);
+          loc = await CentralLocation.findById(locId);
+        } catch (e) { /* ignore central lookup error */ }
+      }
+      return loc;
+    };
+
+    const getLocationDbName = (loc) => loc?.dbName || `zudo-${(loc?.city || '').toLowerCase().replace(/\s+/g, '-')}`;
+
     if (admin) {
       logToFile(`Admin found. Role: ${admin.role}, assigned locationId: ${admin.locationId}`);
       if (req.isTenant) {
@@ -135,27 +150,27 @@ router.post('/login', async (req, res) => {
       }
       // If the admin has a specific location assigned
       else if (admin.locationId) {
-        const location = await Location.findById(admin.locationId);
+        const location = await resolveLocationById(admin.locationId);
         if (location) {
-          tenantDbName = `zudo-${location.city.toLowerCase().replace(/\s+/g, '-')}`;
+          tenantDbName = getLocationDbName(location);
           isTenantAdmin = true;
           logToFile(`Resolved location from global admin's assigned locationId: ${tenantDbName}`);
         }
       }
       // If it's a Super Admin switching context with selected locationId
       else if (locationId) {
-        const location = await Location.findById(locationId);
+        const location = await resolveLocationById(locationId);
         if (location) {
-          tenantDbName = `zudo-${location.city.toLowerCase().replace(/\s+/g, '-')}`;
+          tenantDbName = getLocationDbName(location);
           isTenantAdmin = true;
           logToFile(`Resolved location from context locationId: ${tenantDbName}`);
         }
       }
     } else if (locationId) {
       // 2. Check if the user exists in the tenant's specific database
-      const location = await Location.findById(locationId);
+      const location = await resolveLocationById(locationId);
       if (location) {
-        tenantDbName = `zudo-${location.city.toLowerCase().replace(/\s+/g, '-')}`;
+        tenantDbName = getLocationDbName(location);
         const tenantConn = await connectDBByLocation(locationId, tenantDbName);
         const TenantAdmin = tenantConn.models.Admin || tenantConn.model('Admin', Admin.schema);
         admin = await TenantAdmin.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
@@ -173,7 +188,7 @@ router.post('/login', async (req, res) => {
       const LocationModel = req.models?.Location || Location;
       const locations = await LocationModel.find({ isActive: true });
       for (const loc of locations) {
-        const tempDbName = `zudo-${loc.city.toLowerCase().replace(/\s+/g, '-')}`;
+        const tempDbName = getLocationDbName(loc);
         const tenantConn = await connectDBByLocation(loc._id.toString(), tempDbName);
         const TenantAdmin = tenantConn.models.Admin || tenantConn.model('Admin', Admin.schema);
         admin = await TenantAdmin.findOne({ email: new RegExp(`^${emailToSearch}$`, 'i') });
@@ -199,12 +214,14 @@ router.post('/login', async (req, res) => {
       const isMatch = await admin.comparePassword(password);
       logToFile(`User found: ${admin.email} (Role: ${admin.role}). Password comparison result: ${isMatch}`);
       if (isMatch) {
-        // Increment tokenVersion on login for security
-        admin.tokenVersion = (admin.tokenVersion || 0) + 1;
-        await admin.save();
+        // Increment tokenVersion atomically so legacy role docs never fail full-doc validation
+        const nextTokenVersion = (admin.tokenVersion || 0) + 1;
+        await admin.constructor.updateOne({ _id: admin._id }, { $set: { tokenVersion: nextTokenVersion } });
+        admin.tokenVersion = nextTokenVersion;
 
         // For Super Admins switching context, we use the selected locationId
-        const effectiveLocationId = (admin.role === 'super_admin' && !admin.locationId && locationId)
+        const isSuperRole = ['super_admin', 'superadmin'].includes(String(admin.role || '').toLowerCase());
+        const effectiveLocationId = (isSuperRole && !admin.locationId && locationId)
           ? locationId
           : admin.locationId;
 
