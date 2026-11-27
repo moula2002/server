@@ -264,6 +264,9 @@ router.post('/register-token', protect, async (req, res) => {
   }
 });
 
+// Deduplicate delayed exit/cart-abandon notifications per token + type
+const pendingExitTimers = new Map();
+
 // @route   POST /api/notifications/trigger-exit
 // @desc    Trigger a delayed exit intent or cart abandonment notification
 router.post('/trigger-exit', async (req, res) => {
@@ -287,10 +290,17 @@ router.post('/trigger-exit', async (req, res) => {
       return res.status(400).json({ message: 'Invalid exit type' });
     }
 
+    const timerKey = `${fcmToken}:${type}`;
+    if (pendingExitTimers.has(timerKey)) {
+      clearTimeout(pendingExitTimers.get(timerKey));
+      pendingExitTimers.delete(timerKey);
+    }
+
     console.log(`[FCM] Queued delayed notification (${type}) for token: ${fcmToken} in 1 minute.`);
 
     // Schedule the notification with a 1-minute delay (60,000 ms)
-    setTimeout(async () => {
+    const timerId = setTimeout(async () => {
+      pendingExitTimers.delete(timerKey);
       try {
         console.log(`
 ┌──────────────────────────────────────────────────────────┐
@@ -340,6 +350,8 @@ router.post('/trigger-exit', async (req, res) => {
         console.error('[ERROR] Failed to process delayed notification timeout:', timeoutErr);
       }
     }, 60 * 1000);
+
+    pendingExitTimers.set(timerKey, timerId);
 
     res.json({ message: 'Notification queued successfully' });
   } catch (error) {

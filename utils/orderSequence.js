@@ -16,7 +16,7 @@ async function getNextOrderNumber(CounterModel = Counter, OrderModel = null) {
   let counter = await Model.findByIdAndUpdate(
     'orderNumber',
     { $inc: { seq: 1 } },
-    { new: true, upsert: false }
+    { returnDocument: 'after', upsert: false }
   );
 
   // 2. If the counter does not exist yet, initialize it safely based on existing orders
@@ -39,14 +39,14 @@ async function getNextOrderNumber(CounterModel = Counter, OrderModel = null) {
       counter = await Model.findByIdAndUpdate(
         'orderNumber',
         { $setOnInsert: { seq: startingSeq + 1 } },
-        { new: true, upsert: true }
+        { returnDocument: 'after', upsert: true }
       );
     } catch (err) {
       // If concurrent insert occurred, increment it
       counter = await Model.findByIdAndUpdate(
         'orderNumber',
         { $inc: { seq: 1 } },
-        { new: true, upsert: true }
+        { returnDocument: 'after', upsert: true }
       );
     }
   }
