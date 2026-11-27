@@ -92,6 +92,8 @@ app.use('/api/sellers', require('./routes/sellers'));
 app.use('/api/sellers', require('./routes/sellerHistory'));
 app.use('/api/cash', require('./routes/cash'));
 app.use('/api/cashcollectors', require('./routes/cashCollectors'));
+app.use('/api/cash-collectors', require('./routes/cashCollectors'));
+app.use('/api/cashcollector', require('./routes/cashCollectors'));
 app.use('/api/contact', require('./routes/contact'));
 app.use('/api/locations', require('./routes/locations'));
 app.use('/api/users', require('./routes/users'));
