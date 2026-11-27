@@ -601,7 +601,7 @@ router.put('/verify-b2b/:id', protect, async (req, res) => {
           userId: user._id,
           title: 'Account Verified 🎉',
           message: 'Your B2B account has been verified by the admin. You can now access all B2B features!',
-          type: 'system'
+          type: 'success'
         });
       }
     } catch (notifErr) {
