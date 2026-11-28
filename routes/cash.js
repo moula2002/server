@@ -146,20 +146,35 @@ router.post('/', protect, requireAdmin, async (req, res) => {
       CashCollectorModel = CashCollector;
     }
 
+    // Never trust manually entered admin collection amounts; derive from Order if orderId is given, else 0
+    let derivedAmount = 0;
+    let derivedStatus = 'Pending';
+    if (orderId && mongoose.Types.ObjectId.isValid(orderId)) {
+      const OrderModel = (CashCollectorModel.db?.models?.Order) || (req.models?.Order) || require('../models/Order');
+      const orderDoc = await OrderModel.findById(orderId).lean();
+      if (!orderDoc) {
+        return res.status(404).json({ message: 'Referenced order not found' });
+      }
+      derivedAmount = Number(orderDoc.codCollectedAmount) || 0;
+      derivedStatus = derivedAmount >= (Number(orderDoc.totalAmount) || 0) && (Number(orderDoc.totalAmount) || 0) > 0
+        ? 'Completed'
+        : 'Pending';
+    }
+
     const newTransaction = new CashCollectorModel({
       type: type || 'B2C',
       name: name || 'Cash Collection',
       phone: phone || '',
       email,
       password,
-      amount: amount !== undefined ? Number(amount) : 0,
+      amount: derivedAmount,
       description: description || '',
       paymentMethod: paymentMethod || 'Cash',
       otp: otp ? String(otp) : undefined,
       driverId: driverId || undefined,
       orderId: orderId || undefined,
-      status: status || 'Settled',
-      verification: verification || (otp ? `OTP: ${otp}` : (password ? 'Password Verified' : 'Manual Entry')),
+      status: derivedStatus,
+      verification: verification || (otp ? `OTP: ${otp}` : (password ? 'Password Verified' : 'Collector Assigned')),
       settledBy: settledBy || (req.user?.name || req.user?.email || 'Admin'),
       date: date ? new Date(date) : new Date()
     });
@@ -233,7 +248,7 @@ router.put('/:id', protect, requireAdmin, async (req, res) => {
     if (phone !== undefined) transaction.phone = phone;
     if (email !== undefined) transaction.email = email;
     if (password) transaction.password = password;
-    if (amount !== undefined) transaction.amount = Number(amount);
+    // Manual amount editing is disabled; collected amounts are tracked automatically from collector confirmations.
     if (description !== undefined) transaction.description = description;
     if (paymentMethod) transaction.paymentMethod = paymentMethod;
     if (otp !== undefined) transaction.otp = String(otp);
