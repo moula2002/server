@@ -92,7 +92,7 @@ const processDepositAtomically = async ({ DepositModel, DriverModel, depositId, 
       const updatedDeposit = await DepositModel.findOneAndUpdate(
         { _id: depositId, status: 'Pending' },
         { $set: updateFields },
-        { session, new: true }
+        { session, returnDocument: 'after' }
       );
 
       if (!updatedDeposit) {
@@ -106,7 +106,7 @@ const processDepositAtomically = async ({ DepositModel, DriverModel, depositId, 
         const updatedDriver = await DriverModel.findOneAndUpdate(
           { _id: updatedDeposit.driverId, wallet: { $gte: debitAmount } },
           { $inc: { wallet: -debitAmount } },
-          { session, new: true }
+          { session, returnDocument: 'after' }
         );
 
         if (!updatedDriver) {

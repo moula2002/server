@@ -24,13 +24,36 @@ router.get('/active', async (req, res) => {
 // @desc    Get pincodes for a specific location (from tenant DB)
 router.get('/:id/pincodes', protect, async (req, res) => {
   try {
-    const location = await Location.findById(req.params.id);
-    if (!location) return res.status(404).json({ message: 'Location not found' });
+    const rawId = String(req.params.id || '').trim();
+    if (!rawId || rawId === 'global' || rawId === 'null' || rawId === 'undefined') {
+      return res.json([]);
+    }
 
-    const cityClean = location.city.toLowerCase().replace(/\s+/g, '-');
-    const dbName = `zudo-${cityClean}`;
+    let location = null;
+    if (mongoose.Types.ObjectId.isValid(rawId)) {
+      try {
+        const centralConn = await getCentralConn();
+        const CentralLocation = centralConn.models['Location'] || centralConn.model('Location', Location.schema);
+        location = await CentralLocation.findById(rawId);
+      } catch (e) { /* fallback to default DB */ }
+      if (!location) {
+        location = await Location.findById(rawId).catch(() => null);
+      }
+    }
+
+    let dbName = null;
+    if (location) {
+      const cityClean = (location.city || '').trim().toLowerCase().replace(/\s+/g, '-');
+      dbName = location.dbName || (location.name && location.name.toLowerCase().startsWith('zudo-') ? location.name.toLowerCase() : `zudo-${cityClean}`);
+      if (dbName === 'zudo-bangalore') dbName = 'zudo-bengaluru';
+    } else if (rawId.toLowerCase().startsWith('zudo-')) {
+      dbName = rawId.toLowerCase();
+    } else {
+      return res.status(404).json({ message: 'Location not found' });
+    }
+
     const { connectDBByLocation } = require('../utils/db_manager');
-    const tenantConn = await connectDBByLocation(req.params.id, dbName);
+    const tenantConn = await connectDBByLocation(rawId, dbName);
     
     const PincodeModel = tenantConn.models.Pincode || tenantConn.model('Pincode', Pincode.schema);
     const pincodes = await PincodeModel.find({ isActive: true }).lean();
@@ -39,9 +62,20 @@ router.get('/:id/pincodes', protect, async (req, res) => {
     const uniquePincodes = [];
     const seen = new Set();
     for (const pc of pincodes) {
-      if (!seen.has(pc.code)) {
+      if (pc.code && !seen.has(pc.code)) {
         seen.add(pc.code);
         uniquePincodes.push(pc);
+      }
+    }
+
+    // Fallback to comma-separated pincode string on the Location document if Pincode collection is empty
+    if (uniquePincodes.length === 0 && location && location.pincode) {
+      const fallbackCodes = String(location.pincode).split(',').map(s => s.trim()).filter(Boolean);
+      for (const code of fallbackCodes) {
+        if (!seen.has(code)) {
+          seen.add(code);
+          uniquePincodes.push({ code, locationId: location._id, isActive: true });
+        }
       }
     }
     

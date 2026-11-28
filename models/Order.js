@@ -234,6 +234,14 @@ const orderSchema = new mongoose.Schema({
   pickupCode: {
     type: String
   },
+  pickupCodeExpiresAt: {
+    type: Date,
+    default: null
+  },
+  pickupCodeVerifiedAt: {
+    type: Date,
+    default: null
+  },
   sellerPickups: [{
     sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
     status: { type: String, default: 'Pending' },

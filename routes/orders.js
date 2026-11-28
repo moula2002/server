@@ -1026,9 +1026,14 @@ const buildOrderPickupPoints = (order) => {
 
 // @route   GET /api/orders/admin/pickups
 // @desc    Get all pickup records with seller pickup points, OTPs, and driver assignments (Admin)
-// @access  Private
+// @access  Private (Admin)
 router.get('/admin/pickups', protect, async (req, res) => {
   try {
+    const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    if (!isAdmin) {
+      return res.status(403).json({ message: '403 Forbidden: Admin authorization required' });
+    }
+
     let orderFilter = {};
     if (req.portal === 'B2B' || req.portal === 'B2C') {
       const { User: UserModel } = getModels(req);
@@ -1057,6 +1062,8 @@ router.get('/admin/pickups', protect, async (req, res) => {
       const isReturnPickup = (order.returnStatus === 'Approved') ||
         ['Return Driver Assigned', 'Out for Return', 'Return Picked Up'].includes(order.orderStatus) ||
         (order.items || []).some(i => ['Return Approved', 'Picked Up from Customer', 'Returned to Seller'].includes(i.returnStatus));
+      const userRole = String(order.userId?.role || '').toLowerCase();
+      const customerSegment = userRole === 'b2b' ? 'B2B' : 'B2C';
 
       return {
         _id: order._id,
@@ -1065,6 +1072,7 @@ router.get('/admin/pickups', protect, async (req, res) => {
         orderStatus: order.orderStatus,
         returnStatus: order.returnStatus || 'None',
         isReturnPickup,
+        customerSegment,
         pickupCode: order.pickupCode || '',
         deliveryOtp: order.deliveryOtp || null,
         returnCustomerOtp: order.returnCustomerOtp || null,
@@ -1073,8 +1081,9 @@ router.get('/admin/pickups', protect, async (req, res) => {
         driverId: order.driverId || null,
         returnDriverId: order.returnDriverId || null,
         customer: {
-          name: order.userId?.name || order.shippingAddress?.name || 'Customer',
+          name: order.userId?.businessName || order.userId?.companyName || order.userId?.name || order.shippingAddress?.name || 'Customer',
           phone: order.userId?.phone || order.shippingAddress?.phone || '',
+          role: userRole || 'b2c',
           address: order.shippingAddress ? `${order.shippingAddress.addressLine || ''}, ${order.shippingAddress.city || ''} ${order.shippingAddress.pincode || ''}`.trim() : ''
         },
         totalAmount: order.totalAmount || 0,
@@ -1085,6 +1094,14 @@ router.get('/admin/pickups', protect, async (req, res) => {
         createdAt: order.createdAt,
         updatedAt: order.updatedAt
       };
+    });
+
+    // Prioritize B2B orders first, then newest first
+    enrichedPickups.sort((a, b) => {
+      const aB2B = a.customerSegment === 'B2B' ? 0 : 1;
+      const bB2B = b.customerSegment === 'B2B' ? 0 : 1;
+      if (aB2B !== bB2B) return aB2B - bB2B;
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
     });
 
     res.json(enrichedPickups);
@@ -1099,7 +1116,7 @@ router.get('/admin/pickups', protect, async (req, res) => {
 // @access  Private (Admin)
 router.put('/:id/pickup-status', protect, async (req, res) => {
   try {
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
     if (!isAdmin) {
       return res.status(403).json({ message: '403 Forbidden: Admin authorization required' });
     }
@@ -1179,7 +1196,7 @@ router.post('/:id/verify-pickup-otp', protect, async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
     const isAssignedDriver = req.user?.role === 'driver' && order.driverId?.toString() === req.user._id.toString();
     if (!isAdmin && !isAssignedDriver) {
       return res.status(403).json({ message: '403 Forbidden: Only the assigned driver or admin can verify seller pickup OTP.' });
@@ -1189,16 +1206,31 @@ router.post('/:id/verify-pickup-otp', protect, async (req, res) => {
       return res.status(400).json({ message: `Cannot verify pickup for an order that is ${order.orderStatus}.` });
     }
 
+    if (order.pickupCodeExpiresAt && new Date() > new Date(order.pickupCodeExpiresAt)) {
+      return res.status(400).json({ message: 'Seller Pickup OTP has expired.' });
+    }
+
     const cleanOtp = String(otp).trim();
     if (!Array.isArray(order.sellerPickups) || order.sellerPickups.length === 0) {
+      if (sellerId) {
+        const cleanSellerId = sellerId.toString();
+        const belongsToOrder =
+          (order.sellerId && order.sellerId.toString() === cleanSellerId) ||
+          (Array.isArray(order.items) && order.items.some(item => item.seller?.sellerId?.toString() === cleanSellerId));
+        if (!belongsToOrder) {
+          return res.status(400).json({ message: 'Seller ID does not belong to this order.' });
+        }
+      }
+      if (order.pickupCodeVerifiedAt) {
+        return res.status(400).json({ message: 'Pickup OTP has already been verified.' });
+      }
       if (!order.pickupCode || String(order.pickupCode).trim() !== cleanOtp) {
         return res.status(400).json({ message: 'Invalid Seller Pickup OTP.' });
       }
-      if (order.orderStatus === 'Picked Up') {
-        return res.status(400).json({ message: 'Pickup OTP has already been verified.' });
-      }
       const prevStatus = order.orderStatus;
       order.orderStatus = 'Picked Up';
+      order.pickupCode = null; // Invalidate to prevent reuse
+      order.pickupCodeVerifiedAt = new Date();
       await order.save();
       await recordSellerHistoryEvent(req, order, {
         activityType: 'pickups',
@@ -1221,7 +1253,7 @@ router.post('/:id/verify-pickup-otp', protect, async (req, res) => {
       return res.status(400).json({ message: 'sellerId is required for multi-seller pickup verification, or seller pickup not found.' });
     }
 
-    if (['Picked Up', 'Out for Delivery', 'Delivered'].includes(sp.status)) {
+    if (sp.pickupCode === null && ['Picked Up', 'Out for Delivery', 'Delivered'].includes(sp.status)) {
       return res.status(400).json({ message: 'Pickup OTP already verified for this seller.' });
     }
 
@@ -1422,7 +1454,7 @@ router.get('/driver/history', protect, async (req, res) => {
 // @desc    Ship an order and assign driver
 router.put('/:id/ship', protect, async (req, res) => {
   try {
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
     if (!isAdmin) {
       return res.status(403).json({ message: '403 Forbidden: Only Admins have permission to assign drivers and dispatch orders.' });
     }
@@ -1939,7 +1971,7 @@ router.put('/:id/payment', protect, async (req, res) => {
       const creditClaim = await OrderModel.findOneAndUpdate(
         { _id: order._id, codCashCredited: { $ne: true } },
         { $set: { codCashCredited: true, codCashCreditedAt: new Date() } },
-        { new: true }
+        { returnDocument: 'after' }
       );
 
       if (creditClaim) {
@@ -2000,7 +2032,7 @@ router.post('/:id/delivery-otp', protect, async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
     const isDriver = req.user?.role === 'driver' && order.driverId?.toString() === req.user._id.toString();
     if (!isAdmin && !isDriver) {
       return res.status(403).json({ message: '403 Forbidden: Only Admin or Assigned Driver can generate delivery OTP.' });
@@ -2129,7 +2161,7 @@ router.post('/:id/verify-delivery-otp', protect, async (req, res) => {
       const creditClaim = await OrderModel.findOneAndUpdate(
         { _id: order._id, codCashCredited: { $ne: true } },
         { $set: { codCashCredited: true, codCashCreditedAt: new Date() } },
-        { new: true }
+        { returnDocument: 'after' }
       );
 
       if (creditClaim) {
@@ -3025,7 +3057,7 @@ router.post('/:id/return-request', protect, async (req, res) => {
 // @access  Private (Admin only)
 router.put('/:id/return-approve', protect, async (req, res) => {
   try {
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
     if (!isAdmin) {
       return res.status(403).json({ message: '403 Forbidden: Only authorized Admin users can approve returns.' });
     }
@@ -3139,7 +3171,7 @@ router.put('/:id/return-approve', protect, async (req, res) => {
 // @access  Private (Admin only)
 router.put('/:id/return-reject', protect, async (req, res) => {
   try {
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
     if (!isAdmin) {
       return res.status(403).json({ message: '403 Forbidden: Only authorized Admin users can reject returns.' });
     }
@@ -3323,7 +3355,7 @@ router.put('/:id/items/:itemId/return-status', protect, async (req, res) => {
 // @desc    Admin assigns a driver for return pickup and generates OTPs
 router.put('/:id/assign-return-driver', protect, async (req, res) => {
   try {
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
     if (!isAdmin) {
       return res.status(403).json({ message: '403 Forbidden: Only Admins can assign return drivers.' });
     }
@@ -3370,7 +3402,7 @@ router.put('/:id/return-pickup', protect, async (req, res) => {
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
     const isAssignedReturnDriver = req.user?.role === 'driver' && order.returnDriverId?.toString() === req.user._id.toString();
     if (!isAdmin && !isAssignedReturnDriver) {
       return res.status(403).json({ message: '403 Forbidden: Not authorized to execute return pickup for this order.' });
@@ -3421,7 +3453,7 @@ router.put('/:id/return-delivery', protect, async (req, res) => {
     const order = await OrderModel.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
-    const isAdmin = !!req.admin || ['super_admin', 'normal_admin', 'manager', 'logistics', 'sales', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
+    const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
     const isAssignedReturnDriver = req.user?.role === 'driver' && order.returnDriverId?.toString() === req.user._id.toString();
     if (!isAdmin && !isAssignedReturnDriver) {
       return res.status(403).json({ message: '403 Forbidden: Not authorized to complete return drop-off for this order.' });
