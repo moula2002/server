@@ -1212,6 +1212,15 @@ router.post('/:id/verify-pickup-otp', protect, async (req, res) => {
 
     const cleanOtp = String(otp).trim();
     if (!Array.isArray(order.sellerPickups) || order.sellerPickups.length === 0) {
+      if (sellerId) {
+        const cleanSellerId = sellerId.toString();
+        const belongsToOrder =
+          (order.sellerId && order.sellerId.toString() === cleanSellerId) ||
+          (Array.isArray(order.items) && order.items.some(item => item.seller?.sellerId?.toString() === cleanSellerId));
+        if (!belongsToOrder) {
+          return res.status(400).json({ message: 'Seller ID does not belong to this order.' });
+        }
+      }
       if (order.pickupCodeVerifiedAt) {
         return res.status(400).json({ message: 'Pickup OTP has already been verified.' });
       }
