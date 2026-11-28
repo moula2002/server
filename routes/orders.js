@@ -1206,16 +1206,22 @@ router.post('/:id/verify-pickup-otp', protect, async (req, res) => {
       return res.status(400).json({ message: `Cannot verify pickup for an order that is ${order.orderStatus}.` });
     }
 
+    if (order.pickupCodeExpiresAt && new Date() > new Date(order.pickupCodeExpiresAt)) {
+      return res.status(400).json({ message: 'Seller Pickup OTP has expired.' });
+    }
+
     const cleanOtp = String(otp).trim();
     if (!Array.isArray(order.sellerPickups) || order.sellerPickups.length === 0) {
+      if (order.pickupCodeVerifiedAt) {
+        return res.status(400).json({ message: 'Pickup OTP has already been verified.' });
+      }
       if (!order.pickupCode || String(order.pickupCode).trim() !== cleanOtp) {
         return res.status(400).json({ message: 'Invalid Seller Pickup OTP.' });
       }
-      if (order.orderStatus === 'Picked Up') {
-        return res.status(400).json({ message: 'Pickup OTP has already been verified.' });
-      }
       const prevStatus = order.orderStatus;
       order.orderStatus = 'Picked Up';
+      order.pickupCode = null; // Invalidate to prevent reuse
+      order.pickupCodeVerifiedAt = new Date();
       await order.save();
       await recordSellerHistoryEvent(req, order, {
         activityType: 'pickups',
@@ -1238,7 +1244,7 @@ router.post('/:id/verify-pickup-otp', protect, async (req, res) => {
       return res.status(400).json({ message: 'sellerId is required for multi-seller pickup verification, or seller pickup not found.' });
     }
 
-    if (['Picked Up', 'Out for Delivery', 'Delivered'].includes(sp.status)) {
+    if (sp.pickupCode === null && ['Picked Up', 'Out for Delivery', 'Delivered'].includes(sp.status)) {
       return res.status(400).json({ message: 'Pickup OTP already verified for this seller.' });
     }
 
