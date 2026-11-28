@@ -195,10 +195,7 @@ router.get('/profile', protect, async (req, res) => {
   }
 });
 
-// @route   GET /api/cashcollectors/assigned-orders
-// @desc    Get orders assigned to the logged-in cash collector (or ?collectorId=...)
-// @access  Private
-router.get('/assigned-orders', protect, async (req, res) => {
+const handleGetAssignedOrders = async (req, res) => {
   try {
     const collectorId = req.query.collectorId || req.user._id;
     const OrderModel = req.models?.Order || Order;
@@ -225,6 +222,14 @@ router.get('/assigned-orders', protect, async (req, res) => {
       }
       return {
         ...o,
+        orderRef: o.orderRef || (o.orderNumber ? String(o.orderNumber).padStart(5, '0') : o._id.toString().slice(-6).toUpperCase()),
+        customerName: o.userId?.businessName || o.userId?.companyName || o.userId?.name || o.shippingAddress?.name || 'Customer',
+        customerPhone: o.userId?.phone || o.shippingAddress?.phone || '',
+        customerAddress: o.shippingAddress
+          ? [o.shippingAddress.addressLine || o.shippingAddress.address || o.shippingAddress.street, o.shippingAddress.city, o.shippingAddress.state, o.shippingAddress.pincode].filter(Boolean).join(', ')
+          : '',
+        customerLat: o.shippingAddress?.lat ?? null,
+        customerLng: o.shippingAddress?.lng ?? null,
         expectedAmount,
         collectedAmount,
         pendingAmount,
@@ -236,7 +241,12 @@ router.get('/assigned-orders', protect, async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
-});
+};
+
+// @route   GET /api/cashcollectors/assigned-orders
+// @desc    Get orders assigned to the logged-in cash collector (or ?collectorId=...)
+// @access  Private
+router.get('/assigned-orders', protect, handleGetAssignedOrders);
 
 const requireAdminRole = (req, res, next) => {
   const isAdmin = !!req.admin || ['super_admin', 'superadmin', 'normal_admin', 'manager', 'logistics', 'sales', 'accounting', 'b2b_admin', 'b2c_admin'].includes(req.user?.role);
@@ -275,6 +285,11 @@ const computeOrderTask = (o) => {
     customerSegment: String(o.userId?.role || '').toLowerCase() === 'b2b' ? 'B2B' : 'B2C',
     customerName: o.userId?.businessName || o.userId?.companyName || o.userId?.name || o.shippingAddress?.name || 'Customer',
     customerPhone: o.userId?.phone || o.shippingAddress?.phone || '',
+    customerAddress: o.shippingAddress
+      ? [o.shippingAddress.addressLine || o.shippingAddress.address || o.shippingAddress.street, o.shippingAddress.city, o.shippingAddress.state, o.shippingAddress.pincode].filter(Boolean).join(', ')
+      : '',
+    customerLat: o.shippingAddress?.lat ?? null,
+    customerLng: o.shippingAddress?.lng ?? null,
     assignedCollectorId: assignedObj?._id || assignedObj || null,
     assignedCollectorName: assignedObj?.name || null,
     assignedCollectorPhone: assignedObj?.phone || null,
@@ -347,7 +362,7 @@ router.get('/reconciliation', protect, requireAdminRole, async (req, res) => {
         ensureBucket(c._id, c.name, c.phone, 'Cash Collector', c.type || 'B2B');
       }
     });
-    drivers.filter(d => d.cashManagement).forEach(d => {
+    drivers.forEach(d => {
       ensureBucket(d._id, d.name, d.phone, 'Driver', String(d.type || 'b2c').toUpperCase());
     });
 
@@ -394,7 +409,8 @@ router.get('/reconciliation', protect, requireAdminRole, async (req, res) => {
       collectorSummaries,
       tasks: assignedTasks,
       eligibleOrders: tasks.filter(t => t.collectionStatus !== 'Completed' && t.collectionStatus !== 'Cancelled'),
-      collectors: collectors.map(c => ({ _id: c._id, name: c.name, phone: c.phone, email: c.email, type: c.type, status: c.status }))
+      collectors: collectors.map(c => ({ _id: c._id, name: c.name, phone: c.phone, email: c.email, type: c.type, status: c.status })),
+      drivers: drivers.map(d => ({ _id: d._id, name: d.name, phone: d.phone, vehicleNo: d.vehicleNo || d.vehicleDetails, type: d.type, cashManagement: Boolean(d.cashManagement), wallet: d.wallet || 0 }))
     });
   } catch (error) {
     console.error('Reconciliation error:', error);
@@ -431,10 +447,12 @@ router.post('/assign', protect, requireAdminRole, async (req, res) => {
     }
 
     let assigneeName = '';
+    const isReassign = Boolean(order.driverId || order.cashPersonId);
     if (collectorType === 'driver') {
       const driver = await DriverModel.findById(collectorId).select('name cashManagement');
       if (!driver) return res.status(404).json({ message: 'Driver not found' });
       order.driverId = collectorId;
+      order.cashPersonId = null;
       assigneeName = driver.name;
     } else {
       const collector = await CashCollectorModel.findById(collectorId).select('name');
@@ -453,8 +471,8 @@ router.post('/assign', protect, requireAdminRole, async (req, res) => {
       collectorId,
       collectorName: assigneeName,
       collectorRole: collectorType === 'driver' ? 'Driver' : 'Cash Collector',
-      status: 'Pending',
-      notes: notes || `Assigned to ${assigneeName} (Expected ₹${expectedAmount})`,
+      status: isReassign ? 'Reassigned' : 'Pending',
+      notes: notes || `${isReassign ? 'Reassigned' : 'Assigned'} to ${assigneeName} (Expected ₹${expectedAmount})`,
       collectedAt: new Date()
     });
 
@@ -475,10 +493,7 @@ router.post('/assign', protect, requireAdminRole, async (req, res) => {
   }
 });
 
-// @route   POST /api/cashcollectors/confirm-collection
-// @desc    Confirm full, partial, or failed/cancelled cash collection from Cash Collector / Driver app
-// @access  Private (Assigned Cash Collector, Assigned Driver, or Admin)
-router.post('/confirm-collection', protect, async (req, res) => {
+const handleConfirmCollection = async (req, res) => {
   try {
     const { orderId, collectedAmount: rawCollectedAmount, action = 'collect', notes = '' } = req.body;
     if (!orderId) {
@@ -599,7 +614,15 @@ router.post('/confirm-collection', protect, async (req, res) => {
     console.error('Confirm collection error:', error);
     res.status(500).json({ message: error.message });
   }
-});
+};
+
+// @route   POST /api/cashcollectors/confirm-collection
+// @desc    Confirm full, partial, or failed/cancelled cash collection from Cash Collector / Driver app
+// @access  Private (Assigned Cash Collector, Assigned Driver, or Admin)
+router.post('/confirm-collection', protect, handleConfirmCollection);
+
+router.handleGetAssignedOrders = handleGetAssignedOrders;
+router.handleConfirmCollection = handleConfirmCollection;
 
 // @route   GET /api/cashcollectors
 // @desc    Get all cash collectors (supports global multi-tenant aggregation & single-tenant)

@@ -419,4 +419,20 @@ router.post('/verify-otp', protect, async (req, res) => {
   }
 });
 
+// @route   GET /api/drivers/cash-collections
+// @desc    Get assigned cash collection tasks for the authenticated Driver
+// @access  Private (Driver or Admin)
+router.get('/cash-collections', protect, (req, res) => {
+  const cashCollectorsRouter = require('./cashCollectors');
+  return cashCollectorsRouter.handleGetAssignedOrders(req, res);
+});
+
+// @route   POST /api/drivers/cash-collections/confirm
+// @desc    Confirm full, partial, or failed/cancelled cash collection from Driver App
+// @access  Private (Assigned Driver or Admin)
+router.post('/cash-collections/confirm', protect, (req, res) => {
+  const cashCollectorsRouter = require('./cashCollectors');
+  return cashCollectorsRouter.handleConfirmCollection(req, res);
+});
+
 module.exports = router;
