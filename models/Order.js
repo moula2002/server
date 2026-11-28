@@ -147,13 +147,26 @@ const orderSchema = new mongoose.Schema({
   // COD Payment Management
   codCollectionStatus: {
     type: String,
-    enum: ['Not Collected', 'Collected', 'Verified', 'Disputed'],
+    enum: ['Not Collected', 'Pending', 'Partial', 'Collected', 'Verified', 'Disputed', 'Failed', 'Cancelled'],
     default: 'Not Collected'
   },
   codCollectedAmount: {
     type: Number,
     default: 0
   },
+  codAssignedAt: {
+    type: Date,
+    default: null
+  },
+  codCollectionHistory: [{
+    amount: { type: Number, default: 0 },
+    collectorId: { type: mongoose.Schema.Types.ObjectId },
+    collectorName: { type: String, default: null },
+    collectorRole: { type: String, default: null },
+    status: { type: String, default: 'Pending' },
+    notes: { type: String, default: '' },
+    collectedAt: { type: Date, default: Date.now }
+  }],
   codCollectedAt: {
     type: Date,
     default: null
